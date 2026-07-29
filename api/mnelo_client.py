@@ -16,6 +16,7 @@ import sys
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,12 +35,31 @@ DEFAULT_SSE_URL = 'http://127.0.0.1:8086/sse'
 
 
 class MneloClient:
-    """ MCP 客户端 — 7 个工具的同步包装."""
+    """MCP 客户端 — 7 个工具的同步包装."""
 
-    def __init__(self, sse_url: str = DEFAULT_SSE_URL, timeout: float = 30.0):
+    def __init__(self, sse_url: str = DEFAULT_SSE_URL, timeout: float = 30.0,
+                 auth_token: Optional[str] = None):
         self.sse_url = sse_url
         self.timeout = timeout
         self._session: Optional[Any] = None
+        # [2026-07-22 P0-fix] Bearer token auth (matches server load_auth_token).
+        # Priority: explicit kwarg -> MNEOLO_AUTH_TOKEN env -> ~/.config/mnelo/auth_token
+        # Bug history: missing token caused server 401 and silent recall failures.
+        self._auth_token = (
+            auth_token
+            or os.environ.get('MNEOLO_AUTH_TOKEN')
+            or self._read_token_file()
+        )
+
+    def _read_token_file(self) -> Optional[str]:
+        """~/.config/mnelo/auth_token 文件读取, mode 0600 ownership-preserving."""
+        token_path = Path.home() / '.config' / 'mnelo' / 'auth_token'
+        try:
+            if token_path.is_file():
+                return token_path.read_text().strip()
+        except Exception as e:
+            logger.debug(f'Auth token file unreadable: {e}')
+        return None
 
     def _ensure_mcp(self) -> Tuple[Any, Any]:
         """: 检查 MCP 库可用, 返回 (ClientSession, sse_client) 类引用."""
@@ -70,18 +90,37 @@ class MneloClient:
         raise last_err if last_err else RuntimeError('mcp call failed')
 
     async def _async_call(self, tool_name: str, arguments: Dict, ClientSession, sse_client):
-        async with sse_client(self.sse_url) as (r, w):
+        # [2026-07-22 P0-fix] Inject Bearer token in SSE handshake headers
+        kwargs = {}
+        if self._auth_token:
+            kwargs['headers'] = {'Authorization': f'Bearer {self._auth_token}'}
+        async with sse_client(self.sse_url, **kwargs) as (r, w):
             async with ClientSession(r, w) as session:
                 await session.initialize()
                 result = await session.call_tool(tool_name, arguments)
-                # : result.content[0].text 是 JSON 字符串
-                if result.content and hasattr(result.content[0], 'text'):
-                    text = result.content[0].text
+                # [2026-07-22 fix] Server returns 2 TextContent blocks:
+                # - [0] = 🌳 echo summary (human-readable one-liner)
+                # - [1] = canonical JSON (machine-parseable)
+                # Old client only read [0] and got an echo string instead of JSON.
+                # Try every block, prefer the one that parses as JSON.
+                if not result.content:
+                    return None
+                last_parsed = None
+                raw_text = None
+                for block in result.content:
+                    if not hasattr(block, 'text'):
+                        continue
+                    text = block.text
+                    raw_text = text
                     try:
-                        return json.loads(text)
+                        last_parsed = json.loads(text)
+                        # Prefer parsed JSON over raw text
+                        if isinstance(last_parsed, (dict, list)):
+                            return last_parsed
                     except (json.JSONDecodeError, TypeError):
-                        return text
-                return None
+                        continue
+                # No JSON block — return raw text
+                return raw_text
 
     # === 7 个工具封装 ===
 
@@ -103,11 +142,29 @@ class MneloClient:
 
     def recall(self, query: str, top_k: int = 5, graph_hops: int = 2,
                filters: Dict = None, strategy: str = 'rrf', asof: str = None) -> List[Dict]:
-        """: 3 路 + RRF 召回. 返回 list of hits."""
+        """3 路 + RRF 召回. 返回 list of hits.
+
+        Each hit dict includes:
+          - chunk_id, content, source, timestamp, importance
+          - method: 'vector' | 'graph' | 'entity' | 'meta'
+          - rrf_score: real RRF fusion score (sum of 1/(k+rank) per lane)
+          - score: alias of rrf_score for back-compat (added 2026-07-28)
+
+        Background: server returns `rrf_score`, not `score`. Callers using
+        `hit.get('score')` previously got 0.0 (default) because the key didn't
+        exist, silently producing empty/zero rankings. Alias added so both
+        field names return the real value.
+        """
         args = {'query': query, 'top_k': top_k, 'graph_hops': graph_hops, 'strategy': strategy}
         if filters: args['filters'] = filters
         if asof: args['asof'] = asof
-        return self._call('memory_recall', args)
+        result = self._call('memory_recall', args)
+        # Alias rrf_score -> score so callers using .get('score') get real values
+        if isinstance(result, list):
+            for hit in result:
+                if isinstance(hit, dict) and 'rrf_score' in hit and 'score' not in hit:
+                    hit['score'] = hit['rrf_score']
+        return result
 
     def relate(self, source_id: str, target_id: str, relation: str,
                weight: float = 1.0, valid_from: str = None, valid_until: str = None,
