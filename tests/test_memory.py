@@ -513,7 +513,49 @@ class TestP0BoundsCheck(unittest.TestCase):
         print("  ✅ _upsert_entity(importance=10.0) INSERT → DB stores 1.0")
 
 
-if __name__ == "__main__":
+class TestRecallScoreFieldAlias(unittest.TestCase):
+    """Lock in: recall() exposes BOTH rrf_score AND score (back-compat alias).
+
+    Background (2026-07-28): the server returns `rrf_score`, not `score`.
+    Callers using `hit.get('score')` previously got 0.0 (default) silently.
+    Alias added so both field names return real values.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from mnelo_client import MneloClient
+        cls.client = MneloClient()
+
+    def test_recall_exposes_rrf_score_field(self):
+        """recall() returns hits where rrf_score is present and > 0."""
+        hits = self.client.recall('mnelo 召回测试', top_k=3)
+        self.assertIsInstance(hits, list)
+        if hits:
+            h = hits[0]
+            self.assertIn('rrf_score', h, 'hit dict missing rrf_score field')
+            self.assertGreater(h['rrf_score'], 0, f"rrf_score should be > 0, got {h['rrf_score']}")
+
+    def test_recall_alias_score_to_rrf_score(self):
+        """hit.get('score') must equal hit.get('rrf_score') (back-compat alias)."""
+        hits = self.client.recall('mnelo 召回测试', top_k=3)
+        if hits:
+            for h in hits[:3]:
+                if 'rrf_score' in h:
+                    self.assertEqual(h.get('score'), h['rrf_score'],
+                                     f"score={h.get('score')} != rrf_score={h['rrf_score']}")
+
+    def test_recall_score_in_realistic_range(self):
+        """rrf_score should be in [0.015, 0.07] — k=60 RRF formula baseline."""
+        hits = self.client.recall('翁氏 D∩W 共振', top_k=10)
+        if hits:
+            for h in hits:
+                if 'rrf_score' in h:
+                    score = h['rrf_score']
+                    self.assertGreater(score, 0.015, f"rrf_score below k=60 baseline: {score}")
+                    self.assertLess(score, 0.07, f"rrf_score suspiciously high: {score}")
+
+
+if __name__ == '__main__':
     # 自定义测试顺序 + 输出
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
@@ -521,6 +563,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestTemporalDimension))
     suite.addTests(loader.loadTestsFromTestCase(TestEntityResolve))
     suite.addTests(loader.loadTestsFromTestCase(TestP0BoundsCheck))
+    suite.addTests(loader.loadTestsFromTestCase(TestRecallScoreFieldAlias))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
