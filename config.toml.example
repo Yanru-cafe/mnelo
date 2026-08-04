@@ -38,3 +38,11 @@ dim = 512
 # 存储目录 (默认 ~/.hermes/memory, 与旧部署向后兼容).
 # 一般无需设置 — 改环境变量 MNELO_MEMORY_DIR / MNELO_MEMORY_DB_PATH 更灵活.
 # dir = '~/.hermes/memory'
+
+[search]
+# 检索索引后端 (DESIGN §3.6/§8.3):
+#   'sqlite_vec' (默认) — vec0, 零额外依赖
+#   'zvec'              — 阿里 zvec (进程内嵌, HNSW+原生FTS). ⚠️ 需较新 CPU
+#                         (AVX2+, 旧 CPU import 即崩) — 后端不可用时自动回落 sqlite_vec
+# 环境变量覆盖: MNELO_MEMORY_SEARCH_BACKEND
+# backend = 'sqlite_vec'
