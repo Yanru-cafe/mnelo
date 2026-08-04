@@ -2329,6 +2329,149 @@ class Memory:
         self._conn.commit()
         return stats
 
+    def _mark_digest_dirty(self) -> None:
+        """[G3 8/4] TASKS_L2_DIGEST §3.3 — dirty 追踪, set meta.digest_dirty=1."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('digest_dirty', '1')"
+        )
+        self._conn.commit()
+
+    def _rebuild_digest(self) -> Optional[str]:
+        """[G4 8/4] TASKS_L2_DIGEST §3.4 — digest chunk 生命周期 + 双时态."""
+        cfg = config.config
+        if not cfg.digest_enabled:
+            return None
+        text, line_refs, truncated = self._build_digest()
+        if not text:
+            return None
+        ts = now()
+        new_id = f"chunk_{ts.replace(':', '').replace('-', '').replace('T', '_')}_digest"
+        metadata = json.dumps({
+            "digest": True,
+            "line_refs": line_refs,
+            "truncated": truncated,
+            "built_at": ts,
+        }, ensure_ascii=False)
+        try:
+            old_row = self._conn.execute(
+                "SELECT value FROM meta WHERE key='digest_chunk_id'"
+            ).fetchone()
+            old_id = old_row["value"] if old_row else None
+            self._exec_clean(
+                """INSERT INTO chunks
+                       (id, content, source, session_id, timestamp, importance,
+                        memory_type, metadata_json, valid_until)
+                   VALUES (?, ?, 'digest', NULL, ?, 1.0, 'fact', ?, NULL)""",
+                (new_id, text, ts, metadata),
+            )
+            if old_id:
+                cur_meta = self._exec_clean(
+                    "SELECT metadata_json FROM chunks WHERE id = ?", (old_id,)
+                ).fetchone()
+                m: Dict[str, Any] = {}
+                if cur_meta and cur_meta["metadata_json"]:
+                    try:
+                        m = json.loads(cur_meta["metadata_json"])
+                    except Exception:
+                        m = {}
+                m["superseded_by"] = new_id
+                m["superseded_at"] = ts
+                self._exec_clean(
+                    "UPDATE chunks SET metadata_json = ?, valid_until = ? WHERE id = ?",
+                    (json.dumps(m, ensure_ascii=False), ts, old_id),
+                )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('digest_chunk_id', ?)",
+                (new_id,),
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('digest_dirty', '0')"
+            )
+            self._conn.commit()
+            return new_id
+        except Exception as e:
+            logger.warning(f"[rebuild_digest] 实战 错误: {e}")
+            return None
+
+    def get_digest(self, ref: Optional[str] = None) -> Dict[str, Any]:
+        """[G5 8/4] TASKS_L2_DIGEST §3.5 — 双模式."""
+        cfg = config.config
+        if not cfg.digest_enabled:
+            return {"enabled": False, "content": "", "line_refs": {}, "truncated": False, "built_at": None}
+        meta_dirty = self._conn.execute(
+            "SELECT value FROM meta WHERE key='digest_dirty'"
+        ).fetchone()
+        is_dirty = meta_dirty and meta_dirty["value"] == "1"
+        chunk_id_row = self._conn.execute(
+            "SELECT value FROM meta WHERE key='digest_chunk_id'"
+        ).fetchone()
+        chunk_id = chunk_id_row["value"] if chunk_id_row else None
+        if is_dirty or not chunk_id:
+            chunk_id = self._rebuild_digest()
+        if not chunk_id:
+            return {"enabled": True, "content": "", "line_refs": {}, "truncated": False, "built_at": None}
+        row = self._exec_clean(
+            "SELECT content, metadata_json FROM chunks WHERE id = ?", (chunk_id,)
+        ).fetchone()
+        if not row:
+            return {"enabled": True, "content": "", "line_refs": {}, "truncated": False, "built_at": None}
+        meta_obj: Dict[str, Any] = {}
+        if row["metadata_json"]:
+            try:
+                meta_obj = json.loads(row["metadata_json"])
+            except Exception:
+                meta_obj = {}
+        line_refs = meta_obj.get("line_refs", {})
+        truncated = meta_obj.get("truncated", False)
+        built_at = meta_obj.get("built_at")
+        if ref is None:
+            return {
+                "enabled": True,
+                "content": row["content"],
+                "chunk_id": chunk_id,
+                "line_refs": line_refs,
+                "truncated": truncated,
+                "built_at": built_at,
+            }
+        ref_ids = line_refs.get(str(ref))
+        if not ref_ids:
+            return {"error": f"ref {ref} not found", "chunk_id": chunk_id}
+        source_chunks = []
+        for rid in ref_ids:
+            if rid.startswith("identity:"):
+                entity_row = self._exec_clean(
+                    "SELECT id, name, summary, kind, importance FROM entities WHERE id = ?",
+                    (rid,),
+                ).fetchone()
+                if entity_row:
+                    source_chunks.append({
+                        "type": "entity",
+                        "id": entity_row["id"],
+                        "name": entity_row["name"],
+                        "summary": entity_row["summary"],
+                        "importance": entity_row["importance"],
+                    })
+            else:
+                ck_row = self._exec_clean(
+                    "SELECT id, content, memory_type, importance, timestamp FROM chunks WHERE id = ?",
+                    (rid,),
+                ).fetchone()
+                if ck_row:
+                    source_chunks.append({
+                        "type": "chunk",
+                        "id": ck_row["id"],
+                        "content": ck_row["content"],
+                        "memory_type": ck_row["memory_type"],
+                        "importance": ck_row["importance"],
+                        "timestamp": ck_row["timestamp"],
+                    })
+        return {
+            "enabled": True,
+            "ref": ref,
+            "chunk_id": chunk_id,
+            "source_chunks": source_chunks,
+        }
+
     def _build_digest(self) -> Tuple[str, Dict[str, List[str]], bool]:
         """[G2 8/4] TASKS_L2_DIGEST §3.2 — 三块 + line_refs.
 
