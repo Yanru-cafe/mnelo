@@ -2,8 +2,10 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.3 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
+> **版本**：v0.5 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
+> **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
+> **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -135,16 +137,19 @@ Memory
 ### 3.7 写路径增强：实体纠正传播 + 写入去重 ⟵ 借鉴 Mem0
 现状 `update()` 只换 chunk，**不改实体和关系**——"特变电工改名了"不会联动实体 name/aliases 和引用它的边。这是比 L2 更基础的一层，两个能力：
 
-- **实体纠正传播（self-editing）**：新增 `Memory.correct(entity_id, changes)` 动作——更新实体属性/别名 + 级联更新指向它的关系属性 + 记录 `superseded_by`。受 `identity_fact` 不可变规则约束（身份事实走专用路径）
+- **实体纠正传播（self-editing）**：新增 `Memory.correct(entity_id, changes)` 动作——更新实体属性/别名 + 级联更新指向它的关系属性 + 记录 `superseded_by`
+  - **不可变边界（明确化）**：`master` 用户实体 = **100% 不可变**（任何路径含 correct() 都拒绝）；其它 `user_confirmed=1` 实体**仅豁免 L2 自动 pass**，`correct()` 显式调用仍允许；`identity_fact` 走专用路径（identity_fact_manager）
+  - 这样既防"自主层悄悄改主人身份"，又不堵死"主人自己明确要改"的唯一入口
 - **写入时去重（NOOP 决策）**：`remember()` 可选开关 `dedup_check=True`——写入前检索同主语同谓词的现存事实，命中则走 update/合并而非新增。默认关（保持显式语义 + 写入低延迟），L2 仍负责事后清理
 
-### 3.8 记忆快照（git 版本化）⟵ 借鉴 Letta MemFS
-Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻量版：
+### 3.8 记忆快照（版本化备份）⟵ 借鉴 Letta MemFS
+Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻量版，但**针对 SQLite 单文件 + WAL 的实际情况修正**：
 
-- 周期（cron / post-write 低频）对 `memory.db` + WAL 做 **git 快照**（或 `sqlite3 .backup` 归档）
-- 与现有 `valid_until` 版本链互补：库内版本链管"单条事实的历史"，git 快照管"**整个库的时间旅行**"（diff / 回滚 / 灾难恢复）
-- 复用仓库已有的 `.githooks/post-commit` 基建，成本低
-- 快照频率与体积预算：单文件 ~24MB，日快照可接受；保留最近 N 个快照，旧的上锁归档
+- **备份方式**：周期（cron / post-write 低频）用 **`sqlite3 .backup`** 生成一致性快照。⚠️ **不要直接 `cp memory.db`**——WAL 模式下写入中的文件可能拷到中间页；备份 API 会正确包含 WAL 中未 checkpoint 的数据
+- **产物归档**：`snapshots/YYYYMMDD.db.gz`（`.backup` 后 gzip），**不进 git**、不进源码主仓——单独 **rsync 到 NAS / bigbox**（与现有 `backups/pre-update-*.zip` 模式一致）。`git` 跟踪二进制完全没必要
+- **体积实测（修正 README 基线）**：主人真实库 **44.72 MB 主体 + 0.72 MB WAL**，比 README 声称的 ~24MB 大近一倍（README 该基线已过期，待更新）。按 ~45MB 算：日快照 + gzip ≈ 5-10MB/份，保留 30 份 ≈ 150-300MB，可接受；**若日快照 + git 跟踪二进制，一年后 .git 膨胀 ~16GB——已排除该方案**
+- 与现有 `valid_until` 版本链互补：库内版本链管"单条事实的历史"，快照管"**整个库的时间旅行**"（diff / 回滚 / 灾难恢复）
+- 复用仓库已有的 `.githooks/post-commit` 基建触发备份脚本（产物进 `snapshots/`，不进主仓）
 
 ### 3.9 并发模型与日志保留
 - **并发模型（明说）**：单进程内**单写者**（唯一 `Memory` 实例持有写连接）+ WAL + 多读者（recall 的 4 路并发读是读连接）。多客户端（Hermes/Claude/Cursor 同时连）共享同一写者；冲突策略 = busy_timeout + 写事务串行。**不引入多写者**——违反即触发 §1.4 边界审查
@@ -233,7 +238,8 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 
 | Pass | 输入 | 输出提案 | 复用 | LLM 可选 |
 |---|---|---|---|---|
-| **P1 提取** | 新 chunks（`processed_at IS NULL`） | 新实体/关系/属性 | 向量相似度找已有实体、aliases 归一 | ✅ 自由文本提取；**无 LLM 时近空**（宁缺毋滥） |
+| **P1a 提取·规则模板** | 新 chunks（`processed_at IS NULL`） | 高置信实体/关系（stock 符号+中文名、身份陈述模板等） | 复用 entity_resolve 的 stock-probe 模式（符号+中文名强制）、模板 | ✗ 纯规则，零依赖 |
+| **P1b 提取·LLM** | P1a 未覆盖的 chunks | 自由文本事实/实体 | 向量相似度找已有实体、aliases 归一 | ✅ 自由文本；**无 LLM 时跳过** |
 | **P2 矛盾检测** | 提案事实 + 当前有效事实 | `supersede_relation` / `update_entity_property` | valid_until 链 + 级联触发器 | ✅ 语义矛盾；规则只做精确谓词 |
 | **P3 实体消歧** | 候选对 | `merge_entities` | `entity_resolve.find_duplicate_candidates` + embedding 相似度 | ✅ 中置信度裁决 |
 | **P4 记忆卫生** | importance + recall_log | `decay_importance` / `ttl_expire` / `purge_candidate` | recall_count、purged_queue | ✗ 纯规则 |
@@ -271,7 +277,7 @@ Applier  = 接受提案 → 调 Memory 公开写方法 → audit_log(status='app
 ### 5.5 规则 vs LLM 分界（行为矩阵）
 | Pass | 无 LLM（离线默认） | 有 LLM（可选，Ollama 保离线） |
 |---|---|---|
-| 提取 | **近空**（仅逐字/模板身份陈述） | 自由文本事实提取 |
+| 提取 | **P1a 规则模板**（stock 符号+中文名、身份陈述；高精度低召回，近空但非零） | P1a + **P1b 自由文本** |
 | 矛盾 | 精确谓词 + 值不同才提案 | 语义矛盾（"age 32" vs "33" 跨谓词） |
 | 消歧 | 高阈值自动 + 中档转人工 | 中置信度自动裁决 |
 | 卫生 | 完整 | 完整 |
@@ -392,7 +398,9 @@ backend = "ollama"
 | 新鲜度 | 近期写入占比、过期未清比例 | purged_queue 积压 |
 | 去重度 | 重复实体候选数（`find_duplicate_candidates`） | >50 组 |
 | 平衡度 | 各 lane 命中率方差 | 单 lane <5% 且持续 |
-| 健康度 | 以上加权合成 | <60 提示需要维护 |
+| 健康度 | 以上加权合成 | <0.6 提示需要维护 |
+
+**健康度 v0 公式（P2 实施时定，不在 DESIGN 阶段假装拍权重）**：5 个分量量纲不同（覆盖率是 0-100% 占比、新鲜度是衰减时间、去重度是离散计数、平衡度是方差），设计阶段预设权重是伪精确。决策：P2 起步 **全分量等权归一化 + 0.6 警戒线**，上线后按真实数据调参（哪个分量先触线就调哪个）。
 
 一句话回答"我的记忆是不是变脏了"，L2 的 run 报告直接喂给这个评分。
 
@@ -426,9 +434,9 @@ backend = "ollama"
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
 | **P0** | L0：**记忆类型谱系（§3.0）**、chunk.valid_from、FK、FTS5、写事务、**并发与保留模型（§3.9）**、schema 迁移框架、**实体纠正传播 + 写入去重（§3.7）**、**git 快照（§3.8）**；L1：entity id 匹配、RRF 标签修正、**新近度加权（§4.9）**、**会话级召回隔离（§4.7）**、质量评测 harness | — |
-| **P1** | L2 v0：audit_log + 矛盾检测 + 消歧 pass（规则优先），dry-run 跑通，`memory_maintenance` 工具；L1：**多跳路径推理 `memory_reason`（§4.6）**、**常驻记忆摘要 `memory_get_digest`（§4.5，规则版先上）**、**双轨组织 `memory_loci`（§4.8）**、**来源可信度加权（§4.10）** | P0 |
-| **P2** | L2 完整：提取（LLM 可选）+ 卫生 + 整合 + **社区检测 `memory_topics`（§5.2 P6）**；L4 质量闭环（precision@k + **健康度评分 §7.3** + health_check 反馈） | P1 |
-| **P3** | L3：**工具收敛（§6.5，~19 → ~10）**、消除旁路、批量/分页、客户端长连接；存储适配器落地（zvec 试用） | P0-P2 |
+| **P1** | L2 v0：audit_log + 矛盾检测 + 消歧 pass（规则优先），dry-run 跑通，`memory_maintenance` 工具；L1：**多跳路径推理 `memory_reason`（§4.6）**、**常驻记忆摘要 `memory_get_digest`（§4.5，规则版先上）**、**双轨组织 `memory_loci`（§4.8）**、**来源可信度加权（§4.10）**；**P1 末尾执行工具收敛（§6.5）**——新工具随 L2 落地即收敛，不让 agent 长期面对 ~19 个工具 | P0 |
+| **P2** | L2 完整：提取（P1a 规则 + P1b LLM）+ 卫生 + 整合 + **社区检测 `memory_topics`（§5.2 P6）**；L4 质量闭环（precision@k + **健康度评分 §7.3** + health_check 反馈） | P1 |
+| **P3** | L3：消除旁路、批量/分页、客户端长连接；存储适配器落地（zvec 试用） | P0-P2 |
 
 每阶段独立可交付、可回滚，不阻塞其他阶段。
 

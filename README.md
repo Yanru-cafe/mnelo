@@ -24,7 +24,7 @@ A memory layer for AI agents. Remembers across **4 dimensions** — vector seman
 
 | | |
 |---|---|
-| **Storage** | Single SQLite file (~24 MB @ 4500 chunks, 4600 entities) |
+| **Storage** | Single SQLite file (~45 MB @ 4498 entities / 4343 chunks, 2026-08 measured) |
 | **Vector index** | `sqlite-vec` (vec0) + `bge-small-zh-v1.5` (512-dim, CN-native) |
 | **Graph** | Native relations table, 2-hop BFS traversal |
 | **Recall** | 4-way hybrid: `vector + graph + meta + entity` → RRF fusion |
@@ -115,7 +115,7 @@ Exposes 7 tools (`memory_remember`, `memory_recall`, `memory_relate`, `memory_fo
 
 ## 📊 Benchmark results
 
-All numbers measured on a single MacBook (M-series), `memory.db` = **~24 MB / 4,300 entities / 6,300 chunks / 18,500 relations / 5,200 vectors**.
+All numbers measured on a single MacBook (M-series). Current baseline (2026-08): `memory.db` = **~44.7 MB + 0.7 MB WAL / 4,498 entities / 4,343 chunks** (earlier 6,300-chunk baseline was ~24 MB — DB has since grown).
 
 ### Latency
 
