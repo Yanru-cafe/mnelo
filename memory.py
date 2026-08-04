@@ -28,6 +28,7 @@ if not logger.handlers:
 
 from embedder import embed_bytes
 from metrics import get_registry as _metrics_registry  # [7/19 v0.5.3] observability
+import config as _config_module  # [7/21 fix] DB 路径解析 (config.resolve_db_path)
 
 # validation 模块从 conftest/repo 加载 (live == repo via hook sync).
 # 注意: memory.py 不再硬编码 /Users/apple/.hermes/memory path — repo 自身是 single source of truth.
@@ -39,8 +40,9 @@ from validation import (
     validate_query,
 )
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# [7/21 fix] DB 路径不再硬编码 — 从 config 解析 (env > config.toml > ~/.hermes/memory/memory.db)。
 # 注: embedding 模型 + dim 不再在此处硬编码 — 见 embedder.py 从 config 读 (config.toml [embedder])
+DB_PATH = _config_module.resolve_db_path()
 
 
 def now(tz: str = None) -> str:
@@ -686,9 +688,7 @@ class Memory:
                     """
                     SELECT v.rowid AS v_rowid, v.distance AS distance
                     FROM vectors v
-                    WHERE v.embedding MATCH ?
-                    ORDER BY v.distance
-                    LIMIT ?
+                    WHERE v.embedding MATCH ? AND k = ?
                 """,
                     (q_bytes, fetch_limit),
                 ).fetchall()
@@ -700,9 +700,11 @@ class Memory:
         for r in rows:
             v_rowid = r["v_rowid"] if isinstance(r, sqlite3.Row) else r[0]
             distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
+            # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             chunk = self._conn.execute(
-                "SELECT id, content, source, timestamp, importance FROM chunks WHERE rowid = ? AND valid_until IS NULL",
-                (v_rowid,),
+                "SELECT id, content, source, timestamp, importance FROM chunks "
+                "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
+                (v_rowid, asof),
             ).fetchone()
             if not chunk:
                 continue
@@ -726,9 +728,7 @@ class Memory:
                     """
                     SELECT v.rowid AS v_rowid, v.distance AS distance
                     FROM vectors v
-                    WHERE v.embedding MATCH ?
-                    ORDER BY v.distance
-                    LIMIT ?
+                    WHERE v.embedding MATCH ? AND k = ?
                 """,
                     (q_bytes, fetch_limit),
                 ).fetchall()
@@ -740,9 +740,11 @@ class Memory:
         for r in rows:
             v_rowid = r["v_rowid"] if isinstance(r, sqlite3.Row) else r[0]
             distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
+            # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             chunk = conn.execute(
-                "SELECT id, content, source, timestamp, importance FROM chunks WHERE rowid = ? AND valid_until IS NULL",
-                (v_rowid,),
+                "SELECT id, content, source, timestamp, importance FROM chunks "
+                "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
+                (v_rowid, asof),
             ).fetchone()
             if not chunk:
                 continue
@@ -754,12 +756,13 @@ class Memory:
 
     def _meta_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
         """[P2+ #2] 独立 conn 版 meta recall."""
+        # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
         sql = """
             SELECT id, content, source, timestamp, importance FROM chunks
-            WHERE valid_until IS NULL
+            WHERE (valid_until IS NULL OR valid_until > ?)
               AND content LIKE ?
         """
-        params = [f"%{query}%"]
+        params = [asof, f"%{query}%"]
         if filters and "source" in filters:
             sql += " AND source = ?"
             params.append(filters["source"])
@@ -781,16 +784,18 @@ class Memory:
             if not tok or len(tok) < 2:
                 continue
             like = f"%{tok}%"
+            # [7/21 fix] asof: entity 在 asof 时点有效 = valid_from <= asof AND (valid_until IS NULL OR > asof)
             rows = conn.execute(
                 """
                 SELECT id, name, kind, summary, importance, aliases_json
                 FROM entities
-                WHERE valid_until IS NULL
+                WHERE (valid_from IS NULL OR valid_from <= ?)
+                  AND (valid_until IS NULL OR valid_until > ?)
                   AND (name LIKE ? OR aliases_json LIKE ?)
                 ORDER BY importance DESC
                 LIMIT ?
             """,
-                (like, like, top_k),
+                (asof, asof, like, like, top_k),
             ).fetchall()
             for r in rows:
                 # [7/19 v0.5.5] Robust aliases parsing:
@@ -917,12 +922,13 @@ class Memory:
 
     def _meta_recall(self, query: str, top_k: int, filters: Dict, asof: str) -> List[Dict]:
         """路 3: 元数据 (精确 LIKE + 时间近)."""
+        # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
         sql = """
             SELECT id, content, source, timestamp, importance FROM chunks
-            WHERE valid_until IS NULL
+            WHERE (valid_until IS NULL OR valid_until > ?)
               AND content LIKE ?
         """
-        params = [f"%{query}%"]
+        params = [asof, f"%{query}%"]
         if filters and "source" in filters:
             sql += " AND source = ?"
             params.append(filters["source"])
@@ -958,14 +964,16 @@ class Memory:
         identity_query_keys = ("我", "主人", "user", "ling2077", "2077 Ling")
         is_identity_query = any(k in query for k in identity_query_keys)
         if is_identity_query:
+            # [7/21 fix] asof: 只取 asof 时点仍有效的 entity/relation
             rows = self._conn.execute("""
                 SELECT e.id, e.kind, e.name, e.summary, e.importance
                 FROM relations r
-                JOIN entities e ON e.id = r.target_id AND e.valid_until IS NULL
+                JOIN entities e ON e.id = r.target_id
+                  AND (e.valid_until IS NULL OR e.valid_until > ?)
                 WHERE r.source_id = 'user'
-                  AND r.valid_until IS NULL
+                  AND (r.valid_until IS NULL OR r.valid_until > ?)
                   AND e.kind IN ('identity_fact', 'canonical_fact')
-            """).fetchall()
+            """, (asof, asof)).fetchall()
             for r in rows:
                 seen_ids.add(r["id"])
                 hits.append(
@@ -1010,15 +1018,17 @@ class Memory:
             (high_priority_kinds, top_k),
             (("concept",), top_k),  # 补足
         ):
+            # [7/21 fix] asof: (valid_from IS NULL OR valid_from <= ?) 兼容无 valid_from 的旧数据
             sql = f"""
                 SELECT id, kind, name, summary, importance, recall_count FROM entities
-                WHERE valid_until IS NULL
+                WHERE (valid_from IS NULL OR valid_from <= ?)
+                  AND (valid_until IS NULL OR valid_until > ?)
                   AND kind IN ({",".join("?" * len(kind_filter))})
                   AND ({" OR ".join(like_clauses)})
                 ORDER BY importance DESC, recall_count DESC
                 LIMIT ?
             """
-            cur_params = list(kind_filter) + params + [take]
+            cur_params = [asof, asof] + list(kind_filter) + params + [take]
             rows = self._conn.execute(sql, cur_params).fetchall()
             for r in rows:
                 if r["id"] in seen_ids:
