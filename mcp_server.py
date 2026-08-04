@@ -255,7 +255,7 @@ TOOLS = [
     },
     {
         "name": "memory_maintenance",
-        "description": "[H-1 §5.7] L2 主动层入口. dry_run 默认 true; l2.enabled=1 才生效.",
+        "description": "[H-1 §5.7] L2 主动层入口. dry_run 默认 true; l2.enabled=1 才生效. [H-3 §5.9.2] confirm_destructive=True 允许 TTL 真删 (默认 false 安全).",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -265,6 +265,11 @@ TOOLS = [
                     "default": ["hygiene"],
                 },
                 "dry_run": {"type": "boolean", "default": True},
+                "confirm_destructive": {
+                    "type": "boolean",
+                    "description": "[§5.9.2] TTL/Purge 实战需显式 True (默认 false 安全). decay_importance 不需.",
+                    "default": False,
+                },
             },
         },
     },
