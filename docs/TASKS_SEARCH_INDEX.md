@@ -54,6 +54,14 @@ SearchIndex (ABC)          # name / knn / add / remove / close
 - `config.py`：`self.search_backend`（env `MNELO_MEMORY_SEARCH_BACKEND` > `[search].backend` > `'sqlite_vec'`），**无枚举校验**（C1 补）
 - `scripts/health_check.py`：已有 `search_backend` 检查（zvec/sqlite_vec 二分），C3 扩到三种
 
+### 1.4 配置与回落策略（v0.2 修订：fail-fast 原则，hermes Q3 采纳）
+
+- **显式配置了非默认后端但不可用**（未装 / CPU 不支持）→ **默认 fail-fast**：启动即报错退出，提示"backend=usearch 但 usearch 未安装；装 `requirements-usearch.txt` 或改回 sqlite_vec"
+- **仅当 `MNELO_MEMORY_ALLOW_FALLBACK=1`** 时允许回落 sqlite_vec + 日志警告——用于"部分机器有后端、部分没有"的集群场景
+- **理由**：silent 回落违背 §1.4 boring & predictable——主人配了 usearch 期望真用，静默降级难调试
+- ⚠️ **当前已合入的 `build_search_index()`（90c158b）对 zvec 是 silent 回落——需按此修订为 fail-fast 默认**（列为 C1 的一部分）
+- health_check 报告 active backend（含回落状态）；fail-fast 场景 health_check 应能诊断（而非静默）
+
 ---
 
 ## 2. 目标接口（v2，含精确签名）
@@ -212,19 +220,34 @@ class UsearchIndex(SearchIndex):
 - **无独立映射表**——直接查 SQLite，避免双写不一致
 - 映射查询用 `conn or self._conn`：memory.py 传 conn 时同事务可见未提交 chunk；不传时自有连接只看已提交（独立场景够用）
 
-### A4 — 工厂接入
+### A4 — 工厂接入（含 fail-fast 回落策略）
 ```python
+import os
+_ALLOW_FALLBACK = os.environ.get("MNELO_MEMORY_ALLOW_FALLBACK") == "1"
+
 def build_search_index(backend: str, db_path: Path, dim: int) -> SearchIndex:
     if backend == "zvec":
-        ...  # 现有逻辑
+        if not zvec_available():
+            if not _ALLOW_FALLBACK:
+                raise RuntimeError(
+                    "backend=zvec 但 zvec 不可用 (未装或 CPU 不支持 AVX2+)。"
+                    "装 requirements-zvec.txt 或改 [search] backend, 或设 MNELO_MEMORY_ALLOW_FALLBACK=1")
+            logger.warning("[search_index] zvec 不可用, ALLOW_FALLBACK 回落 sqlite_vec")
+            return SQLiteVecIndex(db_path)
+        return ZvecIndex(db_path.parent / "search_index.zv", dim)
     if backend == "usearch":
         if not usearch_available():
-            logger.warning("[search_index] usearch 未安装, 回落 sqlite_vec")
+            if not _ALLOW_FALLBACK:
+                raise RuntimeError(
+                    "backend=usearch 但 usearch 未安装。装 requirements-usearch.txt "
+                    "或改 [search] backend, 或设 MNELO_MEMORY_ALLOW_FALLBACK=1")
+            logger.warning("[search_index] usearch 未安装, ALLOW_FALLBACK 回落 sqlite_vec")
             return SQLiteVecIndex(db_path)
         return UsearchIndex(db_path, dim)
     return SQLiteVecIndex(db_path)
 ```
-**验收**：`build_search_index('usearch', ...)` 本机返回 `name == 'usearch'`。
+- **同时修订现有 zvec 分支**（90c158b 合入的是 silent 回落）→ 统一 fail-fast + ALLOW_FALLBACK
+- **验收**：本机 `backend='usearch'` 且装了 → `name == 'usearch'`；未装且无 ALLOW_FALLBACK → `RuntimeError`；有 ALLOW_FALLBACK → 回落 sqlite_vec。
 
 ### A5 — usearch 真实单测（`tests/test_search_index.py` 追加）
 ```python
@@ -253,6 +276,23 @@ class TestUsearchIndex(unittest.TestCase):
 #   3. 报告总数/失败数
 ```
 **验收**：sqlite_vec → usearch 切换后跑此脚本，recall 命中率恢复。
+
+### A7 — 索引修复 + 完整性校验（新，`scripts/repair_index.py`；hermes Q1/Q2 采纳）
+
+**问题背景**：
+- **Q1 孤儿向量**：usearch/zvec 索引写入在 SQLite 事务外——若 remember 的 SQLite 侧最终 ROLLBACK（commit 失败/异常），索引里会留下指向不存在 chunk 的向量
+- **Q2 双写非原子**：`close()` 的 `index.save()` 与 SQLite checkpoint 是两个独立 IO——save 成功但 SQLite 侧异常 → 下次启动索引与库不一致
+
+**做**：
+1. `scripts/repair_index.py [--backend usearch|zvec] [--dry-run]`：
+   - 遍历索引内所有 id → 查 SQLite chunks（usearch 用 rowid、zvec 用 chunk_id）→ **删除无对应活跃 chunk 的索引项**（仿 `repair_vectors.py`）
+   - `--dry-run` 只报数不删
+2. **索引完整性校验（启动时）**：
+   - `UsearchIndex.close()` / `ZvecIndex.close()` save 时，写 sidecar（如 `usearch.index.checksum`）：源 chunk 计数 + 哈希
+   - `__init__` load 后校验 sidecar → 失配 → `logger.warning` + 建议跑 repair/rebuild
+3. 接 `health_check`：报告索引完整性状态
+
+**验收**：构造孤儿场景（手动删 SQLite chunk 不动索引）→ `repair_index.py --dry-run` 报出、实际跑后清掉；sidecar 篡改 → 启动警告。
 
 ---
 
@@ -389,7 +429,7 @@ else:                ok = True
 
 ```
 C1 (config/requirements) ─┐
-C2 (接口 v2 + memory.py) ─┴─→ A1→A2→A3→A4→A5→A6   (usearch, 本机全测)
+C2 (接口 v2 + memory.py) ─┴─→ A1→A2→A3→A4→A5→A6→A7  (usearch, 本机全测)
                          └──→ B1→B2 → B3 (zvec, Mac 验证)
 C3 (health_check 三后端) ←─  A/B 完成
 C4 (全量回归)              ←─  全部
@@ -407,7 +447,7 @@ C4 (全量回归)              ←─  全部
 
 ## 8. 验收标准（整体）
 
-1. `[search] backend` 三值可切换；非法/不可用自动回落 + 日志
+1. `[search] backend` 三值可切换；**显式配置不可用 → fail-fast（默认）**，`ALLOW_FALLBACK=1` 才回落 + 日志（§1.4）
 2. **usearch**：本机 A5 全过；A6 重建后命中恢复
 3. **zvec**：fake 形状验证 + B3 Mac 清单全过
 4. **sqlite_vec**：默认路径零回归（C4）
@@ -420,7 +460,9 @@ C4 (全量回归)              ←─  全部
 
 | 风险 | 缓解 |
 |---|---|
-| 双存储同步（usearch/zvec 文件 vs SQLite） | 索引只存向量+content；时间/类型/软删权威在 SQLite（查询时过滤）；`close()` save + A6 重建兜底 |
+| 双存储同步（usearch/zvec 文件 vs SQLite） | 索引只存向量+content；时间/类型/软删权威在 SQLite（查询时过滤）；`close()` save + A6 重建 + **A7 增量修复**兜底 |
+| **Q1 孤儿向量**（索引写入在 SQLite 事务外，rollback 后索引残留） | 接受窄窗口（仅 commit 失败时）；**A7 `repair_index.py`** 定期清理（仿 repair_vectors.py） |
+| **Q2 close() 双写非原子**（save 与 checkpoint 独立 IO） | **A7 sidecar 校验和**（save 时记源 chunk 哈希，load 时比对，失配警告引导 repair/rebuild）；快照恢复须同点恢复 SQLite + 索引文件 |
 | usearch rowid 映射稳定性 | 与 sqlite_vec 同假设（TEXT 主键表 rowid 稳定）；快照恢复后 rowid 不变；VACUUM 重建场景跑 A6 |
 | zvec 本机无法验证 | B3 为硬前置，未过不得默认启用 |
 | usearch/zvec 无事务（crash 窗口不一致） | close() save + 定期 save + 快照恢复后重建 |
