@@ -292,6 +292,21 @@ class Memory:
             self._conn.execute(ddl)
         logger.info("[H-1] 6 new indexes ensured (CREATE INDEX IF NOT EXISTS)")
 
+        # [H-1 审计 §2 fix] 存量库也加 meta flag (H-1 跑过 = 1), 跟 schema.sql INSERT meta 块一致
+        # H0 落地时 query `l2_audit_log_ready` 区分 "H-1 跑了" vs "H-1 没跑"
+        existing_flag = self._conn.execute(
+            "SELECT value FROM meta WHERE key='l2_audit_log_ready'"
+        ).fetchone()
+        if not existing_flag:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('l2_audit_log_ready', '1')"
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('l2_h1_migrated', ?)",
+                (now(),)
+            )
+            logger.info("[H-1 审计] meta flags l2_audit_log_ready=1 + l2_h1_migrated ensured")
+
         self._conn.commit()
 
     def close(self) -> None:
