@@ -48,12 +48,13 @@ Applier  = 接受提案 → 调 Memory 公开写方法 (forget/update) → audit
 
 | ID | 任务 | 依赖 | 验收 |
 |---|---|---|---|
-| **H1** | `[l2.passes.hygiene]` 配置块 | — | 配置生效 |
+| **H0** | **audit_log + Proposal/Policy/Applier 基建先行**（§5.6/§5.9；hermes 三轮 Q3） | — | 提案落审计 + 状态机 |
+| **H1** | `[l2.passes.hygiene]` 配置块 | H0 | 配置生效 |
 | **H2** | importance 衰减算术 | H1 | 单测 |
 | **H3** | TTL 规则（按 memory_type） | H1 | 单测 |
 | **H4** | purge_candidate 生成（非破坏） | H2-H3 | dry-run 单测 |
 | **H5** | watermark + 原子性接入 | H2-H4 | 幂等单测 |
-| **H6** | `memory_hygiene_stats` 工具 + `run_maintenance(passes=['hygiene'])` | H5 | 工具可用 |
+| **H6** | **memory_stats 扩展 hygiene 子键**（不新加工具，对齐 §6.5 收敛） | H5 | 子键可用 |
 | **H7** | health_check freshness 分量 + 健康度联动（§7.3） | H6 | 报告含卫生数据 |
 | **H8** | 全量回归 + 手动场景验证 | H1-H7 | 全绿 |
 
@@ -61,11 +62,25 @@ Applier  = 接受提案 → 调 Memory 公开写方法 (forget/update) → audit
 
 ## 3. 任务详述
 
+### H0 — audit_log + Proposal/Policy/Applier 基建先行（§5.6/§5.9；hermes 三轮 Q3 采纳）
+
+**为什么先行（倒过来做）**：不是"为卫生多做一份基建"——audit_log + Proposal/Policy/Applier 是**整个 L2 的地基**（矛盾检测、消歧、整合 pass 全部复用）。先立地基再盖楼，避免"临时 hygiene_report 表"变成永远留在生产里的债务。
+
+**做**：
+1. `schema.sql` 加 `audit_log` 表（DESIGN §5.7 字段）：`id, run_id, pass_name, action_type, ref_type, ref_id, before_json, after_json, confidence, llm_used, status('proposed'|'applied'|'skipped'|'reverted'), created_at, revert_sql`
+2. `memory_maintenance.py` 抽 **Proposal / Policy / Applier 抽象**（DESIGN §5.1/§5.9.1）：所有 L2 pass 共享的提案→门槛→审计→apply 框架
+3. 状态机（§5.9.1）：proposed → applied/skipped/reverted，audit_log **多行承载状态迁移**（append-only）
+4. `memory_audit_list` / `memory_audit_undo` 工具基础（DESIGN §5.7）
+
+**验收**：写一条 proposal → audit_log 落 proposed → apply → 落 applied；undo 重放 revert_sql；`memory_audit_list` 可查。
+
 ### H1 — 配置块（`config.py` + `config.toml.example`）
 ```toml
+[l2]
+enabled = false         # L2 顶层默认关 (DESIGN §5.7 一致) — 启用是显式选择
 [l2.passes.hygiene]
-enabled = true          # 默认开（卫生是安全的预防 pass）
-dry_run = true          # 默认 dry-run（§5.6）
+enabled = false         # ⚠️ v0.2 修订 (hermes 三轮 Q1): 默认 false, 非 true
+dry_run = true          # 启用后默认仍 dry-run (§5.6) — 先看报告再 apply
 importance_floor = 0.1
 recency_half_life_days = 30      # §4.9 freshness 同源
 recall_boost_window_days = 7     # 近期召回的不衰减
@@ -74,6 +89,8 @@ purge_after_days = 30            # 与 purged_queue 一致
 decay = 50
 ttl_expire = 50
 purge_candidate = 100
+```
+**启用路径（显式三步）**：`enabled=true`（跑 dry-run 看报告）→ 审阅报告 → `dry_run=false`（才真正 apply）。**不设"默认开但只 dry-run"的惰性状态**——那会让用户以为卫生在干活、数据永远不被清理（反模式）。与 DESIGN §5.7 顶层 `[l2] enabled = false` 保持一致。
 ```
 **验收**：配置可覆盖默认；非法值回落默认 + warning。
 
@@ -117,11 +134,12 @@ purge_candidate = 100
 - 每 proposal 一个事务；失败标 `skipped` 继续；返回 `{applied, skipped, failed}`
 - **验收单测**：跑两次 → 第二次无副作用（幂等）；中途人为异常 → watermark 不推进、失败项下次重试。
 
-### H6 — 工具接入（`mcp_server.py` + `api/mnelo_client.py`）
+### H6 — 工具接入（`mcp_server.py` + `api/mnelo_client.py`；v0.2 修订，hermes 三轮 Q2）
 
-- `memory_hygiene_stats()`：报告 importance 分布 / 接近 floor 的项数 / purge 积压（§7.3 freshness 数据源）
+- ⚠️ **不新加 `memory_hygiene_stats` 工具**——对齐 §6.5 工具收敛（"新工具随 L2 落地即收敛"，单用途工具是工具面蔓延源）。改为**扩展现有 `memory_stats` 加 `hygiene` 子键**：`{...stats, hygiene: {importance_distribution, near_floor_count, purge_backlog}}`
 - `run_maintenance(passes=['hygiene'], dry_run=true)` 已能选 pass（L2 v0 的 `memory_maintenance` 工具）
-- **验收**：工具返回 JSON，含积压数。
+- 客户端 `MneloClient.stats()` 返回结构同步扩展（向后兼容：新子键可选）
+- **验收**：`memory_stats` 返回含 `hygiene` 子键；旧调用不破坏。
 
 ### H7 — 健康度联动（§7.3 freshness 分量）
 
@@ -139,10 +157,10 @@ purge_candidate = 100
 ## 4. 执行顺序
 
 ```
-H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8
-（H2/H3 可并行，H5 依赖二者产物）
+H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8
+（H0 是 L2 地基, 先行; H2/H3 可并行, H5 依赖二者产物）
 ```
-**分批 commit**：① H1-H2（配置+衰减）② H3-H4（TTL+purge）③ H5（watermark）④ H6-H7（工具+观测）⑤ H8（回归）
+**分批 commit**：① **H0（audit_log + 抽象基建，独立可交付）** ② H1-H2（配置+衰减）③ H3-H4（TTL+purge）④ H5（watermark）⑤ H6-H7（工具扩展+观测）⑥ H8（回归）
 
 ---
 
@@ -150,11 +168,12 @@ H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8
 
 | 里程碑 | 目标 |
 |---|---|
+| H0（audit_log + 抽象基建） | Q3 中（2026-08 末）——**先行** |
 | H1-H4（衰减/TTL/purge 核心） | Q3 中（2026-08 末） |
 | H5-H7（watermark/工具/观测） | Q3 末（2026-09 前） |
 | H8（回归+手动验证） | 与 H7 同步 |
 
-**依赖**：`audit_log` 表（P1 L2 v0 先行项）——hygiene 的 proposal/applied 落审计；若 audit_log 未落地，先用临时的 `hygiene_report` 表过渡，P1 完整后迁移。
+**依赖（v0.2 修订，hermes 三轮 Q3）**：`audit_log` + Proposal/Policy/Applier 是 **H0 前置任务**，已在清单内——**不设"临时 hygiene_report 表过渡"方案**（临时方案会变成永久债务）。H0 先行后，hygiene 及其它 pass 直接复用 audit_log。
 
 ---
 
@@ -165,7 +184,7 @@ H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8
 | 衰减误伤近期重要但低召回的项 | recall_boost_window + floor 保护 + dry-run 默认 + 报告列"将跌出检索阈值的实体"（§5.6） |
 | TTL 误删（episode/decision 有历史价值） | 长 TTL（730 天）+ 只入 purge_candidate 不直接删 + confirm 才物理删 |
 | 与 SearchIndex 索引不同步（hygiene 软删了 chunk 但索引还在） | A7 repair_index 清理；hygiene 的 ttl_expire 提案 apply 时**同步调 index.remove**（接线点：Applier 调 `Memory.forget` 时 `_index` 已联动） |
-| 无 audit_log 过渡 | 先用 `hygiene_report` 表，P1 完整后迁入 audit_log |
+| audit_log 缺失 | **已消除**（v0.2 修订）：H0 将 audit_log + 抽象基建设为前置任务，不做临时表过渡 |
 
 ---
 
