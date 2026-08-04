@@ -424,6 +424,15 @@ class Memory:
         self._index.add(chunk_id, v_bytes, conn=self._conn)
 
         self._conn.commit()
+        # Digest only depends on identity facts and high-importance decisions/episodes.
+        if (
+            any(ent.get("kind") == "identity_fact" for ent in (entities or []))
+            or (
+                memory_type in ("decision", "episode")
+                and importance >= config.config.digest_importance_threshold
+            )
+        ):
+            self._mark_digest_dirty()
         # [7/19 v0.5.3] metrics
         _metrics_registry().remember_total.inc(source=source or "unknown")
         return chunk_id
@@ -541,6 +550,7 @@ class Memory:
             logger.warning(f"failed to embed new chunk {new_id} during update: {e}")
 
         self._conn.commit()
+        self._mark_digest_dirty()
         # [7/19 v0.5.3] metrics
         _metrics_registry().update_total.inc()
         return new_id
@@ -1985,10 +1995,11 @@ class Memory:
                 chunk_id = chunk_row["id"]
                 before = {"memory_type": mtype, "valid_until": None, "timestamp": chunk_row["timestamp"]}
                 after = {"memory_type": mtype, "valid_until": ts, "timestamp": chunk_row["timestamp"]}
-                # revert_sql: 反向 valid_until = NULL
+                # Undo must revive the chunk and cancel its delayed physical purge.
                 revert_sql = (
-                    f"UPDATE chunks SET valid_until = NULL "
-                    f"WHERE id = '{chunk_id}'"
+                    f"UPDATE chunks SET valid_until = NULL WHERE id = '{chunk_id}'; "
+                    f"DELETE FROM purged_queue WHERE target_id = '{chunk_id}' "
+                    f"AND target_kind = 'chunk' AND done = 0"
                 )
 
                 try:
@@ -2032,6 +2043,8 @@ class Memory:
                             reason=f"ttl_soft_delete needs confirm_destructive=True (got {confirm_destructive})",
                             action_type="ttl_soft_delete",
                         )
+                        # Status is skipped, but the run records a blocked destructive
+                        # action as failed so the watermark cannot advance.
                         failed += 1
                     else:
                         apply_ok = self._apply_ttl_soft_delete(
@@ -2313,12 +2326,12 @@ class Memory:
 
         try:
             cur = self._exec_clean(
-                """DELETE FROM audit_log p
-                   WHERE p.status = 'proposed' AND p.created_at < ?
+                """DELETE FROM audit_log
+                   WHERE status = 'proposed' AND created_at < ?
                      AND EXISTS (
                        SELECT 1 FROM audit_log a
-                       WHERE a.ref_id = p.ref_id AND a.status = 'applied'
-                         AND a.run_id = p.run_id
+                       WHERE a.ref_id = audit_log.ref_id AND a.status = 'applied'
+                         AND a.run_id = audit_log.run_id
                      )""",
                 (proposed_cutoff,),
             )
@@ -2345,7 +2358,7 @@ class Memory:
         if not text:
             return None
         ts = now()
-        new_id = f"chunk_{ts.replace(':', '').replace('-', '').replace('T', '_')}_digest"
+        new_id = generate_id("chunk") + "_digest"
         metadata = json.dumps({
             "digest": True,
             "line_refs": line_refs,
@@ -2438,19 +2451,18 @@ class Memory:
             return {"error": f"ref {ref} not found", "chunk_id": chunk_id}
         source_chunks = []
         for rid in ref_ids:
-            if rid.startswith("identity:"):
-                entity_row = self._exec_clean(
-                    "SELECT id, name, summary, kind, importance FROM entities WHERE id = ?",
-                    (rid,),
-                ).fetchone()
-                if entity_row:
-                    source_chunks.append({
-                        "type": "entity",
-                        "id": entity_row["id"],
-                        "name": entity_row["name"],
-                        "summary": entity_row["summary"],
-                        "importance": entity_row["importance"],
-                    })
+            entity_row = self._exec_clean(
+                "SELECT id, name, summary, kind, importance FROM entities WHERE id = ?",
+                (rid,),
+            ).fetchone()
+            if entity_row:
+                source_chunks.append({
+                    "type": "entity",
+                    "id": entity_row["id"],
+                    "name": entity_row["name"],
+                    "summary": entity_row["summary"],
+                    "importance": entity_row["importance"],
+                })
             else:
                 ck_row = self._exec_clean(
                     "SELECT id, content, memory_type, importance, timestamp FROM chunks WHERE id = ?",

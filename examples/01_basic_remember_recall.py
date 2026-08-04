@@ -90,9 +90,9 @@ def main() -> int:
         print("[stats] chunk + entity + vector counts:")
         stats = m.stats()
         for tbl, s in stats.items():
-            if isinstance(s, dict):
+            if isinstance(s, dict) and "total" in s and "active" in s:
                 print(f"  {tbl:12s}: total={s['total']:4d} active={s['active']:4d}")
-            else:
+            elif not isinstance(s, dict):
                 print(f"  {tbl:12s}: {s}")
 
         print("\n✓ done.")
