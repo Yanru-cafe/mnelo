@@ -17,7 +17,8 @@ import pytest
 import importlib.util as _ilu
 
 
-_REPO = Path('/Users/apple/projects/mnelo')
+# [7/21 fix] 仓库根路径用相对路径, 不再硬编码作者机器路径 (CI/其他机器也能跑)
+_REPO = Path(__file__).resolve().parent.parent
 
 
 def _load_from_repo(mod_name: str):
@@ -45,11 +46,11 @@ def mem():
     import sys
     if sys.modules.get('memory', None) is None or not getattr(
         sys.modules['memory'], '__file__', ''
-    ).startswith('/Users/apple/projects/mnelo'):
+    ).startswith(str(_REPO)):
         # Force REPO
         from pathlib import Path
         import importlib.util as _ilu
-        target = '/Users/apple/projects/mnelo/memory.py'
+        target = str(_REPO / 'memory.py')
         spec = _ilu.spec_from_file_location('memory', target)
         mod = _ilu.module_from_spec(spec)
         sys.modules['memory'] = mod

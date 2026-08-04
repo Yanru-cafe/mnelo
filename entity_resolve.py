@@ -24,8 +24,10 @@ from typing import List, Optional, Tuple
 # [P2 审计] 复用 memory.now() 而非自己 datetime.now()
 sys.path.insert(0, str(Path(__file__).parent))
 from memory import now
+from config import resolve_db_path as _resolve_db_path
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# [7/21 fix] DB 路径不再硬编码 — 从 config 解析 (env > config.toml > ~/.hermes/memory/memory.db)
+DB_PATH = _resolve_db_path()
 
 
 def normalize_text(s: str) -> str:

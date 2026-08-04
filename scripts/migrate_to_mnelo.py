@@ -28,10 +28,14 @@ import sqlite_vec
 from pathlib import Path
 from datetime import datetime
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# [7/21 fix] 不再硬编码, 从 config 解析
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import resolve_db_path as _resolve_db_path
+
+DB_PATH = _resolve_db_path()
 
 # 复用 hermes-agent venv
-sys.path.insert(0, "/Users/apple/.hermes/memory")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from embedder import get_embedder, embed_bytes
 from memory import Memory, generate_id, now
 

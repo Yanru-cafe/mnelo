@@ -22,7 +22,11 @@ import re
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# [7/21 fix] 不再硬编码, 从 config 解析
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import resolve_db_path as _resolve_db_path
+
+DB_PATH = _resolve_db_path()
 
 # === 严格抽取器 ===
 # (regex, predicate, value_normalizer)

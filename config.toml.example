@@ -1,10 +1,12 @@
 # hermes-memory 配置示例
 # 拷贝此文件为 config.toml (与 memory.db 在同目录) 并按需修改.
-# 或用环境变量覆盖 (优先级高):
-#   HERMES_MEMORY_TIMEZONE=utc
-#   HERMES_MEMORY_WARM_UP_EMBEDDER=false
-#   HERMES_MEMORY_EMBEDDER_MODEL=BAAI/bge-small-en-v1.5
-#   HERMES_MEMORY_EMBEDDER_DIM=384
+# 或用环境变量覆盖 (优先级高, 前缀 MNELO_MEMORY_):
+#   MNELO_MEMORY_TIMEZONE=utc
+#   MNELO_MEMORY_WARM_UP_EMBEDDER=false
+#   MNELO_MEMORY_EMBEDDER_MODEL=BAAI/bge-small-en-v1.5
+#   MNELO_MEMORY_EMBEDDER_DIM=384
+#   MNELO_MEMORY_DIR=/path/to/memory   (live 目录, 默认 ~/.hermes/memory)
+#   MNELO_MEMORY_DB_PATH=/path/to/memory.db  (完整 DB 路径, 覆盖 MNELO_MEMORY_DIR)
 
 [main]
 # 时区选项 (默认 'local', 即系统本地时区):
@@ -31,3 +33,8 @@ warm_up_embedder = true
 #       (历史 chunk 的 embedding 维度跟新 dim 不一致会冲突, 见 RUNBOOK § migration)
 model = 'BAAI/bge-small-zh-v1.5'
 dim = 512
+
+[storage]
+# 存储目录 (默认 ~/.hermes/memory, 与旧部署向后兼容).
+# 一般无需设置 — 改环境变量 MNELO_MEMORY_DIR / MNELO_MEMORY_DB_PATH 更灵活.
+# dir = '~/.hermes/memory'

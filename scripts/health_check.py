@@ -45,11 +45,13 @@ except ImportError:
         return msg_id.format(**kwargs) if kwargs else msg_id
 
 
-# Paths
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# Paths — [7/21 fix] 不再硬编码, 从 config/env 解析 (env > ~/.hermes/...)
+from config import resolve_db_path as _resolve_db_path
+
+DB_PATH = _resolve_db_path()
 MCP_PORT = 8086
 MCP_HOST = "127.0.0.1"
-OUTPUT_DIR = Path("/Users/apple/.hermes/cron/output")
+OUTPUT_DIR = Path(os.environ.get("MNELO_CRON_OUTPUT_DIR", str(Path.home() / ".hermes" / "cron" / "output")))
 JOB_ID = "mnelo_daily_check"
 BJT = timezone(timedelta(hours=8))
 
