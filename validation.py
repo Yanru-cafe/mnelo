@@ -128,6 +128,10 @@ def validate_id(value: Any, field: str = "id") -> str:
     return value
 
 
+# [P0 §3.0] 记忆类型谱系 — 单一事实源 (memory.py 的 norm_memory_type 复用)
+MEMORY_TYPES = frozenset({"fact", "preference", "episode", "decision", "procedure", "ephemeral"})
+
+
 def validate_entity_payload(ent: Dict) -> Dict:
     """[P1-2 + P1-5] entity dict 字段清洗 (id/kind/name/summary/aliases/properties).
 
@@ -165,9 +169,19 @@ def validate_entity_payload(ent: Dict) -> Dict:
     else:
         importance = max(0.0, min(1.0, float(importance_raw)))
 
+    # [P0 §3.0] memory_type — 校验 + 默认 'fact'
+    memory_type = ent.get("memory_type")
+    if memory_type is None:
+        memory_type = "fact"
+    else:
+        memory_type = str(memory_type).strip().lower()
+        if memory_type not in MEMORY_TYPES:
+            raise ValidationError("entity.memory_type", f"unknown memory_type {memory_type!r}")
+
     return {
         "id": eid,
         "kind": kind,
+        "memory_type": memory_type,
         "name": name,
         "summary": summary,
         "aliases": ent.get("aliases"),

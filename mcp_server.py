@@ -89,6 +89,12 @@ TOOLS = [
                     "default": "manual",
                 },
                 "importance": {"type": "number", "description": "0.0-1.0, 默认 0.5", "default": 0.5},
+                "memory_type": {
+                    "type": "string",
+                    "description": "[P0 §3.0] fact / preference / episode / decision / procedure / ephemeral, 默认 fact",
+                    "default": "fact",
+                    "enum": ["fact", "preference", "episode", "decision", "procedure", "ephemeral"],
+                },
                 "entities": {"type": "array", "description": "[{id, kind, name, summary?, aliases?, properties?}]"},
                 "relations": {
                     "type": "array",
@@ -113,7 +119,10 @@ TOOLS = [
                 "query": {"type": "string", "description": "查询文本 (必填)"},
                 "top_k": {"type": "integer", "default": 5},
                 "graph_hops": {"type": "integer", "default": 2},
-                "filters": {"type": "object", "description": "{kind, source, tag, time_range}"},
+                "filters": {
+                    "type": "object",
+                    "description": "{kind, source, tag, time_range, type} — type = 记忆类型 (fact/preference/episode/decision/procedure/ephemeral)",
+                },
                 "strategy": {
                     "type": "string",
                     "enum": ["rrf", "vector_only", "graph_only", "meta_only", "entity_only"],
