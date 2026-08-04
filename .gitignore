@@ -51,3 +51,6 @@ coverage.xml
 
 # local venv (Claude Code dev env)
 .venv/
+
+# local gh CLI state (created when HOME pointed here)
+.local/
