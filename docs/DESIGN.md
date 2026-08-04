@@ -2,10 +2,11 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.5 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
+> **版本**：v0.6 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
 > **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
+> **v0.6 变更**：§3.0 从"记忆类型谱系"扩展为**正式数据模型**——记忆=chunk+entity+relation 双表示、三对象边界定义、kind×memory_type 双谱系正交澄清、entity 建置判定规则、relation 语义（weight/confidence/evidence 分工）。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -90,8 +91,62 @@
 
 ## 3. L0 存储层
 
-### 3.0 记忆类型谱系（数据模型的核心升级）
-现状把"记忆"一律当 chunk/entity 处理，但**不同类型的记忆行为完全不同**——提取、矛盾检测、卫生规则必须按类型区分。新增 `memory_type` 字段（实体/相关 chunk 上都标）：
+### 3.0 正式数据模型（chunk / entity / relation）
+
+#### 3.0.1 核心问题：一条「记忆」是什么
+
+**记忆（Memory）** = 一个原子的事实陈述 / 偏好 / 事件 / 决策 / 流程，可被独立召回、作废、版本化。它是 mnelo 的领域概念。
+
+存储上采用**双表示（dual representation）**：
+- **原文表示（chunk）**：人类可读的完整陈述——保真、可回溯
+- **结构化表示（entity + relation）**：图谱化的概念节点与语义边——可导航、可推理
+
+> **一条记忆 = chunk（原文）+ 零或多个 entity（它提及的概念）+ 零或多个 relation（概念间的边）**。
+> 两条设计结论由此而来：① chunk 永远保留原文（可回溯的根基）；② entity/relation 只是"从 chunk 里抽出来的索引视图"，**从不携带 chunk 没有的信息**（信息单源）。
+
+#### 3.0.2 三对象边界（正式定义）
+
+| 对象 | 定义 | 例 | ID | 时间语义 |
+|---|---|---|---|---|
+| **chunk** | 一条**原文陈述**（非结构化、保真） | "7/15 建仓 sh600089 12000@18.96" | 生成 id（`chunk_ts_seq`） | `timestamp`（陈述时间）+ `valid_until`（作废时间） |
+| **entity** | 一个**可指称的概念**（结构化、可复用） | sh600089 / 特变电工 / 主人 | 语义 id（`sh600089`、`identity:predicate:value`），全局唯一 | `valid_from`/`valid_until`（概念有效窗口）+ `superseded_by`（版本链） |
+| **relation** | 一条**有向语义边** | `建仓_于` / `located_in` | 自增 + 组合唯一约束 | `valid_from`/`valid_until` + `evidence_chunk_id` |
+
+**判定规则（何时建 entity）**——概念满足任一条件即应建 entity：
+- (a) 会被**跨 chunk 引用**（去重/合并有价值）
+- (b) 有**别名**（一物多名，需归一）
+- (c) 有**属性**需要稳定承载（如持仓数量、时区）
+- (d) 是**图导航锚点**（主人、股票、项目、常驻摘要）
+
+否则只写 chunk（纯陈述，无引用价值）——**防止 entity 爆炸**（个人库规模下 entity 是稀缺的，chunk 是廉价的）。
+
+#### 3.0.3 双谱系正交：kind × memory_type
+
+entity 上有**两个正交维度**，不是层级关系：
+
+| 维度 | 回答 | 决定什么 | 例 |
+|---|---|---|---|
+| **kind**（概念角色） | 这个节点在图里**扮演什么** | **结构行为**（identity_fact 不可变、user 是主人锚点、stock 走符号别名强制、container 是收纳节点） | stock / concept / identity_fact / container |
+| **memory_type**（记忆类型） | 这条记忆**生命周期如何** | **生命周期行为**（fact 可作废要校验、preference 可被纠正覆盖、episode 永不合并、procedure 优先保留、ephemeral 短 TTL） | fact / preference / episode / decision / procedure / ephemeral |
+
+**正交性澄清（关键）**：
+- 一个 entity 同时有 `kind` 和 `memory_type`，二者独立。例：`sh600089` = kind `stock` × memory_type `fact`
+- **`memory_type` 的权威载体是 chunk**（记忆的类型）。entity 上的 `memory_type` 是**便捷冗余/派生**：当 remember 不指定 entity 类型时继承 chunk 的类型；当同一 entity 被多条不同类型的记忆共享时，反映最近/主要关联，**不保证严格**
+- **`identity_fact` 的不可变规则来自 kind，不来自 memory_type**——一个 `kind=identity_fact, memory_type=fact` 的实体不可变；一个 `kind=concept, memory_type=fact` 的实体可正常作废
+
+#### 3.0.4 关系语义（正式）
+
+```
+relation = (source_id, target_id, relation_label, weight, confidence,
+            evidence_chunk_id, valid_from, valid_until)
+```
+
+- **`relation_label`**：开放字符串，但遵循命名规范（`<谓词>`：`建仓_于`、`located_in`、`is_identity_fact_for`），同义谓词必须归一（L2 消歧职责）
+- **`evidence_chunk_id`（可回溯保证）**：每条边必须"生于"一条原文 chunk；边不携带证据链之外的信息
+- **weight vs confidence 分工**：`weight` = 边强度（语义上多强）；`confidence` = 来源可信度（这条边多可靠）。§4.10 来源可信度进排序用的是 confidence/source
+- **relation 没有 memory_type**——边的类型由它的证据 chunk 决定，不重复标注
+
+#### 3.0.5 记忆类型谱系（生命周期行为，同 §3.0.3 memory_type 维度的展开）
 
 | 类型 | 语义 | 生命周期 | 关键规则 |
 |---|---|---|---|
@@ -103,6 +158,11 @@
 | `ephemeral` 瞬时 | 临时草稿 | 短命 | TTL 短；低 importance |
 
 **收益**：L2 提取器知道"要提什么类型"；矛盾检测按类型定规则（fact 可作废、procedure 几乎不作废）；卫生按类型定 TTL/衰减；召回可按类型过滤。
+
+#### 3.0.6 开放决策点
+- **entity.memory_type 语义**：本设计定为"便捷冗余 + 继承默认"（见 3.0.3）——如实施中发现误导（召回按类型过滤 entity 路时误判），可改为 entity 路完全忽略 memory_type、只按 kind 过滤
+- **chunk 是否可无 entity 关联**：允许（纯陈述），entity 是可选索引视图
+- **多语句 chunk**：一条 chunk 应承载**一个原子记忆**；复合陈述（"既建仓又清仓"）应由调用方拆分，或由 L2 P5 整合拆分
 
 ### 3.1 双时态补全
 - `chunks` 增加 `valid_from`（现状只有 `timestamp` + `valid_until`，无法表达"从 T1 到 T2 有效"）
