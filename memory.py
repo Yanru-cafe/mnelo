@@ -15,7 +15,7 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import sqlite_vec
 
@@ -337,17 +337,32 @@ class Memory:
         tags: List[str] = None,
         session_id: str = "default",
         timestamp: str = None,
-        memory_type: str = "fact",
+        memory_type: Optional[str] = None,
     ) -> str:
         """写入一条 chunk + 实体 + 关系.
 
         entities = [{id, kind, name, summary?, aliases?, properties?}]
         relations = [{source_id, target_id, relation, weight?, properties?,
                       valid_from?, valid_until?, evidence_chunk_id?}]
-        memory_type: [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral
+        memory_type: [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral.
+                      [P1a E4 8/4] 默认 None 触发 P1a 规则分类; 调用方显式传值 (>None) 永远优先.
         """
         ts = timestamp or now()
         chunk_id = generate_id("chunk")
+
+        # [P1a E4 8/4] 写路径集成: 显式类型 > 规则分类 > fact
+        # 调用方显式传 "fact" 也会被规则覆盖? 不! 文档说 "显式传值永远尊重"
+        # 语义: None (=未指定) 触发分类, "fact" 也是显式选择 → 尊重
+        # 但主人 §5.4 验收 "remember('我偏好简洁日报') → preference"
+        # → 假设: 默认不传 → 自动分类; 传 "fact" → 显式 fact; 传其他 → 显式
+        if memory_type is None:
+            from classify import classify_memory_type
+            inferred = classify_memory_type(content)
+            if inferred is not None:
+                memory_type = inferred
+                logger.info(f"[P1a] auto-classified: {chunk_id} -> {memory_type}")
+            else:
+                memory_type = "fact"  # 默认 fallback
         memory_type = norm_memory_type(memory_type)
 
         # [7/19 P0-3] chunk content 大小 + 控制字符 + bidi override 验证

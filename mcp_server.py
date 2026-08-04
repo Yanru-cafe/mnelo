@@ -91,9 +91,9 @@ TOOLS = [
                 "importance": {"type": "number", "description": "0.0-1.0, 默认 0.5", "default": 0.5},
                 "memory_type": {
                     "type": "string",
-                    "description": "[P0 §3.0] fact / preference / episode / decision / procedure / ephemeral, 默认 fact",
-                    "default": "fact",
-                    "enum": ["fact", "preference", "episode", "decision", "procedure", "ephemeral"],
+                    "description": "[P0 §3.0] fact / preference / episode / decision / procedure / ephemeral. [P1a E4 8/4] 默认 None 触发 P1a 规则自动分类; 显式传值永远尊重 (None=未指定, 触发分类器).",
+                    "default": None,
+                    "enum": ["fact", "preference", "episode", "decision", "procedure", "ephemeral", None],
                 },
                 "entities": {"type": "array", "description": "[{id, kind, name, summary?, aliases?, properties?}]"},
                 "relations": {
