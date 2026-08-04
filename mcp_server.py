@@ -691,6 +691,32 @@ def _build_sse_app(auth_token: str) -> "Starlette":
         async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
 
+    async def handle_health(request):
+        """Public liveness/readiness endpoint with compact hygiene signals."""
+        from starlette.responses import JSONResponse
+
+        target = _mem_instance
+        try:
+            if target is None:
+                target = _get_mem()
+            stats = target.stats()
+            hygiene = stats.get("hygiene", {})
+            backlog = int(hygiene.get("purge_backlog", 0))
+            floor_count = int(hygiene.get("decay_floor_chunks", 0))
+            status = "degraded" if backlog > 100 or floor_count > 100 else "ok"
+            return JSONResponse({"status": status, "hygiene": {
+                "purge_backlog": backlog,
+                "importance_below_floor": floor_count,
+                "freshness": hygiene.get("freshness"),
+            }})
+        except Exception:
+            logger.exception("health check failed")
+            return JSONResponse({"status": "degraded", "hygiene": {
+                "purge_backlog": None,
+                "importance_below_floor": None,
+                "freshness": None,
+            }}, status_code=503)
+
     async def handle_metrics(request):
         """[7/19 v0.5.3] /metrics endpoint (Prometheus text format).
 
@@ -718,6 +744,7 @@ def _build_sse_app(auth_token: str) -> "Starlette":
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
+            Route("/health", endpoint=handle_health),
             Route("/metrics", endpoint=handle_metrics),  # [7/19 v0.5.3] Prometheus
             Mount("/messages/", app=sse.handle_post_message),
         ]

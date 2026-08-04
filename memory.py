@@ -2621,12 +2621,19 @@ class Memory:
         audit_log_total = self._exec_clean(
             "SELECT COUNT(*) FROM audit_log"
         ).fetchone()[0]  # type: ignore[arg-type]
+        freshness = self._exec_clean(
+            """SELECT COALESCE(
+                 CAST(SUM(CASE WHEN datetime(timestamp) >= datetime('now', '-30 days') THEN 1 ELSE 0 END) AS REAL)
+                 / NULLIF(COUNT(*), 0), 0.0) AS freshness
+               FROM chunks WHERE valid_until IS NULL"""
+        ).fetchone()["freshness"]
         stats["hygiene"] = {
             "importance_floor": floor,
             "decay_candidates": decay_candidates,
             "decay_floor_chunks": decay_floor_chunks,
             "purge_backlog": purge_backlog,
             "audit_log_total": audit_log_total,
+            "freshness": float(freshness or 0.0),
             "last_run_hygiene": self._l2_get("l2.last_run.hygiene"),
             "last_dry_run_hygiene": self._l2_get("l2.last_dry_run.hygiene"),
         }
