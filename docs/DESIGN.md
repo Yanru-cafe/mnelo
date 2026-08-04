@@ -11,7 +11,7 @@
 > **v0.8 变更**：深化到可实施粒度——§4.11 分解管线（entity spotter/aspect/时间词/intent 判定规则 + intent 行为调整 + 与 reason/topics 关系澄清 + 多意图/失败语义）；§3.10 命名空间文法正则 + slug 化规则 + validate_id 前缀强制 + relation id 不回收 + chunk↔rowid 映射；§5.9 提案生命周期状态机 + watermark schema + 回退级联；§3.11 双层完整性校验 + 坏快照降级链 + 恢复自动化脚本；§12 输出数据围栏格式 + 威胁模型表（in/out）。
 > **v0.9 变更**（主人指示 + 整体复查修订）——§12 确立**无道德立场（amoral by design）**原则：mnelo 不做内容价值判断（合法/涉密/冒犯），威胁模型只覆盖"存取机制被滥用"，内容价值判断从设计中移除；§3.0.6 定案 entity 路 type 软加权（硬过滤只限 chunk 路，关掉开放决策）；§4.11.4 补 aspect 消费端（lane 偏向 + 权重映射）；§9 P0 标注 §3.0 已落地。
 > **v0.10 变更**：6 处遗留加深到可实施粒度——§3.4.1 写事务边界表 + embed 同步/异步取舍；§4.1.1-4.1.3 FTS5 中文分词器决策（trigram）+ 外部内容表触发器 + 软删一致性 + BM25×importance 查询；§4.8.1 location 各 lane 过滤语义 + 空子树/复合约束；§4.11 排序因子默认值（λ₁=0.3/λ₂=0.2/α=0/半衰期 30 天）；§4.5.1 digest 生成刷新机制（三块来源 + dirty 触发 + LLM 可选）；§3.7.1 dedup_check 结构化三元组匹配键 + 场景表。
-> **v0.11 变更**（hermes 评审 8/4 采纳）——§8.3 适配器分档加 usearch 档 + **fail-fast 回落策略**（显式配置不可用默认报错，`ALLOW_FALLBACK=1` 才回落）；§9 阶段说明（P3 已落地，标注"P3 后应优先补 P1 卫生 pass"配对风险）；§3.6 跨存储一致性（Q1/Q2）→ 指到 TASKS A7。
+> **v0.11 变更**（hermes 评审 8/4 采纳）——§8.3 适配器分档加 usearch 档 + **fail-fast 回落策略**（显式配置不可用默认报错，`ALLOW_FALLBACK=1` 才回落）；§9 阶段说明（P3 已落地，P1 卫生 pass **已排期 Q3 末**，任务分解在 `docs/TASKS_L2_HYGIENE.md`）；§3.6 跨存储一致性（Q1/Q2）→ 指到 TASKS A7（含 auto-repair + drift 指标）。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -892,8 +892,8 @@ l2.running             = bool         # 防重叠
 每阶段独立可交付、可回滚，不阻塞其他阶段。
 
 **阶段执行说明（v0.11 修订）**：P3（SearchIndex）先于 P1/P2 落地是**有意的**——它与 L2 自主层无依赖、可独立交付。但 hermes 评审指出两个配对风险，已采纳：
-- **P3 之后应优先补 P1 §5.2 P4 卫生 pass**（importance 衰减 + TTL + purge 候选）——否则 usearch/zvec 索引可能长期与 chunks 不一致（orphan vector），等发现已积压。`repair_index.py`（TASKS A7）是即时兜底，卫生 pass 是长期解
-- **P3 可观测性**：无 L2 audit 前，`[search] backend` 实际生效值由 health_check 报告（C3）；后续 L2 audit_log 落地后补到审计链
+- **P1 §5.2 P4 卫生 pass——已排期**：目标 **Q3 2026 末（2026-09-30）前**落地，任务分解见 **`docs/TASKS_L2_HYGIENE.md`**（H1-H8，含时间窗）。否则 usearch/zvec 索引可能长期与 chunks 不一致。`repair_index.py`（TASKS A7）是即时兜底，卫生 pass 是长期解
+- **P3 可观测性**：`[search] backend` 实际生效值由 health_check 报告（C3）+ **drift 指标**（索引孤儿/活跃 chunk 比，TASKS A7）持续观测；后续 L2 audit_log 落地后补到审计链
 
 ---
 
