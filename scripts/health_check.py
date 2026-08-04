@@ -297,6 +297,27 @@ def main():
         report["checks"]["db_stats"] = {"error": str(e)}
         degraded = True
 
+    # 3.5 Search backend (DESIGN §3.6/§8.3)
+    try:
+        from search_index import zvec_available
+
+        from config import config as _cfg
+
+        want = _cfg.search_backend
+        if want == "zvec":
+            ok = zvec_available()
+            report["checks"]["search_backend"] = {
+                "configured": "zvec",
+                "active": "zvec" if ok else "sqlite_vec",
+                "zvec_available": ok,
+            }
+            if not ok:
+                degraded = True  # 配置了 zvec 但不可用 → 实际跑在 sqlite_vec, 提醒
+        else:
+            report["checks"]["search_backend"] = {"configured": "sqlite_vec", "active": "sqlite_vec"}
+    except Exception as e:
+        report["checks"]["search_backend"] = {"error": str(e)}
+
     # 4. Write report
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     ts_file = datetime.now(BJT).strftime("%Y%m%d_%H%M%S")
@@ -306,6 +327,13 @@ def main():
         _t("check.banner", ts=now),
         "=" * 50,
     ]
+    sb = report["checks"].get("search_backend", {})
+    if sb.get("configured") == "zvec" and not sb.get("zvec_available"):
+        lines.append(f"⚠️  Search backend — configured zvec, active sqlite_vec (CPU 不支持, 已回落)")
+    elif sb.get("configured") == "zvec":
+        lines.append(f"✅ Search backend — zvec (HNSW + FTS)")
+    else:
+        lines.append(f"✅ Search backend — sqlite_vec (默认)")
     mcp = report["checks"]["mcp_server"]
     if mcp["alive"]:
         uptime_h = mcp["uptime_sec"] / 3600 if mcp["uptime_sec"] else 0
