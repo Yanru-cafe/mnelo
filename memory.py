@@ -15,7 +15,9 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+import config  # [G2 8/4] _build_digest 用 config.config
 
 import sqlite_vec
 
@@ -2326,6 +2328,84 @@ class Memory:
 
         self._conn.commit()
         return stats
+
+    def _build_digest(self) -> Tuple[str, Dict[str, List[str]], bool]:
+        """[G2 8/4] TASKS_L2_DIGEST §3.2 — 三块 + line_refs.
+
+        实战 纯规则 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 无 LLM (§0 v0.2 拍板: deterministic).
+        Returns:
+            (text, line_refs, truncated)
+        """
+        cfg = config.config
+        max_chars = cfg.digest_max_chars
+        recent_window_days = cfg.digest_recent_window_days
+        importance_threshold = cfg.digest_importance_threshold
+
+        block1_lines = []
+        block1_refs = {}
+        n = 0
+        try:
+            for f in self._exec_clean(
+                """SELECT id, name, summary, importance FROM entities
+                   WHERE kind='identity_fact' AND valid_until IS NULL
+                   ORDER BY importance DESC LIMIT 50"""
+            ).fetchall():
+                n += 1
+                val = f["summary"] or f["name"]
+                block1_lines.append(f"身份: {val}")
+                block1_refs[str(n)] = [f["id"]]
+        except Exception as e:
+            logger.debug(f"[build_digest] identity 块 1 实战 错误: {e}")
+
+        block2_lines = []
+        block2_chunk_ids = []
+        cutoff = (datetime.now() - timedelta(days=recent_window_days)).strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            for c in self._exec_clean(
+                """SELECT id, content, memory_type FROM chunks
+                   WHERE valid_until IS NULL
+                     AND memory_type IN ('decision', 'episode')
+                     AND importance >= ?
+                     AND timestamp >= ?
+                   ORDER BY importance DESC LIMIT 20""",
+                (importance_threshold, cutoff),
+            ).fetchall():
+                head = (c["content"] or "").split("\n")[0][:50]
+                block2_lines.append(f"{c['memory_type']}: {head}")
+                block2_chunk_ids.append(c["id"])
+        except Exception as e:
+            logger.debug(f"[build_digest] chunks 块 2 实战 错误: {e}")
+
+        block3_lines = []
+        block3_chunk_ids = []
+        try:
+            for s in self._exec_clean(
+                """SELECT id, content FROM chunks
+                   WHERE valid_until IS NULL AND source != 'digest'
+                   ORDER BY timestamp DESC LIMIT 5"""
+            ).fetchall():
+                head = (s["content"] or "").split("\n")[0][:50]
+                block3_lines.append(f"近期: {head}")
+                block3_chunk_ids.append(s["id"])
+        except Exception as e:
+            logger.debug(f"[build_digest] chunks 块 3 实战 错误: {e}")
+
+        all_lines = block1_lines + block2_lines + block3_lines
+        full_text = "\n".join(all_lines)
+        truncated = len(full_text) > max_chars
+        if truncated:
+            full_text = full_text[:max_chars]
+
+        all_refs: Dict[str, List[str]] = dict(block1_refs)
+        cur_n = len(block1_lines)
+        for cid in block2_chunk_ids:
+            cur_n += 1
+            all_refs[str(cur_n)] = [cid]
+        for cid in block3_chunk_ids:
+            cur_n += 1
+            all_refs[str(cur_n)] = [cid]
+
+        return full_text, all_refs, truncated
 
     def stats(self) -> Dict:
         """统计 + [H-1 §6.5 v0.2 TASKS] hygiene 子键.
