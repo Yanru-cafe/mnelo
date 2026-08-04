@@ -13,9 +13,9 @@ import json
 import logging
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import sqlite_vec
 
@@ -1488,6 +1488,7 @@ class Memory:
               - `dry_run`: 是否 dry-run
         """
         from datetime import datetime as _dt
+        from datetime import timedelta as _tdelta
 
         stats = {
             "orphan_purged_queue_rows": 0,
@@ -1580,6 +1581,402 @@ class Memory:
             logger.warning(f"[purge_worker] cleanup_orphan_vectors failed: {e}")
 
         self._conn.commit()
+        return stats
+
+    # ============================================================
+    # [H-0 + H-1 8/4] L2 自主层基础设施 (DESIGN §5.7-5.9 + TASKS_L2_HYGIENE v0.2)
+    # ============================================================
+
+    # L2 配置项默认值 (跟 DESIGN §5.7 config 模板一致; 实战读 meta 表)
+    _L2_DEFAULTS: Dict[str, Any] = {
+        "enabled": False,         # 主人 §5.7: 全局默认 false, 显式开启
+        "dry_run": True,          # 主人 §5.7: 全局默认 dry-run
+        "importance_floor": 0.1,  # hygiene pass 的 floor (§5.6)
+        "caps": {"supersede": 20, "merge": 20, "purge": 50},
+    }
+
+    # TTL 规则按 memory_type (TASKS_L2_HYGIENE H3 §3 + DESIGN §3.0.5)
+    # 实战分布 (8/4 v0.2): fact 95.4% / procedure 3.4% / ephemeral 1.2%
+    _MEMORY_TYPE_TTL_DAYS: Dict[str, Optional[int]] = {
+        # ephemeral 7d: 实战 1.2% (草稿/临时, 主人 §3.0.5 + LLM 草稿衰减)
+        "ephemeral": 7,
+        # fact 365d: 实战 95.4% (事实/对话, 主人 §3.0.5 默认)
+        "fact": 365,
+        # preference 180d: 主人偏好 (实战 1 个, 但 schema 必备)
+        "preference": 180,
+        # episode 730d: 实战事件 (2年)
+        "episode": 730,
+        # decision 730d: 决策
+        "decision": 730,
+        # procedure 永久 (None = 不衰减)
+        "procedure": None,
+    }
+
+    def _l2_get(self, key: str, default: Any = None) -> Any:
+        """[H-1] 从 meta 表读 L2 配置项.
+
+        Args:
+            key: 'l2.enabled' / 'l2.dry_run' / 'l2.last_run.hygiene' 等
+        """
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key=?", (key,)
+        ).fetchone()
+        if not row:
+            return default
+        v = row[0]
+        # [fix 8/4] bool 解析优先 (否则 "0" / "1" 会被解析为 0.0 / 1.0)
+        if v == "1":
+            return True
+        if v == "0":
+            return False
+        # [fix 8/4] 先 float (0.1 应解 float 不是 int)
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            pass
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return v
+
+    def _l2_set(self, key: str, value: Any) -> None:
+        """[H-1] 写 L2 配置项到 meta 表."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(value)),
+        )
+        self._conn.commit()
+
+    def _exec_clean(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        """[H-0 fix 8/4] SQLite execute() 不支持 SQL 注释 (#, --, /* */ 任意 unicode).
+        Strip 所有 inline 注释后 execute. 这样 mnelo Python 源码可以保留
+        §/¶ 等标记方便阅读, 不影响 SQL 语法.
+        """
+        # 简单 strip: 移除整行 # / -- 注释 + 移除 /* ... */ 块注释
+        import re
+        cleaned = re.sub(r"#[^\n]*", "", sql)  # 整行 # 注释 (含 §)
+        cleaned = re.sub(r"--[^\n]*", "", cleaned)  # 整行 -- 注释
+        cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)  # /* */ 块
+        # 折叠多空行
+        cleaned = re.sub(r"\n\s*\n+", "\n", cleaned)
+        return self._conn.execute(cleaned, params)
+
+    def list_audit(
+        self,
+        run_id: Optional[str] = None,
+        status: Optional[str] = None,
+        pass_name: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict]:
+        """[H-1 §5.7] 查 audit_log (提案历史). DESIGN §5.9.1 状态机.
+
+        Args:
+            run_id: 过滤特定 run (可选)
+            status: proposed / applied / reverted / skipped (可选)
+            pass_name: 过滤特定 pass (可选)
+            limit: max rows (默认 50, §5.7 memory_audit_list)
+            offset: 跳过行
+
+        Returns:
+            List[{id, run_id, pass_name, action_type, ref_type, ref_id,
+                  before_json, after_json, confidence, status, created_at}]
+        """
+        wheres, params = [], []
+        if run_id:
+            wheres.append("run_id=?")
+            params.append(run_id)
+        if status:
+            wheres.append("status=?")
+            params.append(status)
+        if pass_name:
+            wheres.append("pass_name=?")
+            params.append(pass_name)
+        where_sql = ("WHERE " + " AND ".join(wheres)) if wheres else ""
+
+        sql = f"""SELECT id, run_id, pass_name, action_type, ref_type, ref_id,
+                         before_json, after_json, confidence, llm_used, status,
+                         created_at, revert_sql
+                  FROM audit_log
+                  {where_sql}
+                  ORDER BY id DESC
+                  LIMIT ? OFFSET ?"""
+        params.extend([limit, offset])
+
+        rows = self._conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            # 解析 json 字段
+            before = json.loads(r["before_json"]) if r["before_json"] else None
+            after = json.loads(r["after_json"]) if r["after_json"] else None
+            result.append({
+                "id": r["id"],
+                "run_id": r["run_id"],
+                "pass_name": r["pass_name"],
+                "action_type": r["action_type"],
+                "ref_type": r["ref_type"],
+                "ref_id": r["ref_id"],
+                "before": before,
+                "after": after,
+                "confidence": r["confidence"],
+                "llm_used": bool(r["llm_used"]),
+                "status": r["status"],
+                "created_at": r["created_at"],
+                "revert_sql": r["revert_sql"],
+            })
+        return result
+
+    def run_maintenance(
+        self,
+        passes: Optional[List[str]] = None,
+        dry_run: Optional[bool] = None,
+        since: Optional[str] = None,
+        confirm_destructive: bool = False,
+    ) -> Dict:
+        """[H-1 §5.7] L2 自主层入口. DESIGN §5.9 事务粒度 + watermark.
+
+        Args:
+            passes: ['hygiene', 'decay', 'ttl', 'purge', ...] (None = 全 enabled)
+            dry_run: True/False/None (None = 用 meta.l2.dry_run 默认)
+            since: ISO 时间戳, 仅处理 chunks WHERE created_at > since
+            confirm_destructive: purge pass 需要 True 才真删 (§5.9.2)
+
+        Returns:
+            {passes_run, proposals: {pass_name: [proposal_dicts]},
+             applied, skipped, watermark_updated}
+        """
+        # 1. 校验 L2 是否启用
+        enabled = self._l2_get("l2.enabled", self._L2_DEFAULTS["enabled"])
+        if not enabled:
+            return {
+                "status": "disabled",
+                "message": "L2 自主层未启用 ([l2].enabled=false). 设 l2.enabled=1 开启 (主人 §5.7).",
+                "passes_run": [],
+            }
+
+        # 2. 防重叠 (meta.l2.running)
+        # [fix 8/4] _l2_get 解析 boolean -> True/False, 直接判 bool 不是 str
+        existing_running = self._l2_get("l2.running", False)
+        if existing_running is True or existing_running == "1":
+            return {
+                "status": "already_running",
+                "message": "另一 pass 正在跑 (l2.running=1). 等其完成.",
+            }
+        self._l2_set("l2.running", "1")
+
+        try:
+            # 3. dry_run 默认
+            if dry_run is None:
+                dry_run = self._l2_get("l2.dry_run", self._L2_DEFAULTS["dry_run"])
+
+            # 4. 决定跑哪些 pass
+            if passes is None:
+                passes = ["hygiene"]  # 默认只跑 hygiene (§6.5 工具收敛原则)
+
+            # 5. run_id + timestamp
+            import time as _time
+            run_id = f"run_{int(_time.time() * 1000)}"
+
+            # 6. 逐 pass 跑
+            results: Dict[str, Any] = {
+                "run_id": run_id,
+                "dry_run": dry_run,
+                "passes_run": [],
+                "proposals": {},  # pass_name -> [proposal_dicts]
+                "applied": 0,
+                "skipped": 0,
+                "watermark_updated": [],
+            }
+
+            for pname in passes:
+                if pname == "hygiene":
+                    # [fix Pyright] ensure bool (l2.dry_run meta returns Optional)
+                    actual_dry_run = bool(dry_run) if dry_run is not None else True
+                    res = self._run_hygiene_pass(run_id=run_id, dry_run=actual_dry_run)
+                    results["passes_run"].append("hygiene")
+                    results["proposals"]["hygiene"] = res["proposals"]
+                    results["applied"] += res["applied"]
+                    results["skipped"] += res["skipped"]
+                    if res.get("watermark_updated"):
+                        results["watermark_updated"].append("hygiene")
+                else:
+                    results.setdefault("warnings", []).append(
+                        f"unknown pass '{pname}', skipped")
+
+            return results
+        finally:
+            # 7. 清 l2.running flag
+            self._l2_set("l2.running", "0")
+
+    def _run_hygiene_pass(
+        self,
+        run_id: str,
+        dry_run: bool,
+        importance_floor: Optional[float] = None,
+    ) -> Dict:
+        """[H-1 §6.5 + v0.2 TASK] hygiene pass (P1 §5.6).
+
+        战 8/4 跑逻辑:
+          - importance decay 候选 (0.1-0.3 区间)
+          - TTL 候选 (按 memory_type, DESIGN §3.0.5)
+          - dry_run=True 全部 proposed (不 apply)
+          - watermark 推进只在 pass 全部 success 后
+        """
+        if importance_floor is None:
+            importance_floor = self._l2_get(
+                "l2.importance_floor",
+                self._L2_DEFAULTS["importance_floor"],
+            )
+
+        proposals = []
+        ts = now()
+
+        # === Phase 1: importance decay 候选 (8/4 v0.3 §3 实战 2259 个候选 0.1-0.3) ===
+        # [P1 §5.6] importance 用 floor 卡死, 低于 floor 进 purge_queue + audit_log
+        # [fix 8/4] SQLite execute() 不能用注释 (含 # 或 -- + 任何 unicode),
+        #    helper _exec_clean() 先 strip 注释再 execute
+        decay_candidates = self._exec_clean(
+            """SELECT id, memory_type, importance, content, timestamp
+               FROM chunks
+               WHERE valid_until IS NULL
+                 AND importance > 0
+                 AND importance < ?
+                 AND memory_type != 'procedure'
+               ORDER BY importance ASC, timestamp ASC
+               LIMIT 50""",
+            (importance_floor * 3,),
+        ).fetchall()
+        # 实战 8/4 (~2259 候选) — 限 50/批 (DESIGN §6.5)
+
+        applied = 0
+        skipped = 0
+        cap_purge = 50  # §5.7 l2.caps.purge
+
+        for i, row in enumerate(decay_candidates):
+            if i >= cap_purge:
+                skipped += 1
+                continue
+
+            chunk_id = row["id"]
+            before = {"importance": row["importance"], "memory_type": row["memory_type"]}
+            after = {"importance": max(0.0, row["importance"] - 0.05),
+                     "memory_type": row["memory_type"]}
+
+            # === 写 audit_log proposed 状态 (§5.9.1 状态机) ===
+            # UNIQUE(run_id, pass_name, action_type, ref_id, status) — 这次 status=proposed
+            try:
+                self._conn.execute("""
+                    INSERT INTO audit_log
+                        (run_id, pass_name, action_type, ref_type, ref_id,
+                         before_json, after_json, confidence, llm_used, status,
+                         created_at, revert_sql)
+                    VALUES (?, 'hygiene', 'decay_importance', 'chunk', ?,
+                            ?, ?, 1.0, 0, 'proposed', ?, NULL)
+                """, (
+                    run_id, chunk_id,
+                    json.dumps(before, ensure_ascii=False),
+                    json.dumps(after, ensure_ascii=False),
+                    ts,
+                ))
+                proposals.append({
+                    "ref_type": "chunk",
+                    "ref_id": chunk_id,
+                    "before": before,
+                    "after": after,
+                    "action": "decay_importance",
+                    "reason": f"importance {before['importance']:.2f} < {importance_floor*3:.2f} (floor={importance_floor})",
+                })
+                applied += 1
+            except sqlite3.IntegrityError:
+                # UNIQUE 撞 (同 run_id 同 ref_id 同 status) — idempotent skip
+                skipped += 1
+
+        # === Phase 2: TTL 候选报告 (按 memory_type, 实战 4348 chunks) ===
+        # [TASKS H3 §3] hygiene pass 报告过期 chunk (不真删, 留 propose)
+        for mtype, ttl_days in self._MEMORY_TYPE_TTL_DAYS.items():
+            if ttl_days is None:
+                continue  # procedure 永久
+            # 实战: 找 memory_type=mtype AND timestamp < now-ttl_days
+            cutoff_iso = (
+                datetime.now() - timedelta(days=ttl_days)
+            ).strftime("%Y-%m-%dT%H:%M:%S")
+            # [report-only] 不写 audit_log, 统计报告里列 (实战不真删)
+            count = self._exec_clean(
+                """SELECT COUNT(*) FROM chunks
+                   WHERE valid_until IS NULL
+                     AND memory_type = ?
+                     AND timestamp < ?""",
+                (mtype, cutoff_iso),
+            ).fetchone()[0]  # type: ignore[arg-type]  # sqlite count returns int
+            proposals.append({
+                "ref_type": "report",
+                "ref_id": f"ttl_{mtype}",
+                "before": {"memory_type": mtype, "ttl_days": ttl_days},
+                "after": None,
+                "action": "ttl_candidate_report",
+                "reason": f"{count} chunks older than {ttl_days} days (memory_type={mtype})",
+            })
+
+        # === Phase 3: watermark (§5.9.2) ===
+        watermark_updated = False
+        if not dry_run and applied > 0:
+            self._l2_set("l2.last_run.hygiene", ts)
+            watermark_updated = True
+        elif dry_run and proposals:
+            # [dry-run hygiene] 不推 watermark (§5.9.2 "executed success 才推进")
+            # 但记 dry_run 时间, 方便主人看测试频率
+            self._l2_set("l2.last_dry_run.hygiene", ts)
+
+        self._conn.commit()
+
+        return {
+            "applied": applied,
+            "skipped": skipped,
+            "proposals": proposals,
+            "watermark_updated": watermark_updated,
+        }
+
+    def stats(self) -> Dict:
+        """统计 + [H-1 §6.5 v0.2 TASKS] hygiene 子键.
+
+        [§6.5 工具收敛] 不新加 memory_hygiene_stats; 这里是 stats 的 hygiene 子键
+        """
+        stats = {}
+        for t in self._ALLOWED_TABLES:  # 永远是 3 个白名单字符串
+            total = self._conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            active = self._conn.execute(f"SELECT count(*) FROM {t} WHERE valid_until IS NULL").fetchone()[0]
+            stats[t] = {"total": total, "active": active, "deleted": total - active}
+        stats["vectors"] = self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
+        stats["recall_log"] = self._conn.execute("SELECT count(*) FROM recall_log").fetchone()[0]
+
+        # [H-1 §6.5] hygiene 子键 (§1.1 v0.12 + TASK v0.2): 不新加 memory_hygiene_stats
+        floor = self._l2_get("l2.importance_floor", self._L2_DEFAULTS["importance_floor"])
+        decay_candidates = self._exec_clean(
+            """SELECT COUNT(*) FROM chunks
+               WHERE valid_until IS NULL
+                 AND importance > 0 AND importance < ?
+                 AND memory_type != 'procedure'""",
+            (floor * 3,),
+        ).fetchone()[0]  # type: ignore[arg-type]
+        decay_floor_chunks = self._exec_clean(
+            "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL AND importance <= ?",
+            (floor,),
+        ).fetchone()[0]  # type: ignore[arg-type]  # noqa
+        purge_backlog = self._exec_clean(
+            "SELECT COUNT(*) FROM purged_queue WHERE done=0"
+        ).fetchone()[0]  # type: ignore[arg-type]
+        audit_log_total = self._exec_clean(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]  # type: ignore[arg-type]
+        stats["hygiene"] = {
+            "importance_floor": floor,
+            "decay_candidates": decay_candidates,
+            "decay_floor_chunks": decay_floor_chunks,
+            "purge_backlog": purge_backlog,
+            "audit_log_total": audit_log_total,
+            "last_run_hygiene": self._l2_get("l2.last_run.hygiene"),
+            "last_dry_run_hygiene": self._l2_get("l2.last_dry_run.hygiene"),
+        }
         return stats
 
 

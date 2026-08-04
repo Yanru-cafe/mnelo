@@ -196,7 +196,7 @@ TOOLS = [
     },
     {
         "name": "memory_stats",
-        "description": "统计: entities/chunks/relations/vectors/recall_log 数量.",
+        "description": "统计: entities/chunks/relations/vectors/recall_log 数量. [H-1 §6.5] 加 hygiene 子键 (decay/TTL/purge/audit 报告).",
         "inputSchema": {"type": "object", "properties": {}},
     },
     # === [v1.1] 新增 3 个工具 ===
@@ -232,6 +232,39 @@ TOOLS = [
                 "relation": {"type": "string", "description": "relation 名 (_关注_于 / 翁氏_共振_BUY_于)"},
                 "asof": {"type": "string"},
                 "limit": {"type": "integer", "default": 100},
+            },
+        },
+    },
+    # === [H-1 8/4] DESIGN §5.7 L2 主动层入口 + audit_log 查询 (§6.5 工具收敛) ===
+    {
+        "name": "memory_audit_list",
+        "description": "[H-1 §5.7] 查 audit_log 提案历史. 主人 §5.9.1 状态机: proposed / applied / reverted / skipped.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "过滤特定 run"},
+                "pass_name": {"type": "string", "description": "过滤特定 pass"},
+                "status": {
+                    "type": "string",
+                    "enum": ["proposed", "applied", "reverted", "skipped"],
+                },
+                "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
+            },
+        },
+    },
+    {
+        "name": "memory_maintenance",
+        "description": "[H-1 §5.7] L2 主动层入口. dry_run 默认 true; l2.enabled=1 才生效.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "passes": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["hygiene"]},
+                    "default": ["hygiene"],
+                },
+                "dry_run": {"type": "boolean", "default": True},
             },
         },
     },
@@ -292,6 +325,9 @@ _TOOL_REGISTRY = {
     "memory_update": ("update", "new_chunk_id"),
     "memory_graph_query": ("graph_query", None),
     "memory_stats": ("stats", None),
+    # === [H-1 8/4] DESIGN §5.7 (3 L1 入口 + 1 stats 整合) ===
+    "memory_audit_list": ("list_audit", None),  # 不走 _handle_simple (有枚举过滤)
+    "memory_maintenance": ("run_maintenance", None),  # 不走 _handle_simple (passes 列表)
 }
 
 
