@@ -1,0 +1,305 @@
+"""
+[P1a] memory_type 规则分类器测试.
+
+覆盖 (TASKS_L2_EXTRACT §5.2 双语+繁简测试矩阵 + §5.1 功能验收):
+  - 双语 (简体中文 / 繁体中文 / 英文) 8 场景
+  - 繁简归一化 (E1): _T2S 映射
+  - 标记表覆盖 (E2): 5 类型
+  - 匹配逻辑 (E3): episode 复合规则 + 优先冲突 decision > episode
+  - 零误伤 (§5.1.4): 无强标记时返回 None (调用方用 default fact)
+
+不依赖 LIVE DB, 纯函数测试。
+"""
+import unittest
+
+from classify import (
+    classify_memory_type,
+    _normalize,
+    _T2S,
+    _MARKERS,
+)
+
+
+# ============================================================
+# [E1 §3] 繁→简字符归一化
+# ============================================================
+class TestNormalize(unittest.TestCase):
+    """[E1] _normalize + _T2S 字符映射"""
+
+    def test_01_simple_traditional_to_simplified(self):
+        """§1.2 验收: 我覺得這個方案不錯 → 我觉得这个方案不错"""
+        norm = _normalize("我覺得這個方案不錯")
+        self.assertEqual(norm, "我觉得这个方案不错")
+
+    def test_02_mixed_traditional_simplified(self):
+        """混合繁简体"""
+        norm = _normalize("我覺得这个方案不錯")
+        self.assertEqual(norm, "我觉得这个方案不错")
+
+    def test_03_empty_string(self):
+        """空串不报错"""
+        self.assertEqual(_normalize(""), "")
+        self.assertEqual(_normalize(""), "")  # 再 call 幂等
+
+    def test_04_pure_english(self):
+        """纯英文不报错"""
+        norm = _normalize("I prefer the concise report")
+        self.assertEqual(norm, "I prefer the concise report")
+
+    def test_05_unmapped_characters_unchanged(self):
+        """_T2S 没映射的字原样保留"""
+        # 仓 (简体) / 倉 (繁体) 都映射
+        self.assertEqual(_normalize("倉"), "仓")
+        self.assertEqual(_normalize("仓"), "仓")
+
+    def test_06_trading_domain_traditional(self):
+        """[8/4 fix] 交易领域繁→简 (仓, 买入, 减仓)"""
+        norm = _normalize("今天建倉了")
+        self.assertEqual(norm, "今天建仓了")
+
+
+# ============================================================
+# [E2 §2] 标记表覆盖
+# ============================================================
+class TestMarkersSchema(unittest.TestCase):
+    """[E2] _MARKERS 标记表结构 + 5 类型 + 双语覆盖"""
+
+    def test_01_all_required_types_present(self):
+        """5 个 P1a 类型 + fact 默认"""
+        required = {"preference", "decision", "episode", "procedure", "ephemeral"}
+        self.assertEqual(required, set(_MARKERS.keys()))
+
+    def test_02_each_non_episode_type_has_cn_and_en(self):
+        """preference / decision / procedure / ephemeral 都有 cn + en 标记"""
+        for t in ("preference", "decision", "procedure", "ephemeral"):
+            self.assertIn("cn", _MARKERS[t], f"{t} 缺 cn 标记")
+            self.assertIn("en", _MARKERS[t], f"{t} 缺 en 标记")
+            self.assertGreater(len(_MARKERS[t]["cn"]), 0, f"{t} cn 标记空")
+            self.assertGreater(len(_MARKERS[t]["en"]), 0, f"{t} en 标记空")
+
+    def test_03_episode_has_composite_markers(self):
+        """episode 用复合规则 (cn_time + cn_action)"""
+        ep = _MARKERS["episode"]
+        self.assertIn("cn_time", ep, "episode 缺 cn_time")
+        self.assertIn("cn_action", ep, "episode 缺 cn_action")
+        self.assertIn("en_time", ep, "episode 缺 en_time")
+        self.assertIn("en_action", ep, "episode 缺 en_action")
+
+    def test_04_trading_terms_in_episode_action(self):
+        """[8/4 fix] 交易动作 (建仓/买入/卖出/清仓/加仓/减仓) 在 episode cn_action"""
+        action_markers = _MARKERS["episode"]["cn_action"]
+        for required in ("建仓", "买入", "卖出", "清仓", "加仓", "减仓"):
+            self.assertIn(required, action_markers,
+                          f"episode.cn_action 缺交易动作 '{required}'")
+
+
+# ============================================================
+# [E3 §5.2] 双语+繁简测试矩阵 (8 场景, 主人设计文档)
+# ============================================================
+class TestClassifyMatrix(unittest.TestCase):
+    """[E3] 主人 §5.2 双语+繁简测试矩阵 — 8 场景"""
+
+    def test_01_preference_simplified(self):
+        """我偏好简洁日报 → preference"""
+        self.assertEqual(
+            classify_memory_type("我偏好简洁日报"),
+            "preference",
+        )
+
+    def test_02_preference_traditional(self):
+        """[8/4 fix] 我偏好簡潔日報 (繁体) → preference (繁→简 后命中)"""
+        self.assertEqual(
+            classify_memory_type("我偏好簡潔日報"),
+            "preference",
+        )
+
+    def test_03_preference_english(self):
+        """I prefer the concise report → preference"""
+        self.assertEqual(
+            classify_memory_type("I prefer the concise report"),
+            "preference",
+        )
+
+    def test_04_decision_simplified(self):
+        """我决定明天减仓 → decision"""
+        self.assertEqual(
+            classify_memory_type("我决定明天减仓"),
+            "decision",
+        )
+
+    def test_05_decision_traditional(self):
+        """我決定明天減倉 (繁体) → decision"""
+        self.assertEqual(
+            classify_memory_type("我決定明天減倉"),
+            "decision",
+        )
+
+    def test_06_decision_english(self):
+        """I decided to reduce tomorrow → decision"""
+        self.assertEqual(
+            classify_memory_type("I decided to reduce tomorrow"),
+            "decision",
+        )
+
+    def test_07_episode_simplified(self):
+        """今天建仓了 sh600089 (时间+动作复合) → episode"""
+        self.assertEqual(
+            classify_memory_type("今天建仓了 sh600089"),
+            "episode",
+        )
+
+    def test_08_episode_traditional(self):
+        """今天建倉了 sh600089 (繁体时间+动作) → episode"""
+        self.assertEqual(
+            classify_memory_type("今天建倉了 sh600089"),
+            "episode",
+        )
+
+    def test_09_episode_english(self):
+        """Bought 100 shares of sh600089 today → episode"""
+        self.assertEqual(
+            classify_memory_type("Bought 100 shares of sh600089 today"),
+            "episode",
+        )
+
+    def test_10_procedure_simplified(self):
+        """记录一下做周报的步骤 → procedure"""
+        self.assertEqual(
+            classify_memory_type("记录一下做周报的步骤"),
+            "procedure",
+        )
+
+    def test_11_procedure_traditional(self):
+        """記錄一下做週報的步驟 (繁体) → procedure"""
+        self.assertEqual(
+            classify_memory_type("記錄一下做週報的步驟"),
+            "procedure",
+        )
+
+    def test_12_procedure_english(self):
+        """Here are the steps for the weekly report → procedure"""
+        self.assertEqual(
+            classify_memory_type("Here are the steps for the weekly report"),
+            "procedure",
+        )
+
+    def test_13_ephemeral_simplified(self):
+        """临时草稿，稍后处理 → ephemeral"""
+        self.assertEqual(
+            classify_memory_type("临时草稿，稍后处理"),
+            "ephemeral",
+        )
+
+    def test_14_ephemeral_traditional(self):
+        """臨時草稿，稍後處理 (繁体) → ephemeral"""
+        self.assertEqual(
+            classify_memory_type("臨時草稿，稍後處理"),
+            "ephemeral",
+        )
+
+    def test_15_ephemeral_english(self):
+        """temp draft, handle later → ephemeral"""
+        self.assertEqual(
+            classify_memory_type("temp draft, handle later"),
+            "ephemeral",
+        )
+
+
+# ============================================================
+# [E3 §5.2] 优先冲突 + 弱标记边界
+# ============================================================
+class TestClassifyPriorityAndEdge(unittest.TestCase):
+    """[E3 §2 优先冲突] decision > episode; 弱标记返回 None"""
+
+    def test_01_decision_priority_over_episode(self):
+        """[E3 优先冲突] 我决定今天建仓 → decision (优先) 而非 episode"""
+        # 同时满足 decision 标记 ("我决定") + episode 复合 (今天 + 建仓)
+        self.assertEqual(
+            classify_memory_type("我决定今天建仓"),
+            "decision",
+        )
+
+    def test_02_decision_priority_over_episode_traditional(self):
+        """[E3 优先冲突] 我決定今天建倉 (繁体) → decision"""
+        self.assertEqual(
+            classify_memory_type("我決定今天建倉"),
+            "decision",
+        )
+
+    def test_03_decision_priority_over_episode_english(self):
+        """[E3 优先冲突] I decided to buy today → decision"""
+        self.assertEqual(
+            classify_memory_type("I decided to buy today"),
+            "decision",
+        )
+
+    def test_04_no_strong_marker_returns_none(self):
+        """[§5.5 宁缺毋滥] 普通记录无强标记 → None (调用方默认 fact)"""
+        self.assertIsNone(
+            classify_memory_type("这是一段普通记录"),
+            "普通记录应返回 None (默认 fact)",
+        )
+
+    def test_05_no_strong_marker_traditional(self):
+        """[§5.5] 這是一段普通記錄 (繁体) → None"""
+        self.assertIsNone(
+            classify_memory_type("這是一段普通記錄"),
+        )
+
+    def test_06_no_strong_marker_english(self):
+        """[§5.5] This is a normal note → None"""
+        self.assertIsNone(
+            classify_memory_type("This is a normal note"),
+        )
+
+    def test_07_third_person_preference_returns_none(self):
+        """[§5.2 弱标记] 用户喜欢这个方案 (第三人称) → None (防误标他人偏好)"""
+        self.assertIsNone(
+            classify_memory_type("用户喜欢这个方案"),
+            "第三人称偏好不标 (无'我'主语)",
+        )
+
+    def test_08_third_person_preference_traditional(self):
+        """[§5.2 弱标记] 用戶喜歡這個方案 (繁體) → None"""
+        self.assertIsNone(
+            classify_memory_type("用戶喜歡這個方案"),
+        )
+
+    def test_09_episode_only_time_no_action_returns_none(self):
+        """[episode 复合] 只有时间没有动作 → None (退到 fact)"""
+        # 只有 "今天" 没动作锚
+        self.assertIsNone(
+            classify_memory_type("今天天气不错"),
+        )
+
+    def test_10_episode_only_action_no_time_returns_none(self):
+        """[episode 复合] 只有动作没有时间 → None"""
+        self.assertIsNone(
+            classify_memory_type("我建仓了但是没说是哪一天"),
+        )
+
+
+# ============================================================
+# [§5.1] 功能验收: 确定性 + 双语覆盖率
+# ============================================================
+class TestDeterminism(unittest.TestCase):
+    """[§5.1.3] 确定性: 同一文本两次分类结果一致"""
+
+    def test_01_idempotent_classification(self):
+        """同一文本两次分类结果一致"""
+        text = "我偏好简洁日报"
+        first = classify_memory_type(text)
+        second = classify_memory_type(text)
+        self.assertEqual(first, second)
+        self.assertEqual(first, "preference")
+
+    def test_02_traditional_determinism(self):
+        """繁体/简体归一化后结果一致"""
+        cn_simplified = classify_memory_type("我偏好简洁日报")
+        cn_traditional = classify_memory_type("我偏好簡潔日報")
+        self.assertEqual(cn_simplified, cn_traditional)
+        self.assertEqual(cn_simplified, "preference")
+
+
+if __name__ == "__main__":
+    unittest.main()
