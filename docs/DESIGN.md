@@ -2,7 +2,7 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.10 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
+> **版本**：v0.11 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
 > **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
@@ -11,6 +11,7 @@
 > **v0.8 变更**：深化到可实施粒度——§4.11 分解管线（entity spotter/aspect/时间词/intent 判定规则 + intent 行为调整 + 与 reason/topics 关系澄清 + 多意图/失败语义）；§3.10 命名空间文法正则 + slug 化规则 + validate_id 前缀强制 + relation id 不回收 + chunk↔rowid 映射；§5.9 提案生命周期状态机 + watermark schema + 回退级联；§3.11 双层完整性校验 + 坏快照降级链 + 恢复自动化脚本；§12 输出数据围栏格式 + 威胁模型表（in/out）。
 > **v0.9 变更**（主人指示 + 整体复查修订）——§12 确立**无道德立场（amoral by design）**原则：mnelo 不做内容价值判断（合法/涉密/冒犯），威胁模型只覆盖"存取机制被滥用"，内容价值判断从设计中移除；§3.0.6 定案 entity 路 type 软加权（硬过滤只限 chunk 路，关掉开放决策）；§4.11.4 补 aspect 消费端（lane 偏向 + 权重映射）；§9 P0 标注 §3.0 已落地。
 > **v0.10 变更**：6 处遗留加深到可实施粒度——§3.4.1 写事务边界表 + embed 同步/异步取舍；§4.1.1-4.1.3 FTS5 中文分词器决策（trigram）+ 外部内容表触发器 + 软删一致性 + BM25×importance 查询；§4.8.1 location 各 lane 过滤语义 + 空子树/复合约束；§4.11 排序因子默认值（λ₁=0.3/λ₂=0.2/α=0/半衰期 30 天）；§4.5.1 digest 生成刷新机制（三块来源 + dirty 触发 + LLM 可选）；§3.7.1 dedup_check 结构化三元组匹配键 + 场景表。
+> **v0.11 变更**（hermes 评审 8/4 采纳）——§8.3 适配器分档加 usearch 档 + **fail-fast 回落策略**（显式配置不可用默认报错，`ALLOW_FALLBACK=1` 才回落）；§9 阶段说明（P3 已落地，标注"P3 后应优先补 P1 卫生 pass"配对风险）；§3.6 跨存储一致性（Q1/Q2）→ 指到 TASKS A7。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -866,13 +867,16 @@ l2.running             = bool         # 防重叠
 - **边界**：解决不了图路/时态（那些留在 SQLite）；双存储需设计同步（update/forget 向量作废、asof 过滤、chunk↔向量映射）；项目年轻（v0.6.0，2026-07）
 
 ### 8.3 适配器分档
-| 档位 | 向量 | FTS | 触发条件 |
-|---|---|---|---|
-| **今日** | sqlite-vec（零依赖） | SQLite FTS5 | 默认 |
-| **升级** | **zvec**（HNSW + 原生 FTS） | zvec 原生 | 向量 >~50 万 或 meta 路延迟超标 |
-| **超大规模** | Qdrant/Milvus | 独立 | >千万向量 / 分布式 |
+| 档位 | 向量 | FTS | CPU 要求 | 触发条件 |
+|---|---|---|---|---|
+| **今日** | sqlite-vec（零依赖） | SQLite FTS5 | 任意 | 默认 |
+| **升级·旧 CPU** | **usearch**（HNSW，硬件无关，实测 Ivy Bridge 可跑） | 保持 LIKE | 任意 | 需 HNSW 且 CPU 无 AVX2 |
+| **升级·新 CPU** | **zvec**（HNSW + 原生 FTS） | zvec 原生 | AVX2+ | 向量 >~50 万 或 meta 路延迟超标 |
+| **超大规模** | Qdrant/Milvus | 独立 | — | >千万向量 / 分布式 |
 
 迁移由 §3.6 的 `SearchIndex` 适配器封装，业务代码零改动。
+
+**回落策略（v0.11 修订，hermes 评审采纳）**：显式配置非默认后端但不可用 → **默认 fail-fast**（报错提示改配置/装依赖），仅 `MNELO_MEMORY_ALLOW_FALLBACK=1` 才回落 sqlite_vec + 日志——silent 回落违背 boring & predictable。跨存储一致性（Q1/Q2）：索引写入在 SQLite 事务外，用 `repair_index.py`（增量清孤儿）+ sidecar 校验和（load 时比对）兜底；详见 `TASKS_SEARCH_INDEX.md` A7。
 
 ---
 
@@ -883,9 +887,13 @@ l2.running             = bool         # 防重叠
 | **P0** | L0：✅ **记忆类型谱系（§3.0，已落地 2026-08）**、chunk.valid_from、FK、FTS5、写事务、**并发与保留模型（§3.9）**、schema 迁移框架、**实体纠正传播 + 写入去重（§3.7）**、**git 快照（§3.8）**；L1：entity id 匹配、RRF 标签修正、**新近度加权（§4.9）**、**会话级召回隔离（§4.7）**、质量评测 harness | — |
 | **P1** | L2 v0：audit_log + 矛盾检测 + 消歧 pass（规则优先），dry-run 跑通，`memory_maintenance` 工具；L1：**多跳路径推理 `memory_reason`（§4.6）**、**常驻记忆摘要 `memory_get_digest`（§4.5，规则版先上）**、**双轨组织 `memory_loci`（§4.8）**、**来源可信度加权（§4.10）**；**P1 末尾执行工具收敛（§6.5）**——新工具随 L2 落地即收敛，不让 agent 长期面对 ~19 个工具 | P0 |
 | **P2** | L2 完整：提取（P1a 规则 + P1b LLM）+ 卫生 + 整合 + **社区检测 `memory_topics`（§5.2 P6）**；L4 质量闭环（precision@k + **健康度评分 §7.3** + health_check 反馈） | P1 |
-| **P3** | L3：消除旁路、批量/分页、客户端长连接；存储适配器落地（zvec 试用） | P0-P2 |
+| **P3** | L3：消除旁路、批量/分页、客户端长连接；✅ **SearchIndex 适配器 + zvec/usearch 后端（§3.6/§8.3，已落地 2026-08）** | P0-P2 |
 
 每阶段独立可交付、可回滚，不阻塞其他阶段。
+
+**阶段执行说明（v0.11 修订）**：P3（SearchIndex）先于 P1/P2 落地是**有意的**——它与 L2 自主层无依赖、可独立交付。但 hermes 评审指出两个配对风险，已采纳：
+- **P3 之后应优先补 P1 §5.2 P4 卫生 pass**（importance 衰减 + TTL + purge 候选）——否则 usearch/zvec 索引可能长期与 chunks 不一致（orphan vector），等发现已积压。`repair_index.py`（TASKS A7）是即时兜底，卫生 pass 是长期解
+- **P3 可观测性**：无 L2 audit 前，`[search] backend` 实际生效值由 health_check 报告（C3）；后续 L2 audit_log 落地后补到审计链
 
 ---
 
