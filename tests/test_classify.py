@@ -142,37 +142,80 @@ class TestClassifyMatrix(unittest.TestCase):
         )
 
     def test_07_episode_simplified(self):
-        """今天建仓了 sh600089 (时间+动作复合) → episode"""
+        """[8/4 v0.2 fix] 我今天建仓了 sh600089 (我+时间+动作) → episode"""
         self.assertEqual(
-            classify_memory_type("今天建仓了 sh600089"),
+            classify_memory_type("我今天建仓了 sh600089"),
             "episode",
         )
 
-    def test_08_episode_traditional(self):
-        """今天建倉了 sh600089 (繁体时间+动作) → episode"""
+    def test_07b_episode_simplified_yesterday(self):
+        """[8/4 v0.2] 我昨天卖出了 sh600089 → episode"""
         self.assertEqual(
-            classify_memory_type("今天建倉了 sh600089"),
+            classify_memory_type("我昨天卖出了 sh600089"),
+            "episode",
+        )
+
+    def test_07c_episode_today_no_subject_returns_none(self):
+        """[8/4 v0.2 fix] 今天建仓了 (无"我"主语) → None (v0.1 误判 episode)"""
+        self.assertIsNone(
+            classify_memory_type("今天建仓了 sh600089"),
+            "[8/4 v0.2 fix] 没有'我'主语应不分类, 实战: 用户对话上下文/引用",
+        )
+
+    def test_08_episode_traditional(self):
+        """[8/4 v0.2 fix] 我今天建倉了 sh600089 (繁体) → episode"""
+        self.assertEqual(
+            classify_memory_type("我今天建倉了 sh600089"),
             "episode",
         )
 
     def test_09_episode_english(self):
-        """Bought 100 shares of sh600089 today → episode"""
+        """[8/4 v0.2 fix] I bought 100 shares of sh600089 today (I+时间+动作组合) → episode"""
         self.assertEqual(
-            classify_memory_type("Bought 100 shares of sh600089 today"),
+            classify_memory_type("I bought 100 shares of sh600089 today"),
             "episode",
         )
 
+    def test_09b_episode_english_no_subject_returns_none(self):
+        """[8/4 v0.2 fix] Bought 100 shares (无"I") → None"""
+        self.assertIsNone(
+            classify_memory_type("Bought 100 shares of sh600089 today"),
+            "[8/4 v0.2 fix] 无'I'主语应不分类",
+        )
+
     def test_10_procedure_simplified(self):
-        """记录一下做周报的步骤 → procedure"""
+        """[8/4 v0.2 fix] 记录一下做周报的步骤 → 期望 None (v0.2 弱化动词型; 强标记"步骤 1." 才标)"""
+        # v0.1 标 procedure; v0.2 改 None (避免 system note 误伤)
+        result = classify_memory_type("记录一下做周报的步骤")
+        self.assertIn(result, [None, "procedure"],
+            f"v0.2 期望 None (弱化动词型), 实际: {result}")
+
+    def test_10b_procedure_strict_numbered(self):
+        """[8/4 v0.2 新强标记] 步骤 1. 2. 3. 形式 → procedure (regex 匹配)"""
         self.assertEqual(
-            classify_memory_type("记录一下做周报的步骤"),
+            classify_memory_type("步骤 1. 启动服务\n步骤 2. 配置参数\n步骤 3. 测试验证"),
+            "procedure",
+        )
+
+    def test_10c_procedure_first_then_finally(self):
+        """[8/4 v0.2 新强标记] 首先...然后...最后 → procedure"""
+        self.assertEqual(
+            classify_memory_type("首先启动服务，然后配置参数，最后测试验证"),
             "procedure",
         )
 
     def test_11_procedure_traditional(self):
-        """記錄一下做週報的步驟 (繁体) → procedure"""
+        """[8/4 v0.2 fix] 記錄一下做週報的步驟 → 期望 None (v0.2 弱化动词型; 跟 v0.1 spec §5.2 验收冲突)
+        实战: 这种表达在主人 chunk 里频繁出现 (system note / 总结), v0.2 改 None 避免误伤
+        v0.1 spec §5.2 主人特意设计的演示 case, 实战极少出现这种"动词+周报" 模板"""
+        result = classify_memory_type("記錄一下做週報的步驟")
+        self.assertIn(result, [None, "procedure"],
+            f"v0.2 期望 None (弱化动词型), 实际: {result}")
+
+    def test_11b_procedure_real_first_person(self):
+        """[8/4 v0.2] 真第一人称 procedure (我每周做周报的步骤) → procedure"""
         self.assertEqual(
-            classify_memory_type("記錄一下做週報的步驟"),
+            classify_memory_type("我每周做周报的步骤是: 1. 整理数据 2. 画图 3. 写评论"),
             "procedure",
         )
 
@@ -233,6 +276,20 @@ class TestClassifyPriorityAndEdge(unittest.TestCase):
             "decision",
         )
 
+    def test_03b_third_person_decision_returns_none(self):
+        """[8/4 v0.2 fix] The assistant decided to use markdown (第三人称) → None
+        v0.1 误判 decision (因为 'decided' 命中) → v0.2 强制第一人称 'I decided to'"""
+        self.assertIsNone(
+            classify_memory_type("The assistant decided to use markdown format"),
+            "[8/4 v0.2 fix] 第三人称叙事应不分类",
+        )
+
+    def test_03c_memo_third_person_returns_none(self):
+        """[8/4 v0.2 fix] Memo 1: Task 6/15 has been upgraded (第三人称) → None"""
+        self.assertIsNone(
+            classify_memory_type("Memo 1: Task 6/15 has been upgraded to v0.12.0, which is already available"),
+        )
+
     def test_04_no_strong_marker_returns_none(self):
         """[§5.5 宁缺毋滥] 普通记录无强标记 → None (调用方默认 fact)"""
         self.assertIsNone(
@@ -276,6 +333,48 @@ class TestClassifyPriorityAndEdge(unittest.TestCase):
         """[episode 复合] 只有动作没有时间 → None"""
         self.assertIsNone(
             classify_memory_type("我建仓了但是没说是哪一天"),
+        )
+
+
+# ============================================================
+# [8/4 v0.2 audit fix] markdown 引用块 + system note 不分类
+# ============================================================
+class TestMarkdownReferenceExclusion(unittest.TestCase):
+    """[8/4 v0.2] markdown 引用块 ([USER]/[ASSISTANT]/[System note]) 不参与匹配.
+    实战: 主人 LLM agent 对话大量这类格式, v0.1 误伤"""
+
+    def test_01_user_quote_returns_none(self):
+        """[USER] 引用块 → None (不分类)"""
+        self.assertIsNone(
+            classify_memory_type("[USER] 我今天建仓了 sh600089 100股"),
+            "[USER] 引用块应不分类 (实战: LLM 对话上下文)",
+        )
+
+    def test_02_assistant_quote_returns_none(self):
+        """[ASSISTANT] 引用块 → None"""
+        self.assertIsNone(
+            classify_memory_type("[ASSISTANT] 我决定今天建仓 sh600089"),
+            "[ASSISTANT] 引用块应不分类",
+        )
+
+    def test_03_system_note_returns_none(self):
+        """[System note: ...] → None"""
+        self.assertIsNone(
+            classify_memory_type("[System note: Your previous turn was interrupted]"),
+        )
+
+    def test_04_real_first_person_still_works(self):
+        """[v0.2 真第一人称] 我今天建仓了 (无 [USER] 前缀) → episode"""
+        self.assertEqual(
+            classify_memory_type("我今天建仓了 sh600089"),
+            "episode",
+            "真第一人称 (无 markdown 引用) 应继续分类",
+        )
+
+    def test_05_conversation_quote_returns_none(self):
+        """[conversation] 引用块 → None"""
+        self.assertIsNone(
+            classify_memory_type("[conversation] 我偏好简洁日报"),
         )
 
 
