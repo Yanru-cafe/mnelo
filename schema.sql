@@ -183,7 +183,11 @@ INSERT INTO meta (key, value) VALUES
     ('embedding_model', '{EMBED_MODEL}'),
     ('embedding_dim', '{EMBED_DIM}'),
     ('created_at', datetime('now', 'localtime')),
-    ('created_by', 'mnelo v0.5.x');
+    ('created_by', 'mnelo v0.5.x'),
+    -- [H-1 8/4 fix] 审计 §2: L2 启用 flag, H0 落地时 query 这个值
+    -- =1 表示 audit_log 表已建 (H-1 落地); 0/missing 表示 H-1 未跑
+    ('l2_audit_log_ready', '1'),
+    ('l2_h1_migrated', datetime('now', 'localtime'));
 
 -- ========================================
 -- 启用 WAL mode + busy_timeout (避免 lock 复发!)
