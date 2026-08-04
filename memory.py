@@ -255,6 +255,9 @@ class Memory:
                 logger.info(f"[H-1 §2] migrated {table}: added processed_at column")
 
         # [H-1 §3] audit_log 表 (Q3/Q4 verdict: 单表 + status; Q5 verdict: 显式 revert_sql; B 修正: created_at 不依赖 SQLite DEFAULT)
+        # [审计 §3 注释] UNIQUE 缺 created_at, 极小概率同 microsecond 同 run_id 同 ref 同 status 撞
+        # — 实战 8/4 评估认为可接受 (race condition 需要 L2 病态重入, 主人 §5.6 护栏会拦)
+        # 未来如要更严, UNIQUE 加 created_at: UNIQUE(run_id, pass_name, action_type, ref_id, status, created_at)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
