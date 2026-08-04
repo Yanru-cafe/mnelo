@@ -24,7 +24,7 @@
 
 | | |
 |---|---|
-| **存储** | 单 SQLite 文件（约 24 MB @ 4500 chunks） |
+| **存储** | 单 SQLite 文件（约 45 MB @ 4498 entities / 4343 chunks，2026-08 实测） |
 | **向量索引** | `sqlite-vec` (vec0) + `bge-small-zh-v1.5`（512 维，中文优化） |
 | **图** | 原生 relations 表，2-hop BFS 遍历 |
 | **召回** | 4 路混合：`vector + graph + meta + entity` → RRF 融合 |
@@ -115,7 +115,7 @@ query → RRF ──→ ├─ meta（LIKE 搜索）
 
 ## 📊 测评结果
 
-所有数据在单台 MacBook（M 系列）实测，`memory.db` = **~24 MB / 4300 entities / 6300 chunks / 18500 relations / 5200 vectors**。
+所有数据在单台 MacBook（M 系列）实测。当前基线（2026-08）：`memory.db` = **~44.7 MB + 0.7 MB WAL / 4498 entities / 4343 chunks**（早期 6300-chunk 基线约 24 MB——库此后已增长）。
 
 ### 延迟
 
