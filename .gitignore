@@ -48,3 +48,6 @@ htmlcov/
 .tox/
 *.cover
 coverage.xml
+
+# local venv (Claude Code dev env)
+.venv/

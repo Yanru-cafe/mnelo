@@ -173,9 +173,9 @@ recall(query, top_k=5, graph_hops=2, strategy='rrf', asof=None)
 
 | 路 | 数据源 | 触发条件 | 时间复杂度 |
 |---|---|---|---|
-| `vector` | vec0 MATCH | 所有 query | O(log N) via HNSW |
+| `vector` | vec0 MATCH | 所有 query | O(N) 全扫 (vec0 是分块暴力 KNN, 非 HNSW) |
 | `graph` | relations 2-hop | seed_hits 非空 | O(M²) worst case |
-| `meta` | LIKE + 时间近 | 短 query 命中 | O(N) but indexed |
+| `meta` | LIKE + 时间近 | 短 query 命中 | O(N) 全扫 (LIKE 前导通配符用不上 B-tree 索引) |
 | `entity` | name/aliases 匹配 | 含股票代码 / 人名 | O(K) K = 候选数 |
 
 ### 3.2 RRF 融合
@@ -188,13 +188,18 @@ score(d) = Σ 1/(k + rank)  for each route r where d in top_k(r)
 
 ### 3.3 4D 时间切片 (`asof` 参数)
 
-所有召回都接受 `asof=ISO8601`：
-- vector: 走 chunk.valid_until 过滤
-- graph: 走 relation.valid_from/until 过滤
-- meta: chunk.valid_until 过滤
-- entity: entity.valid_until 过滤
+所有召回都接受 `asof=ISO8601`（[7/21 修复] 之前只有 graph 路真正生效）：
+- vector: `valid_until IS NULL OR valid_until > asof`
+- graph: `valid_from <= asof AND (valid_until IS NULL OR valid_until > asof)`
+- meta: `valid_until IS NULL OR valid_until > asof`
+- entity: `(valid_from IS NULL OR valid_from <= asof) AND (valid_until IS NULL OR valid_until > asof)`
 
 **价值**：能问"2026-06-01 时点持有 sh600089 的依据是什么"（历史回放）。
+
+⚠️ **已知限制**：历史回放主要靠 meta / entity / graph 三路。**vector 路无法回放历史**——
+`update()` / `forget()` 会**物理删除**旧版本的向量（见 v0.5.6 drift fix），旧版本 embedding
+已不存在于 vec0，语义检索只能看到当前活跃版本。若需要"语义层也回放历史"，需保留旧向量
+（改为软删除向量 + valid_until 过滤），属架构级变更，暂未实现。
 
 ---
 
@@ -240,7 +245,7 @@ score(d) = Σ 1/(k + rank)  for each route r where d in top_k(r)
                        召回时: query → embed → vec0 MATCH → 拿 rowid → 回查 chunks 表
 ```
 
-- vec0 MATCH 是 ANN（HNSW-like），召回时间 O(log N) 与数据集大小弱相关
+- [7/21 更正] vec0 **不是 HNSW/ANN** — sqlite-vec 的 vec0 是**分块暴力 KNN 扫描**（逐块读出做最近邻，非内存驻留），召回时间随向量数**线性增长** O(N)。个人规模（5K-50K 向量）下延迟仍 < 50ms，但超过 ~50 万向量应换 HNSW 后端（Qdrant/Milvus）——见 README Known limitations
 - 与图遍历正交：纯语义（向量）/ 纯结构（图）/ 时间（meta）/ 实体（entity）4 路各占一边
 -  2487 vectors + 4185 entities + 15745 relations 规模下，recall < 50ms
 
@@ -289,7 +294,7 @@ relation sh600089 --[mentioned_in]--> chunk_20260718_103045_xxx
 | 取舍 | 理由 |
 |---|---|
 | ✅ SQLite 单一文件 | 无外部依赖、launchd 自启、备份简单（cp 即可） |
-| ✅ vec0 嵌入 SQLite | ANN 查询走 SQLite 协议，无独立服务 |
+| ✅ vec0 嵌入 SQLite | KNN 查询走 SQLite 协议，无独立服务（暴力扫描，非 ANN） |
 | ✅ 触发器下推一致性 | 关系型 DB 原生能力，省应用层代码 |
 | ⚠️ 图遍历受限 | 2-hop 邻居查询用 SQL IN (...) 拼装，N 节点 → N+1 查询已优化为 1 次 SQL（审计 4.1） |
 | ❌ 不适合规模 | 50K+ 实体 + 实时多 hop → 应迁 Neo4j |
@@ -318,7 +323,7 @@ relation sh600089 --[mentioned_in]--> chunk_20260718_103045_xxx
 
 | 路 | 数据源 | 适合 query 类型 | 命中率 |
 |---|---|---|---|
-| `vector` | vec0 HNSW | 长查询 / 抽象概念（"派哲学"） | 中 |
+| `vector` | vec0 KNN 扫描 | 长查询 / 抽象概念（"派哲学"） | 中 |
 | `graph` | relations 2-hop | 关联查询（"X 跟 Y 有什么关系"） | 高 |
 | `meta` | LIKE + timestamp | 短查询 / 时间敏感（"今天加了啥"） | 中 |
 | `entity` | name + aliases 精确 | 短代码（"sh600089" / "特变电工"） | 高 |

@@ -78,18 +78,19 @@ jobs:
       - name: Init test DB
         run: |
           mkdir -p ~/.hermes/memory
-          cd ~/.hermes/memory
-          # Symlink repo source files into LIVE dir (matches conftest _load_from_repo)
-          for f in memory.py config.py schema.sql embedder.py \
-                   entity_resolve.py i18n_messages.py mnelo_locale.py \
-                   validation.py auth.py metrics.py mcp_server.py; do
-            [ -f "$GITHUB_WORKSPACE/$f" ] && ln -sf "$GITHUB_WORKSPACE/$f" "$f"
-          done
-          python scripts/init_db.py
+          cd "$GITHUB_WORKSPACE"
+          # [7/21 fix] 从仓库根运行; DB 路径通过 MNELO_MEMORY_DIR 指向 live 目录。
+          # 之前 `cd ~/.hermes/memory && python scripts/init_db.py` 找不到 scripts/,
+          # 且 init_db.py 硬编码路径 — CI 实际从未成功建库。
+          MNELO_MEMORY_DIR="$HOME/.hermes/memory" python scripts/init_db.py
 
       - name: Run tests with coverage
         run: |
-          cd ~/.hermes/memory
+          cd "$GITHUB_WORKSPACE"
+          # [7/21 fix] PYTHONPATH 让 tests 能 import api/mnelo_client。
+          # 之前从 ~/.hermes/memory 跑 tests/ 找不到 tests/ 目录。
+          export MNELO_MEMORY_DIR="$HOME/.hermes/memory"
+          export PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/api"
           python -m pytest tests/ -q --timeout=30 \
             --cov=mcp_server --cov=memory --cov=embedder \
             --cov=entity_resolve --cov=validation --cov=auth \
