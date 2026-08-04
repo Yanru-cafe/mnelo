@@ -1743,7 +1743,7 @@ class Memory:
 
         Returns:
             {passes_run, proposals: {pass_name: [proposal_dicts]},
-             applied, skipped, watermark_updated}
+             applied, skipped, failed, watermark_updated}
         """
         # 1. 校验 L2 是否启用
         enabled = self._l2_get("l2.enabled", self._L2_DEFAULTS["enabled"])
@@ -1785,18 +1785,24 @@ class Memory:
                 "proposals": {},  # pass_name -> [proposal_dicts]
                 "applied": 0,
                 "skipped": 0,
+                "failed": 0,
                 "watermark_updated": [],
             }
 
             for pname in passes:
                 if pname == "hygiene":
-                    # [fix Pyright] ensure bool (l2.dry_run meta returns Optional)
+                    # [fix 8/4] ensure bool (l2.dry_run meta returns Optional)
                     actual_dry_run = bool(dry_run) if dry_run is not None else True
-                    res = self._run_hygiene_pass(run_id=run_id, dry_run=actual_dry_run)
+                    res = self._run_hygiene_pass(
+                        run_id=run_id,
+                        dry_run=actual_dry_run,
+                        confirm_destructive=confirm_destructive,
+                    )
                     results["passes_run"].append("hygiene")
                     results["proposals"]["hygiene"] = res["proposals"]
                     results["applied"] += res["applied"]
                     results["skipped"] += res["skipped"]
+                    results["failed"] += res.get("failed", 0)
                     if res.get("watermark_updated"):
                         results["watermark_updated"].append("hygiene")
                 else:
@@ -1813,28 +1819,41 @@ class Memory:
         run_id: str,
         dry_run: bool,
         importance_floor: Optional[float] = None,
+        confirm_destructive: bool = False,
     ) -> Dict:
-        """[H-1 §6.5 + v0.2 TASK] hygiene pass (P1 §5.6).
+        """[H-1 + H-3 8/4] hygiene pass — P1 §5.6 + DESIGN §5.9 + TASKS_L2_HYGIENE H3.
 
-        战 8/4 跑逻辑:
-          - importance decay 候选 (0.1-0.3 区间)
-          - TTL 候选 (按 memory_type, DESIGN §3.0.5)
-          - dry_run=True 全部 proposed (不 apply)
-          - watermark 推进只在 pass 全部 success 后
+        严格 §5.9 语义 (8/4 实战):
+          - Phase 1: importance decay 候选 (0.1-0.3 区间) — 真跑时 UPDATE chunks.importance
+          - Phase 2: TTL 候选 (按 memory_type, 实战 ephemeral 7d 52 chunks) — 真跑 + confirm_destructive=True 才 soft-delete
+          - dry_run=True: 全 proposed (不 apply, 不真改数据)
+          - dry_run=False + confirm_destructive=True (Phase 2): 真 soft-delete
+          - 每 proposal 一事务 (§5.9 "细粒度事务")
+          - watermark 推进只在 pass 全 success (§5.9.2)
+          - 失败 proposal 标 skipped + 错误记入 audit_log
+          - applied 状态写 audit_log 第二次行 (append-only §5.9.1)
+          - revert_sql 字段填 (§5.9.3 重放)
         """
         if importance_floor is None:
             importance_floor = self._l2_get(
                 "l2.importance_floor",
                 self._L2_DEFAULTS["importance_floor"],
             )
+        # [fix Pyright] ensure float (None check; _l2_get may return None)
+        if importance_floor is None:
+            importance_floor = 0.1
+        importance_floor = float(importance_floor)
 
         proposals = []
+        applied = 0
+        skipped = 0
+        failed = 0
+        cap_purge = 50  # §5.7 l2.caps.purge
         ts = now()
 
-        # === Phase 1: importance decay 候选 (8/4 v0.3 §3 实战 2259 个候选 0.1-0.3) ===
-        # [P1 §5.6] importance 用 floor 卡死, 低于 floor 进 purge_queue + audit_log
-        # [fix 8/4] SQLite execute() 不能用注释 (含 # 或 -- + 任何 unicode),
-        #    helper _exec_clean() 先 strip 注释再 execute
+        # ============================================================
+        # Phase 1: importance decay (实战 8/4 ~2259 候选, cap 50/批)
+        # ============================================================
         decay_candidates = self._exec_clean(
             """SELECT id, memory_type, importance, content, timestamp
                FROM chunks
@@ -1846,11 +1865,6 @@ class Memory:
                LIMIT 50""",
             (importance_floor * 3,),
         ).fetchall()
-        # 实战 8/4 (~2259 候选) — 限 50/批 (DESIGN §6.5)
-
-        applied = 0
-        skipped = 0
-        cap_purge = 50  # §5.7 l2.caps.purge
 
         for i, row in enumerate(decay_candidates):
             if i >= cap_purge:
@@ -1861,9 +1875,13 @@ class Memory:
             before = {"importance": row["importance"], "memory_type": row["memory_type"]}
             after = {"importance": max(0.0, row["importance"] - 0.05),
                      "memory_type": row["memory_type"]}
+            # revert_sql (§5.9.3): 重放回 before 状态
+            revert_sql = (
+                f"UPDATE chunks SET importance = {before['importance']:.6f} "
+                f"WHERE id = '{chunk_id}' AND valid_until IS NULL"
+            )
 
-            # === 写 audit_log proposed 状态 (§5.9.1 状态机) ===
-            # UNIQUE(run_id, pass_name, action_type, ref_id, status) — 这次 status=proposed
+            # === 写 audit_log proposed 状态 (§5.9.1) ===
             try:
                 self._conn.execute("""
                     INSERT INTO audit_log
@@ -1878,63 +1896,310 @@ class Memory:
                     json.dumps(after, ensure_ascii=False),
                     ts,
                 ))
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                # UNIQUE 撞 (同 run_id 同 ref_id 同 status) — idempotent skip
+                skipped += 1
+                continue
+
+            proposals.append({
+                "ref_type": "chunk",
+                "ref_id": chunk_id,
+                "before": before,
+                "after": after,
+                "action": "decay_importance",
+                "reason": f"importance {before['importance']:.2f} < {importance_floor*3:.2f} (floor={importance_floor})",
+                "revert_sql": revert_sql,
+            })
+
+            # === Apply 路径 (dry_run=False) — 每 proposal 一事务 (§5.9) ===
+            if not dry_run:
+                apply_ok = self._apply_decay_importance(
+                    run_id=run_id,
+                    chunk_id=chunk_id,
+                    before=before,
+                    after=after,
+                    revert_sql=revert_sql,
+                    ts=ts,
+                )
+                if apply_ok:
+                    applied += 1
+                else:
+                    failed += 1
+
+        # ============================================================
+        # Phase 2: TTL 候选 (按 memory_type)
+        # [H-3 8/4 实战] ephemeral 7d 52 chunks / fact 365d 0 / ...
+        # 真 apply 需 confirm_destructive=True (§5.9.2 "purge 是破坏性操作")
+        # ============================================================
+        for mtype, ttl_days in self._MEMORY_TYPE_TTL_DAYS.items():
+            if ttl_days is None:
+                continue  # procedure 永久
+
+            cutoff_iso = (
+                datetime.now() - timedelta(days=ttl_days)
+            ).strftime("%Y-%m-%dT%H:%M:%S")
+
+            # 取过期 chunks (报告 + 真 apply 候选)
+            ttl_candidates = self._exec_clean(
+                """SELECT id, memory_type, timestamp FROM chunks
+                   WHERE valid_until IS NULL
+                     AND memory_type = ?
+                     AND timestamp < ?
+                   ORDER BY timestamp ASC
+                   LIMIT 50""",
+                (mtype, cutoff_iso),
+            ).fetchall()
+
+            if not ttl_candidates:
+                # 仍报 0 候选 (主人 §6 报告)
+                proposals.append({
+                    "ref_type": "report",
+                    "ref_id": f"ttl_{mtype}",
+                    "before": {"memory_type": mtype, "ttl_days": ttl_days},
+                    "after": None,
+                    "action": "ttl_candidate_report",
+                    "reason": f"0 chunks older than {ttl_days} days (memory_type={mtype})",
+                })
+                continue
+
+            # 每个 candidate 写 audit_log + (apply 路径) soft-delete
+            for i, chunk_row in enumerate(ttl_candidates):
+                if i >= cap_purge:
+                    skipped += 1
+                    continue
+
+                chunk_id = chunk_row["id"]
+                before = {"memory_type": mtype, "valid_until": None, "timestamp": chunk_row["timestamp"]}
+                after = {"memory_type": mtype, "valid_until": ts, "timestamp": chunk_row["timestamp"]}
+                # revert_sql: 反向 valid_until = NULL
+                revert_sql = (
+                    f"UPDATE chunks SET valid_until = NULL "
+                    f"WHERE id = '{chunk_id}'"
+                )
+
+                try:
+                    self._conn.execute("""
+                        INSERT INTO audit_log
+                            (run_id, pass_name, action_type, ref_type, ref_id,
+                             before_json, after_json, confidence, llm_used, status,
+                             created_at, revert_sql)
+                        VALUES (?, 'hygiene', 'ttl_soft_delete', 'chunk', ?,
+                                ?, ?, 1.0, 0, 'proposed', ?, NULL)
+                    """, (
+                        run_id, chunk_id,
+                        json.dumps(before, ensure_ascii=False),
+                        json.dumps(after, ensure_ascii=False),
+                        ts,
+                    ))
+                    self._conn.commit()
+                except sqlite3.IntegrityError:
+                    skipped += 1
+                    continue
+
                 proposals.append({
                     "ref_type": "chunk",
                     "ref_id": chunk_id,
                     "before": before,
                     "after": after,
-                    "action": "decay_importance",
-                    "reason": f"importance {before['importance']:.2f} < {importance_floor*3:.2f} (floor={importance_floor})",
+                    "action": "ttl_soft_delete",
+                    "reason": f"memory_type={mtype} > {ttl_days} days",
+                    "revert_sql": revert_sql,
                 })
-                applied += 1
-            except sqlite3.IntegrityError:
-                # UNIQUE 撞 (同 run_id 同 ref_id 同 status) — idempotent skip
-                skipped += 1
 
-        # === Phase 2: TTL 候选报告 (按 memory_type, 实战 4348 chunks) ===
-        # [TASKS H3 §3] hygiene pass 报告过期 chunk (不真删, 留 propose)
-        for mtype, ttl_days in self._MEMORY_TYPE_TTL_DAYS.items():
-            if ttl_days is None:
-                continue  # procedure 永久
-            # 实战: 找 memory_type=mtype AND timestamp < now-ttl_days
-            cutoff_iso = (
-                datetime.now() - timedelta(days=ttl_days)
-            ).strftime("%Y-%m-%dT%H:%M:%S")
-            # [report-only] 不写 audit_log, 统计报告里列 (实战不真删)
-            count = self._exec_clean(
-                """SELECT COUNT(*) FROM chunks
-                   WHERE valid_until IS NULL
-                     AND memory_type = ?
-                     AND timestamp < ?""",
-                (mtype, cutoff_iso),
-            ).fetchone()[0]  # type: ignore[arg-type]  # sqlite count returns int
-            proposals.append({
-                "ref_type": "report",
-                "ref_id": f"ttl_{mtype}",
-                "before": {"memory_type": mtype, "ttl_days": ttl_days},
-                "after": None,
-                "action": "ttl_candidate_report",
-                "reason": f"{count} chunks older than {ttl_days} days (memory_type={mtype})",
-            })
+                # === Apply 路径 (dry_run=False + confirm_destructive=True) ===
+                if not dry_run:
+                    if not confirm_destructive:
+                        # [§5.9.2] 没 confirm_destructive 标 skipped (破坏性操作需显式)
+                        self._mark_skipped(
+                            run_id=run_id,
+                            chunk_id=chunk_id,
+                            ts=ts,
+                            reason=f"ttl_soft_delete needs confirm_destructive=True (got {confirm_destructive})",
+                        )
+                        failed += 1
+                    else:
+                        apply_ok = self._apply_ttl_soft_delete(
+                            run_id=run_id,
+                            chunk_id=chunk_id,
+                            mtype=mtype,
+                            before=before,
+                            after=after,
+                            revert_sql=revert_sql,
+                            ts=ts,
+                        )
+                        if apply_ok:
+                            applied += 1
+                        else:
+                            failed += 1
 
-        # === Phase 3: watermark (§5.9.2) ===
+        # ============================================================
+        # Phase 3: watermark (§5.9.2)
+        # [fix 8/4] applied==0 AND failed==0 = 没成功也没失败, 推 watermark (idempotent 软写)
+        # [fix 8/4] failed > 0 = 有失败, 不推 (下次重跑失败项)
+        # [fix 8/4] applied > 0 = 成功, 推 (不论 skipped, 因 skipped 是 cap 超限)
+        # ============================================================
         watermark_updated = False
-        if not dry_run and applied > 0:
+        if failed > 0:
+            watermark_updated = False
+        elif dry_run:
+            if proposals:
+                self._l2_set("l2.last_dry_run.hygiene", ts)
+        else:
+            # 真跑 + 无失败 (可能 applied=0 也推, 因为是 idempotent 软写)
             self._l2_set("l2.last_run.hygiene", ts)
             watermark_updated = True
-        elif dry_run and proposals:
-            # [dry-run hygiene] 不推 watermark (§5.9.2 "executed success 才推进")
-            # 但记 dry_run 时间, 方便主人看测试频率
-            self._l2_set("l2.last_dry_run.hygiene", ts)
 
         self._conn.commit()
 
         return {
             "applied": applied,
             "skipped": skipped,
+            "failed": failed,
             "proposals": proposals,
             "watermark_updated": watermark_updated,
         }
+
+    def _apply_decay_importance(
+        self,
+        run_id: str,
+        chunk_id: str,
+        before: Dict,
+        after: Dict,
+        revert_sql: str,
+        ts: str,
+    ) -> bool:
+        """[H-3 §5.9 实战] 真 UPDATE chunks.importance + 写 audit_log applied 行.
+
+        Returns True on success, False on failure (skipped + 错误记入 audit_log).
+        """
+        try:
+            # 1. 真改数据 (用 _exec_clean 保证 # 注释不报错)
+            cur = self._exec_clean(
+                """UPDATE chunks SET importance = ?
+                   WHERE id = ? AND valid_until IS NULL""",
+                (after["importance"], chunk_id),
+            )
+            if cur.rowcount == 0:
+                # chunk 已被别人改/删 (race condition)
+                raise RuntimeError(
+                    f"chunk {chunk_id} not found or already soft-deleted (rowcount=0)"
+                )
+
+            # 2. 写 audit_log applied 行 (append-only §5.9.1)
+            # [fix 8/4] UNIQUE(run_id, pass_name, action_type, ref_id, status)
+            # 同 run_id 同 ref 已 proposed, 现在写 applied = 同 ref 不同 status
+            # 但 UNIQUE 5 字段含 status, status 不同 = OK
+            self._conn.execute("""
+                INSERT INTO audit_log
+                    (run_id, pass_name, action_type, ref_type, ref_id,
+                     before_json, after_json, confidence, llm_used, status,
+                     created_at, revert_sql)
+                VALUES (?, 'hygiene', 'decay_importance', 'chunk', ?,
+                        ?, ?, 1.0, 0, 'applied', ?, ?)
+            """, (
+                run_id, chunk_id,
+                json.dumps(before, ensure_ascii=False),
+                json.dumps(after, ensure_ascii=False),
+                ts, revert_sql,
+            ))
+            self._conn.commit()
+            return True
+        except Exception as e:
+            # [§5.9.1] 失败标 skipped + 错误记入
+            self._mark_skipped(
+                run_id=run_id,
+                chunk_id=chunk_id,
+                ts=ts,
+                reason=f"decay_importance apply failed: {type(e).__name__}: {e}",
+            )
+            return False
+
+    def _apply_ttl_soft_delete(
+        self,
+        run_id: str,
+        chunk_id: str,
+        mtype: str,
+        before: Dict,
+        after: Dict,
+        revert_sql: str,
+        ts: str,
+    ) -> bool:
+        """[H-3 §5.9 实战] TTL 过期 soft-delete (UPDATE valid_until + INSERT purged_queue) + 写 audit_log applied 行.
+
+        [§5.9 设计意图] soft-delete = UPDATE valid_until (软写, 可回滚);
+        物理删 = 30 天后 run_purge_worker 自动清 (commit 4bd654d).
+        """
+        try:
+            # 1. UPDATE chunks.valid_until = now
+            cur = self._exec_clean(
+                """UPDATE chunks SET valid_until = ?
+                   WHERE id = ? AND valid_until IS NULL""",
+                (ts, chunk_id),
+            )
+            if cur.rowcount == 0:
+                raise RuntimeError(
+                    f"chunk {chunk_id} not found or already soft-deleted"
+                )
+
+            # 2. INSERT purged_queue (30 天延迟物理清, 跟 DESIGN §3.8 一致)
+            self._exec_clean(
+                """INSERT INTO purged_queue
+                       (target_id, target_kind, purged_at, done)
+                   VALUES (?, 'chunk', datetime('now', '+30 days'), 0)""",
+                (chunk_id,),
+            )
+
+            # 3. 写 audit_log applied 行 (§5.9.1 append-only)
+            self._conn.execute("""
+                INSERT INTO audit_log
+                    (run_id, pass_name, action_type, ref_type, ref_id,
+                     before_json, after_json, confidence, llm_used, status,
+                     created_at, revert_sql)
+                VALUES (?, 'hygiene', 'ttl_soft_delete', 'chunk', ?,
+                        ?, ?, 1.0, 0, 'applied', ?, ?)
+            """, (
+                run_id, chunk_id,
+                json.dumps(before, ensure_ascii=False),
+                json.dumps(after, ensure_ascii=False),
+                ts, revert_sql,
+            ))
+            self._conn.commit()
+            return True
+        except Exception as e:
+            self._mark_skipped(
+                run_id=run_id,
+                chunk_id=chunk_id,
+                ts=ts,
+                reason=f"ttl_soft_delete apply failed: {type(e).__name__}: {e}",
+            )
+            return False
+
+    def _mark_skipped(
+        self,
+        run_id: str,
+        chunk_id: str,
+        ts: str,
+        reason: str,
+    ) -> None:
+        """[§5.9.1] 失败 proposal 标 skipped + 错误记入 audit_log (append-only)."""
+        try:
+            self._conn.execute("""
+                INSERT INTO audit_log
+                    (run_id, pass_name, action_type, ref_type, ref_id,
+                     before_json, after_json, confidence, llm_used, status,
+                     created_at, revert_sql)
+                VALUES (?, 'hygiene', 'failed', 'chunk', ?,
+                        NULL, ?, 0, 0, 'skipped', ?, NULL)
+            """, (
+                run_id, chunk_id,
+                json.dumps({"reason": reason}, ensure_ascii=False),
+                ts,
+            ))
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            # UNIQUE 撞, 已写过一个 skipped 同 run_id + ref_id — OK
+            pass
 
     def stats(self) -> Dict:
         """统计 + [H-1 §6.5 v0.2 TASKS] hygiene 子键.
