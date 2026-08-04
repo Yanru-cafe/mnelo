@@ -159,6 +159,26 @@ def test_ttl_revert_sql_revives_chunk_and_cancels_purge():
         mem.close()
 
 
+def test_audit_undo_executes_multistatement_revert_and_appends_reverted_log():
+    mem, ids = _new_mem(), []
+    try:
+        cid = mem.remember("undo integration fixture", source="test_digest", memory_type="ephemeral"); ids.append(cid)
+        before = {"valid_until": None}
+        after = {"valid_until": "2026-08-05T00:00:00"}
+        sql = f"UPDATE chunks SET valid_until = '2026-08-05T00:00:00' WHERE id = '{cid}';"
+        mem._conn.execute("UPDATE chunks SET valid_until=? WHERE id=?", ("2026-08-05T00:00:00", cid))
+        mem._conn.execute("INSERT INTO audit_log (run_id,pass_name,action_type,ref_type,ref_id,before_json,after_json,confidence,llm_used,status,created_at,revert_sql) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ("test_undo", "hygiene", "ttl_soft_delete", "chunk", cid, json.dumps(before), json.dumps(after), 1.0, 0, "applied", "2026-08-05T00:00:00", f"UPDATE chunks SET valid_until=NULL WHERE id='{cid}'; DELETE FROM purged_queue WHERE target_id='{cid}' AND done=0;"))
+        mem._conn.commit()
+        result = mem.audit_undo(mem._conn.execute("SELECT max(id) FROM audit_log WHERE run_id='test_undo'").fetchone()[0])
+        assert result["status"] == "reverted"
+        assert mem._conn.execute("SELECT valid_until FROM chunks WHERE id=?", (cid,)).fetchone()["valid_until"] is None
+        assert mem._conn.execute("SELECT count(*) FROM audit_log WHERE run_id='test_undo' AND status='reverted'").fetchone()[0] == 1
+    finally:
+        mem._conn.execute("DELETE FROM audit_log WHERE run_id='test_undo'")
+        _cleanup(mem, ids)
+        mem.close()
+
+
 def test_historical_digest_content_remains_queryable_asof():
     mem, ids = _new_mem(), []
     try:
