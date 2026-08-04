@@ -2022,11 +2022,13 @@ class Memory:
                 if not dry_run:
                     if not confirm_destructive:
                         # [§5.9.2] 没 confirm_destructive 标 skipped (破坏性操作需显式)
+                        # [8/4 audit #6+8 fix] action_type 跟原 action 一致 ('ttl_soft_delete')
                         self._mark_skipped(
                             run_id=run_id,
                             chunk_id=chunk_id,
                             ts=ts,
                             reason=f"ttl_soft_delete needs confirm_destructive=True (got {confirm_destructive})",
+                            action_type="ttl_soft_delete",
                         )
                         failed += 1
                     else:
@@ -2086,15 +2088,22 @@ class Memory:
         """
         try:
             # 1. 真改数据 (用 _exec_clean 保证 # 注释不报错)
+            # [8/4 audit #3 fix] atomic UPDATE CAS (compare-and-swap) importance guard:
+            #   SELECT-then-UPDATE 实战 race 窗口; §5.9.1 '每提案一事务'
+            #   实战 atomic CAS: WHERE importance = before.importance 实战 SELECT 实战 value
+            #   Client 2 UPDATE 后 importance 已变 → CAS 实战 fail (rowcount=0) → _mark_skipped
+            #   实战 (v0.2): 用 = (CAS) 而不是 < (range scan) 让 race 实战 fail-safe
             cur = self._exec_clean(
                 """UPDATE chunks SET importance = ?
-                   WHERE id = ? AND valid_until IS NULL""",
-                (after["importance"], chunk_id),
+                   WHERE id = ? AND valid_until IS NULL
+                     AND importance = ?""",
+                (after["importance"], chunk_id, before["importance"]),
             )
             if cur.rowcount == 0:
-                # chunk 已被别人改/删 (race condition)
+                # chunk 已被别人改/删 (race condition) 或 importance 已变
                 raise RuntimeError(
-                    f"chunk {chunk_id} not found or already soft-deleted (rowcount=0)"
+                    f"chunk {chunk_id} not found, already soft-deleted, "
+                    f"or importance changed (rowcount=0, expected={before['importance']:.4f})"
                 )
 
             # 2. 写 audit_log applied 行 (append-only §5.9.1)
@@ -2118,11 +2127,13 @@ class Memory:
             return True
         except Exception as e:
             # [§5.9.1] 失败标 skipped + 错误记入
+            # [8/4 audit #6+8 fix] action_type 跟 applied 行一致 (实战是 'decay_importance', 不是 'failed')
             self._mark_skipped(
                 run_id=run_id,
                 chunk_id=chunk_id,
                 ts=ts,
                 reason=f"decay_importance apply failed: {type(e).__name__}: {e}",
+                action_type="decay_importance",
             )
             return False
 
@@ -2182,11 +2193,13 @@ class Memory:
             self._conn.commit()
             return True
         except Exception as e:
+            # [8/4 audit #6+8 fix] action_type 跟 applied 行一致
             self._mark_skipped(
                 run_id=run_id,
                 chunk_id=chunk_id,
                 ts=ts,
                 reason=f"ttl_soft_delete apply failed: {type(e).__name__}: {e}",
+                action_type="ttl_soft_delete",
             )
             return False
 
@@ -2196,18 +2209,25 @@ class Memory:
         chunk_id: str,
         ts: str,
         reason: str,
+        action_type: str = "failed",  # [8/4 audit #6+8 fix] 默认 'failed' 兼容旧调用; 调用方传 action 实战 跟 applied 一致
     ) -> None:
-        """[§5.9.1] 失败 proposal 标 skipped + 错误记入 audit_log (append-only)."""
+        """[§5.9.1] 失败 proposal 标 skipped + 错误记入 audit_log (append-only).
+
+        Args:
+            action_type: 实战 passed-in action ('decay_importance' / 'ttl_soft_delete' / 'failed')
+                实战: §5.9.1 '失败 proposal 标 skipped' 不应改原 action_type
+                实战: 默认 'failed' 兼容旧调用 (L0/L1 阶段)
+        """
         try:
             self._conn.execute("""
                 INSERT INTO audit_log
                     (run_id, pass_name, action_type, ref_type, ref_id,
                      before_json, after_json, confidence, llm_used, status,
                      created_at, revert_sql)
-                VALUES (?, 'hygiene', 'failed', 'chunk', ?,
+                VALUES (?, 'hygiene', ?, 'chunk', ?,
                         NULL, ?, 0, 0, 'skipped', ?, NULL)
             """, (
-                run_id, chunk_id,
+                run_id, action_type, chunk_id,
                 json.dumps({"reason": reason}, ensure_ascii=False),
                 ts,
             ))
