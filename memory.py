@@ -219,11 +219,18 @@ class Memory:
         self._index = _build_index(_cfg.search_backend, self.db_path, _cfg.embedder_dim)
 
     def _migrate_schema(self) -> None:
-        """[P0 §3.0] 自动迁移存量库: 给 entities/chunks 补 memory_type 列.
+        """[P0 §3.0] + [H-1 8/4] 自动迁移存量库.
 
-        幂等 — 已存在则跳过。作为 schema 迁移机制 (§3.5) 的第一步,
-        后续 schema 演进沿用此模式 (PRAGMA table_info 检查 + ALTER)。
+        [P0 §3.0] f1bc1bf: entities/chunks 补 memory_type 列
+        [H-1 8/4] TASKS_L2_HYGIENE H0 的 3 schema 前置:
+          - entities.user_confirmed (NOT NULL DEFAULT 0, partial index =1)
+          - chunks/entities.processed_at (TEXT, NULL=未跑过 L2)
+          - audit_log 表 (L2 自主层审计; UNIQUE 防同 run 重复 apply)
+
+        幂等 — 已存在则跳过 (PRAGMA table_info 检查 + ALTER)。
+        跟 schema.sql 双改一致 (A 修正, deepseek 8/4 cross-check)。
         """
+        # [P0 §3.0] f1bc1bf — memory_type
         for table in ("entities", "chunks"):
             cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
             if "memory_type" not in cols:
@@ -231,6 +238,57 @@ class Memory:
                     f"ALTER TABLE {table} ADD COLUMN memory_type TEXT DEFAULT 'fact'"
                 )
                 logger.info(f"[P0-3.0] migrated {table}: added memory_type column")
+
+        # [H-1 §1] entities.user_confirmed — NOT NULL DEFAULT 0 (Q1 verdict)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(entities)").fetchall()}
+        if "user_confirmed" not in cols:
+            self._conn.execute(
+                "ALTER TABLE entities ADD COLUMN user_confirmed INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("[H-1 §1] migrated entities: added user_confirmed column")
+
+        # [H-1 §2] chunks + entities processed_at — NULL=未跑过 L2 (Q2 verdict 双表)
+        for table in ("chunks", "entities"):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "processed_at" not in cols:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN processed_at TEXT")
+                logger.info(f"[H-1 §2] migrated {table}: added processed_at column")
+
+        # [H-1 §3] audit_log 表 (Q3/Q4 verdict: 单表 + status; Q5 verdict: 显式 revert_sql; B 修正: created_at 不依赖 SQLite DEFAULT)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                pass_name TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                ref_type TEXT NOT NULL,
+                ref_id TEXT NOT NULL,
+                before_json TEXT,
+                after_json TEXT,
+                confidence REAL DEFAULT 1.0,
+                llm_used INTEGER DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                created_at TEXT NOT NULL,
+                revert_sql TEXT,
+                UNIQUE(run_id, pass_name, action_type, ref_id, status)
+            )
+        """)
+        logger.info("[H-1 §3] audit_log table ensured (CREATE TABLE IF NOT EXISTS)")
+
+        # [H-1 索引] 5 个新索引 — CREATE INDEX IF NOT EXISTS (sqlite 3.8+ 支持)
+        for ddl in [
+            "CREATE INDEX IF NOT EXISTS idx_entities_user_confirmed "
+            "ON entities(user_confirmed) WHERE user_confirmed = 1",  # [C 修正] partial
+            "CREATE INDEX IF NOT EXISTS idx_entities_processed_at ON entities(processed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_chunks_processed_at ON chunks(processed_at)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_run ON audit_log(run_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_pass ON audit_log(pass_name, status)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_ref ON audit_log(ref_type, ref_id)",
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)",
+        ]:
+            self._conn.execute(ddl)
+        logger.info("[H-1] 6 new indexes ensured (CREATE INDEX IF NOT EXISTS)")
+
         self._conn.commit()
 
     def close(self) -> None:
