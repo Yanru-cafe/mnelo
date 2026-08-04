@@ -155,6 +155,15 @@ class Config:
         self.db_dir = Path(env_dir or storage_section.get("dir") or DEFAULT_LIVE_ROOT)
         self.db_path = Path(env_db or (self.db_dir / "memory.db"))
 
+        # [zvec 集成] SearchIndex 后端 (DESIGN §3.6/§8.3):
+        # env MNELO_MEMORY_SEARCH_BACKEND > config.toml [search].backend > 'sqlite_vec'.
+        search_section = self._raw.get("search", {}) if isinstance(self._raw.get("search"), dict) else {}
+        self.search_backend = (
+            os.environ.get("MNELO_MEMORY_SEARCH_BACKEND")
+            or search_section.get("backend")
+            or "sqlite_vec"
+        )
+
     @classmethod
     def load(cls) -> "Config":
         """Get the loaded config singleton."""

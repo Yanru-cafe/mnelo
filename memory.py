@@ -212,6 +212,12 @@ class Memory:
         # [P0 §3.0] 存量库轻量自动迁移 (幂等): 补 memory_type 列
         self._migrate_schema()
 
+        # [zvec 集成] SearchIndex 适配器 (DESIGN §3.6) — 默认 sqlite_vec,
+        # zvec 可选 (子进程特性检测, 不可用自动回落)
+        from search_index import build_search_index as _build_index
+
+        self._index = _build_index(_cfg.search_backend, self.db_path, _cfg.embedder_dim)
+
     def _migrate_schema(self) -> None:
         """[P0 §3.0] 自动迁移存量库: 给 entities/chunks 补 memory_type 列.
 
@@ -228,7 +234,11 @@ class Memory:
         self._conn.commit()
 
     def close(self) -> None:
-        """Close the underlying SQLite connection."""
+        """Close the underlying SQLite connection + search index."""
+        try:
+            self._index.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[memory.close] index close failed: {e}")
         self._conn.close()
 
     def __enter__(self) -> "Memory":
@@ -314,39 +324,11 @@ class Memory:
                 ),
             )
 
-        # 4. 写 vector (sqlite-vec 0.1.x: vec0.rowid = chunks.rowid)
-        # [BUG 7/18 fix] 之前用 last_insert_rowid() 但 entities/relations INSERT 后会被覆盖
-        # → vector 写到错的 vec0 rowid, _vector_recall 召回失败
-        # 修: 用 SELECT round-trip 拿 chunks.rowid (保证 1:1)
-        chunk_rowid = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()[0]
+        # 4. 写向量索引 (SearchIndex 适配器, DESIGN §3.6)
+        # [7/21] 原 vec0 直接 INSERT + rowid 冲突 REPLACE 逻辑下沉到 SQLiteVecIndex.add
+        # (行为不变); backend=zvec 时走 zvec 后端.
         v_bytes = embed_bytes(content)
-        # [7/19 v0.5.5] Robust vector insert: if rowid collides with a previous
-        # crashed insert or orphan from `forget()` cleanup, REPLACE it (DELETE+INSERT).
-        # Root cause: vec0 internal counter doesn't perfectly track chunks.rowid
-        # (e.g. soft-deleted chunks leave their vectors in place). Without this
-        # guard, remember() raises UNIQUE constraint on vectors primary key.
-        try:
-            self._conn.execute(
-                "INSERT INTO vectors (rowid, embedding) VALUES (?, ?)",
-                (chunk_rowid, v_bytes),
-            )
-        except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
-            # [7/19 v0.5.5] Robust vector insert: if rowid collides with a
-            # previous crashed insert or orphan from `forget()` cleanup,
-            # REPLACE it (DELETE+INSERT). Root cause: vec0 internal counter
-            # doesn't perfectly track chunks.rowid (e.g. soft-deleted chunks
-            # leave their vectors in place). Without this guard, remember()
-            # raises UNIQUE constraint on vectors primary key.
-            # Note: sqlite-vec raises OperationalError (not IntegrityError)
-            # for primary-key collisions on vec0 tables.
-            if "UNIQUE constraint" not in str(e) and "primary key" not in str(e):
-                raise  # re-raise if it's a different OperationalError
-            logger.warning(f"vector rowid {chunk_rowid} already exists — replacing (chunk_id={chunk_id})")
-            self._conn.execute("DELETE FROM vectors WHERE rowid = ?", (chunk_rowid,))
-            self._conn.execute(
-                "INSERT INTO vectors (rowid, embedding) VALUES (?, ?)",
-                (chunk_rowid, v_bytes),
-            )
+        self._index.add(chunk_id, v_bytes, conn=self._conn)
 
         self._conn.commit()
         # [7/19 v0.5.3] metrics
@@ -455,38 +437,13 @@ class Memory:
             "UPDATE chunks SET superseded_by = ?, valid_until = ? WHERE id = ? AND valid_until IS NULL",
             (new_id, now(), old_id),
         )
-        # [7/19 v0.5.6] Drift fix: delete old chunk's vector (same rationale as forget()).
-        old_rowid = old["rowid"] if "rowid" in old.keys() else None
-        if old_rowid is None:
-            old_rowid_row = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (old_id,)).fetchone()
-            old_rowid = old_rowid_row[0] if old_rowid_row else None
-        if old_rowid is not None:
-            try:
-                self._conn.execute("DELETE FROM vectors WHERE rowid = ?", (old_rowid,))
-            except sqlite3.OperationalError as e:
-                logger.warning(f"vector cleanup failed for old chunk {old_id}: {e}")
-
-        # [7/19 v0.5.6] Embed the NEW chunk's content for vector search.
-        # Previously update() created a new chunk without embedding it, leaving it
-        # invisible to vector recall. This was masked because old vector wasn't
-        # cleaned up (so old embedding was still in vec0). Now that we delete
-        # the old vector, we MUST re-embed the new content.
-        new_chunk_rowid = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (new_id,)).fetchone()[0]
+        # [7/21] 向量索引变更下沉到 SearchIndex 适配器
+        # (原 v0.5.6: 删旧向量 + 重嵌新内容 — 行为不变)
+        self._index.remove(old_id, conn=self._conn)
         new_content_for_embed = new_content if new_content is not None else old["content"]
         try:
             v_bytes = embed_bytes(new_content_for_embed)
-            try:
-                self._conn.execute(
-                    "INSERT INTO vectors (rowid, embedding) VALUES (?, ?)",
-                    (new_chunk_rowid, v_bytes),
-                )
-            except sqlite3.IntegrityError:
-                logger.warning(f"vector rowid {new_chunk_rowid} already exists — replacing (new chunk_id={new_id})")
-                self._conn.execute("DELETE FROM vectors WHERE rowid = ?", (new_chunk_rowid,))
-                self._conn.execute(
-                    "INSERT INTO vectors (rowid, embedding) VALUES (?, ?)",
-                    (new_chunk_rowid, v_bytes),
-                )
+            self._index.add(new_id, v_bytes, conn=self._conn)
         except Exception as e:
             logger.warning(f"failed to embed new chunk {new_id} during update: {e}")
 
@@ -511,16 +468,9 @@ class Memory:
             self._conn.execute(
                 "UPDATE chunks SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id)
             )
-            # [7/19 v0.5.6] Drift fix: also delete the vector row.
-            # Soft-deleted chunks are filtered out by `_vector_recall` (valid_until IS NULL),
-            # so the embedding is dead — keeping it bloats vec0 and risks rowid collisions
-            # on future INSERTs (vec0 internal counter drifts from chunks.rowid).
-            chunk_rowid = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (target_id,)).fetchone()
-            if chunk_rowid:
-                try:
-                    self._conn.execute("DELETE FROM vectors WHERE rowid = ?", (chunk_rowid[0],))
-                except sqlite3.OperationalError as e:
-                    logger.warning(f"vector cleanup failed for chunk {target_id}: {e}")
+            # [7/21] 向量索引删除下沉到 SearchIndex 适配器 (原 v0.5.6 drift fix 逻辑)
+            # 软删 chunk 的 embedding 是死数据 — 清掉防 vec0 rowid 漂移/碰撞.
+            self._index.remove(target_id, conn=self._conn)
         elif target_kind == "entity":
             self._conn.execute(
                 "UPDATE entities SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id)
@@ -715,77 +665,29 @@ class Memory:
         return results
 
     def _vector_recall(self, query: str, top_k: int, filters: Dict, asof: str) -> List[Dict]:
-        """路 1: 向量检索 (sqlite-vec 0.1.x vec0 + MATCH)."""
+        """路 1: 向量检索 (SearchIndex 适配器, DESIGN §3.6)."""
+        return self._vector_recall_with_conn(self._conn, query, top_k, filters, asof)
+
+    def _vector_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
+        """[P2+ #2] vector recall — 索引 KNN 走 SearchIndex 适配器.
+
+        Args:
+            conn: 独立 sqlite3 connection (每路独立; 用于 chunk 侧查询)
+        """
         q_bytes = embed_bytes(query)
         # [审计 4.3 ] filter 多时, 多取一些确保过滤后还够 top_k; strategy 也加大召回
         fetch_limit = top_k * (8 if (filters or top_k >= 3) else 2)
-        # [BUG 7/18 fix] vec0 extension 返回 plain tuple, sqlite3.Row 不生效
-        # [P0 审计] 用 _with_row_factory helper 统一处理 (前: 双层 try/finally 嵌套)
-        try:
-            with _with_row_factory(self._conn, sqlite3.Row):
-                rows = self._conn.execute(
-                    """
-                    SELECT v.rowid AS v_rowid, v.distance AS distance
-                    FROM vectors v
-                    WHERE v.embedding MATCH ? AND k = ?
-                """,
-                    (q_bytes, fetch_limit),
-                ).fetchall()
-        except Exception as e:
-            print(f"[vector_recall] failed: {e}")
+        knn_hits = self._index.knn(q_bytes, fetch_limit, conn=conn)
+        if not knn_hits:
             return []
 
         results = []
-        for r in rows:
-            v_rowid = r["v_rowid"] if isinstance(r, sqlite3.Row) else r[0]
-            distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
-            # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
-            chunk = self._conn.execute(
-                "SELECT id, content, memory_type, source, timestamp, importance FROM chunks "
-                "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
-                (v_rowid, asof),
-            ).fetchone()
-            if not chunk:
-                continue
-            if filters:
-                if "source" in filters and chunk["source"] != filters["source"]:
-                    continue
-                if "type" in filters and chunk["memory_type"] != norm_memory_type(filters["type"]):
-                    continue
-            results.append(self._hit_dict(chunk, method="vector", distance=float(distance)))
-        return results[:top_k]  # type: ignore
-
-    def _vector_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
-        """[P2+ #2] 独立 conn 版 vector recall — 并发安全.
-
-        Args:
-            conn: 独立 sqlite3 connection (每路独立, 避免 threading 冲突)
-        """
-        q_bytes = embed_bytes(query)
-        fetch_limit = top_k * (8 if (filters or top_k >= 3) else 2)
-        try:
-            with _with_row_factory(conn, sqlite3.Row):
-                rows = conn.execute(
-                    """
-                    SELECT v.rowid AS v_rowid, v.distance AS distance
-                    FROM vectors v
-                    WHERE v.embedding MATCH ? AND k = ?
-                """,
-                    (q_bytes, fetch_limit),
-                ).fetchall()
-        except Exception as e:
-            print(f"[vector_recall_thread] failed: {e}")
-            return []
-
-        results = []
-        for r in rows:
-            v_rowid = r["v_rowid"] if isinstance(r, sqlite3.Row) else r[0]
-            distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
+        for hit in knn_hits:
             # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             chunk = conn.execute(
                 "SELECT id, content, memory_type, source, timestamp, importance FROM chunks "
-                "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
-                (v_rowid, asof),
+                "WHERE id = ? AND (valid_until IS NULL OR valid_until > ?)",
+                (hit.chunk_id, asof),
             ).fetchone()
             if not chunk:
                 continue
@@ -794,7 +696,7 @@ class Memory:
                     continue
                 if "type" in filters and chunk["memory_type"] != norm_memory_type(filters["type"]):
                     continue
-            results.append(self._hit_dict(chunk, method="vector", distance=float(distance)))
+            results.append(self._hit_dict(chunk, method="vector", distance=float(hit.distance)))
         return results[:top_k]  # type: ignore
 
     def _meta_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
