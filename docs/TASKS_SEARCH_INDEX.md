@@ -290,9 +290,10 @@ class TestUsearchIndex(unittest.TestCase):
 2. **索引完整性校验（启动时）**：
    - `UsearchIndex.close()` / `ZvecIndex.close()` save 时，写 sidecar（如 `usearch.index.checksum`）：源 chunk 计数 + 哈希
    - `__init__` load 后校验 sidecar → 失配 → `logger.warning` + 建议跑 repair/rebuild
-3. 接 `health_check`：报告索引完整性状态
+3. **auto-repair（v0.2，hermes 二轮 Q1 采纳）**：`MNELO_MEMORY_AUTO_REPAIR_INDEX=1` 时，sidecar 失配**自动跑 repair_index.py**（仅孤儿删除，安全操作），并记录修复动作。⚠️ 注意：这**不是**镜像已有模式——代码库中不存在 `MNELO_MEMORY_AUTO_REPAIR_VECTORS`，这是确立新模式。设计护栏：auto-repair **只做孤儿删除**（不重建、不删活跃项），必须显式 env 开启
+4. **drift 指标（独立补充）**：health_check 报 `index_drift` = 索引孤儿数 / 活跃 chunks 数——让漂移**持续可观测**（hermes 二轮担心"失配会无限累积"，drift 指标让它在 recall 崩之前就被看到），与 auto-repair 互补：drift 负责"看见"，repair 负责"清掉"
 
-**验收**：构造孤儿场景（手动删 SQLite chunk 不动索引）→ `repair_index.py --dry-run` 报出、实际跑后清掉；sidecar 篡改 → 启动警告。
+**验收**：构造孤儿场景（手动删 SQLite chunk 不动索引）→ `repair_index.py --dry-run` 报出、实际跑后清掉；sidecar 篡改 → 启动警告；设 `MNELO_MEMORY_AUTO_REPAIR_INDEX=1` → 启动自动修复 + 日志；health_check 显示 drift 指标。
 
 ---
 
