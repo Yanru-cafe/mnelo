@@ -164,6 +164,34 @@ class Config:
             or "sqlite_vec"
         )
 
+        # [G1 8/4] TASKS_L2_DIGEST §1.4 — [digest] config block
+        digest_section = self._raw.get("digest", {}) if isinstance(self._raw.get("digest"), dict) else {}
+        digest_enabled_str = (
+            os.environ.get("MNELO_MEMORY_DIGEST_ENABLED")
+            or str(digest_section.get("enabled", True))
+        )
+        self.digest_enabled = digest_enabled_str.lower() not in ("false", "0", "no", "off")
+        digest_max_chars_str = (
+            os.environ.get("MNELO_MEMORY_DIGEST_MAX_CHARS")
+            or str(digest_section.get("max_chars", 2000))
+        )
+        self.digest_max_chars = int(digest_max_chars_str)
+        digest_recent_window_str = (
+            os.environ.get("MNELO_MEMORY_DIGEST_RECENT_WINDOW_DAYS")
+            or str(digest_section.get("recent_window_days", 30))
+        )
+        self.digest_recent_window_days = int(digest_recent_window_str)
+        digest_imp_threshold_str = (
+            os.environ.get("MNELO_MEMORY_DIGEST_IMPORTANCE_THRESHOLD")
+            or str(digest_section.get("importance_threshold", 0.8))
+        )
+        self.digest_importance_threshold = float(digest_imp_threshold_str)
+        digest_inject_str = (
+            os.environ.get("MNELO_MEMORY_DIGEST_INJECT_ON_INITIALIZE")
+            or str(digest_section.get("inject_on_initialize", False))
+        )
+        self.digest_inject_on_initialize = digest_inject_str.lower() not in ("false", "0", "no", "off")
+
     @classmethod
     def load(cls) -> "Config":
         """Get the loaded config singleton."""
