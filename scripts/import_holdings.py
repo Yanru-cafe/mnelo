@@ -25,8 +25,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from validation import validate_holding_payload, ValidationError
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
-STATE_DIR = Path("/Users/apple/.hermes/state")
+# [7/21 fix] 不再硬编码, 从 config/env 解析 (env > ~/.hermes/...)
+from config import resolve_db_path as _resolve_db_path
+
+DB_PATH = _resolve_db_path()
+STATE_DIR = Path(__import__("os").environ.get("MNELO_STATE_DIR", str(Path.home() / ".hermes" / "state")))
 
 
 def find_holdings_files() -> list:

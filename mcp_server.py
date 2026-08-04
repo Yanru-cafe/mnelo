@@ -28,8 +28,8 @@ from auth import AuthError, load_auth_token, verify_bearer
 from config import config  # [Round 2] server host/port 配置
 from validation import ValidationError
 
-# 路径
-sys.path.insert(0, "/Users/apple/.hermes/memory")
+# 路径 — [7/21 fix] 插入本文件所在目录 (repo root), 不再硬编码 live 路径
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 logger = logging.getLogger("mnelo.mcp")
 logger.setLevel(logging.INFO)
@@ -66,10 +66,10 @@ def _get_mem() -> Any:
     """单例 Memory."""
     global _mem_instance
     if _mem_instance is None:
-        from memory import Memory
+        from memory import Memory, DB_PATH as _DB_PATH
 
         _mem_instance = Memory()
-        logger.info(f"mnelo MCP ready (db: {Path('/Users/apple/.hermes/memory/memory.db')})")
+        logger.info(f"mnelo MCP ready (db: {_DB_PATH})")
     return _mem_instance
 
 

@@ -38,7 +38,25 @@ except ImportError:
         tomllib = None
 
 
-CONFIG_PATH = Path(os.environ.get("MNELO_MEMORY_CONFIG", "/Users/apple/.hermes/memory/config.toml"))
+# [7/21 fix] LIVE_ROOT 单一事实源 — 消除硬编码的 /Users/apple/.hermes/memory。
+# 解析优先级: env MNELO_MEMORY_DIR > ~/.hermes/memory (默认, 与旧部署向后兼容)。
+# 所有需要 live 目录/DB 路径的模块 (memory / entity_resolve / scripts) 都从这里读。
+DEFAULT_LIVE_ROOT = Path(os.environ.get("MNELO_MEMORY_DIR", str(Path.home() / ".hermes" / "memory")))
+CONFIG_PATH = Path(os.environ.get("MNELO_MEMORY_CONFIG", str(DEFAULT_LIVE_ROOT / "config.toml")))
+
+
+def resolve_db_path() -> Path:
+    """Resolve the memory.db path: env MNELO_MEMORY_DB_PATH > MNELO_MEMORY_DIR > ~/.hermes/memory.
+
+    Used by memory.py / entity_resolve.py / scripts to avoid hardcoding an absolute path.
+    """
+    env_db = os.environ.get("MNELO_MEMORY_DB_PATH")
+    if env_db:
+        return Path(env_db)
+    env_dir = os.environ.get("MNELO_MEMORY_DIR")
+    if env_dir:
+        return Path(env_dir) / "memory.db"
+    return DEFAULT_LIVE_ROOT / "memory.db"
 
 
 def _load_config_file(path: Path) -> dict:
@@ -128,6 +146,14 @@ class Config:
             print(f'[config] WARN: server.port "{port_str}" invalid ({e}); 回落 8086', file=sys.stderr)
             port = 8086
         self.server_port = port
+
+        # [7/21 fix] Storage location: env MNELO_MEMORY_DIR/MNELO_MEMORY_DB_PATH
+        # > config.toml [storage].dir > ~/.hermes/memory (backward compatible).
+        storage_section = self._raw.get("storage", {}) if isinstance(self._raw.get("storage"), dict) else {}
+        env_dir = os.environ.get("MNELO_MEMORY_DIR")
+        env_db = os.environ.get("MNELO_MEMORY_DB_PATH")
+        self.db_dir = Path(env_dir or storage_section.get("dir") or DEFAULT_LIVE_ROOT)
+        self.db_path = Path(env_db or (self.db_dir / "memory.db"))
 
     @classmethod
     def load(cls) -> "Config":

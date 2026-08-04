@@ -23,8 +23,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
-MEMORY_DIR = Path("/Users/apple/.hermes/memory")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# [7/21 fix] 不再硬编码, 从 config 解析
+from config import resolve_db_path as _resolve_db_path
+
+DB_PATH = _resolve_db_path()
+MEMORY_DIR = DB_PATH.parent
 
 sys.path.insert(0, str(MEMORY_DIR))
 
