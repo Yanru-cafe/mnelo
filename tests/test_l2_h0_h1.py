@@ -148,8 +148,8 @@ class TestHygienePass(unittest.TestCase):
             self.assertIn("after", p)
             # before.importance > after.importance (decay)
             self.assertGreater(p["before"]["importance"], p["after"]["importance"])
-            # after > 0 (不归 0)
-            self.assertGreater(p["after"]["importance"], 0)
+            # after >= 0 (decay 不能为负; 实战 8/4 已 reduce 到 floor 0.05 → 再减 = 0)
+            self.assertGreaterEqual(p["after"]["importance"], 0)
 
     def test_03_ttl_candidate_reports_5_types(self):
         """[H3 §3] TTL candidate report 覆盖 fact/preference/episode/decision/ephemeral
