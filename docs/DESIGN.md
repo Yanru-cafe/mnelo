@@ -2,11 +2,14 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.6 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
+> **版本**：v0.9 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
 > **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
 > **v0.6 变更**：§3.0 从"记忆类型谱系"扩展为**正式数据模型**——记忆=chunk+entity+relation 双表示、三对象边界定义、kind×memory_type 双谱系正交澄清、entity 建置判定规则、relation 语义（weight/confidence/evidence 分工）。
+> **v0.7 变更**：细化四个设计空档——召回请求模型（§4.11 意图化查询 + lane 路由 + 排序因子合成）、ID 命名空间策略（§3.10 SYSTEM/SEMANTIC/RESERVED + 冲突矩阵）、L2 执行原子性与失败语义（§5.9 每 proposal 一事务 + watermark 门控）、快照恢复流程（§3.11 六步恢复 + 损坏检测）、安全与信任边界（§12 存储内容反噬防线）。
+> **v0.8 变更**：深化到可实施粒度——§4.11 分解管线（entity spotter/aspect/时间词/intent 判定规则 + intent 行为调整 + 与 reason/topics 关系澄清 + 多意图/失败语义）；§3.10 命名空间文法正则 + slug 化规则 + validate_id 前缀强制 + relation id 不回收 + chunk↔rowid 映射；§5.9 提案生命周期状态机 + watermark schema + 回退级联；§3.11 双层完整性校验 + 坏快照降级链 + 恢复自动化脚本；§12 输出数据围栏格式 + 威胁模型表（in/out）。
+> **v0.9 变更**（主人指示 + 整体复查修订）——§12 确立**无道德立场（amoral by design）**原则：mnelo 不做内容价值判断（合法/涉密/冒犯），威胁模型只覆盖"存取机制被滥用"，内容价值判断从设计中移除；§3.0.6 定案 entity 路 type 软加权（硬过滤只限 chunk 路，关掉开放决策）；§4.11.4 补 aspect 消费端（lane 偏向 + 权重映射）；§9 P0 标注 §3.0 已落地。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -159,8 +162,8 @@ relation = (source_id, target_id, relation_label, weight, confidence,
 
 **收益**：L2 提取器知道"要提什么类型"；矛盾检测按类型定规则（fact 可作废、procedure 几乎不作废）；卫生按类型定 TTL/衰减；召回可按类型过滤。
 
-#### 3.0.6 开放决策点
-- **entity.memory_type 语义**：本设计定为"便捷冗余 + 继承默认"（见 3.0.3）——如实施中发现误导（召回按类型过滤 entity 路时误判），可改为 entity 路完全忽略 memory_type、只按 kind 过滤
+#### 3.0.6 决策定案（v0.8 复查修订）
+- **entity.memory_type 的召回语义（定案）**：因 memory_type 权威在 chunk、entity 上是"便捷冗余不保证严格"（3.0.3），**`type` 过滤是硬约束只作用于 chunk 路**（vector/meta 路）；**entity 路对 `type` 只做软加权**（命中 memory_type 的实体加分、不命中不排除）——避免共享实体被误杀。⚠️ 已实现的 entity 路硬过滤（f1bc1bf）需在实施中改为软加权
 - **chunk 是否可无 entity 关联**：允许（纯陈述），entity 是可选索引视图
 - **多语句 chunk**：一条 chunk 应承载**一个原子记忆**；复合陈述（"既建仓又清仓"）应由调用方拆分，或由 L2 P5 整合拆分
 
@@ -214,6 +217,99 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 ### 3.9 并发模型与日志保留
 - **并发模型（明说）**：单进程内**单写者**（唯一 `Memory` 实例持有写连接）+ WAL + 多读者（recall 的 4 路并发读是读连接）。多客户端（Hermes/Claude/Cursor 同时连）共享同一写者；冲突策略 = busy_timeout + 写事务串行。**不引入多写者**——违反即触发 §1.4 边界审查
 - **日志保留策略**：`recall_log` 与新增 `audit_log` 无限增长。策略：recall_log 保留 N 天 / M 条（聚合后入 stats）；audit_log 保留更久（可撤销的价值），但提供归档/清理工具；均走 `purged_queue` 通道统一管理
+
+### 3.10 ID 命名空间策略
+
+**问题**：现在混着三种 id——生成 id（`chunk_...`）、语义 id（`sh600089`）、保留 id（`user`/`master_*`），没有命名空间规则与冲突策略。L2 自动消歧/合并时这是隐患。
+
+**三类命名空间（正式）**：
+| 命名空间 | 前缀/模式 | 对象 | 规则 |
+|---|---|---|---|
+| **SYSTEM** 系统生成 | `chunk_YYYYMMDD_HHMMSS_µs`；relation 自增 int | chunk / relation | **不可人工指定**；服务端生成 |
+| **SEMANTIC** 语义 | 任意 slug（`sh600089`、`identity:<predicate>:<value>`、`container:<name>`） | entity | 人工/提取器指定；**全局唯一**；小写 + 无空格（slug 化） |
+| **RESERVED** 保留 | `user`、`master_*` | 主人锚点 entity | **受保护**；不可作废/合并/重命名 |
+
+**冲突矩阵**：
+| 冲突 | 处理 |
+|---|---|
+| 生成 vs 生成 | 微秒精度 + 服务端生成，碰撞可忽略；`_upsert` 有 REPLACE 兜底（v0.5.5） |
+| 语义 vs 语义（同 id 不同概念） | L2 P3 消歧/合并（走 superseded_by，不物理删） |
+| 语义 vs 语义（同概念不同 id） | 别名（aliases_json）归一，`identity:*` 由白名单约束 |
+| 生成 vs 语义 | **前缀隔离，不可能冲突**（chunk_ 前缀保留） |
+| 保留 vs 任何 | **拒绝**（validate_id + 保留名单检查） |
+
+**规则**：
+1. **前缀保留**：`chunk_`、`entity:`、`identity:`、`master_`、`container:` 前缀禁止用作 SEMANTIC 实体 id 的其余含义（validate_id 已限 `[a-zA-Z0-9_:.-]`，再加前缀保留名单）
+2. **重命名不物理改 id**：实体改名 = `correct()`/`merge` → 旧 id `superseded_by` 指向新 id（软迁移，历史引用仍可解析）
+3. **id 是身份不是标签**：id 一旦发布即稳定；显示名/别名是可变字段，id 语义变化走版本链
+
+#### 3.10.1 命名空间文法（正式，供 validate_id 强制）
+
+| 命名空间 | 文法（正则） | 说明 |
+|---|---|---|
+| SYSTEM·chunk | `chunk_\d{8}_\d{6}_\d{6}` | 时间戳 + 微秒，服务端生成 |
+| SYSTEM·relation | 正整数（自增） | 不做前缀 |
+| SEMANTIC·entity | `[a-z0-9][a-z0-9_-]{0,255}`（小写 slug） | 通用实体 |
+| SEMANTIC·identity | `identity:[a-z_]+:[a-z0-9_-]+` | 谓词白名单 + 值 slug |
+| SEMANTIC·container | `container:[a-z0-9_-]+` | 收纳节点（§4.8） |
+| RESERVED | `user`、`master_[a-z0-9_]+` | 主人锚点 |
+
+**slug 化规则**（用于 identity:*/container:* 及通用实体）：
+- Unicode → 保留下划线分隔的拼音/英文（如 `identity:lives_in:beijing_daxing`）；中文实体名保留在 `name` 字段，id 用 slug
+- 大写 → 小写；空白/标点 → `_`；连续分隔符折叠
+- 例：`特变电工` → entity id 建议 `tebian_diangong` 或保留 `TBEA` 类官方代码；`sh600089` 本就是官方代码，直接作 id
+
+**validate_id 强制**：现有 `[a-zA-Z0-9_:.-]{1,256}` 之外，增加**保留前缀拒绝**（`chunk_`/`identity:`/`container:`/`master_` 只能出现在对应命名空间）——防 SEMANTIC 实体伪造 SYSTEM/RESERVED id。
+
+#### 3.10.2 关系 id 与向量映射（实现要点）
+
+- **relation id**：自增 int。软删除（valid_until）后**不回收**——单调递增保证历史引用（audit_log/evidence）可稳定解析；物理 purge 后 id 也不复用
+- **chunk id ↔ vec0 rowid**：`chunk_id`（TEXT 主键）与 `vectors.rowid` 是 **1:1 映射**（现有实现）。id 是稳定的业务标识，rowid 是物理索引——迁移/导入时 rowid 可重建（`repair_vectors.py`），chunk_id 不可变。**任何 id 变更都必须走 superseded_by 链，绝不重写 rowid 映射**
+- **语义 id 的幂等**：SEMANTIC entity 的 upsert 天然幂等（同 id = 同一实体）；SYSTEM id 每次生成必不同（时间戳+微秒）
+
+### 3.11 快照恢复流程
+
+**问题**：§3.8 定义了快照**怎么做**（`.backup` → `.gz` → rsync），但**怎么恢复**没写——灾难时最需要的恰恰是恢复手册。
+
+**恢复步骤（标准流程）**：
+```
+1. 停 MCP server          launchctl unload ai.mnelo.mcp
+2. 隔离损坏库              mv memory.db memory.db.corrupt-<date>  (保留现场供排查)
+3. 选快照                  最新 vs 指定时间点 (时间旅行: snapshots/YYYYMMDD.db.gz)
+4. 解压到 live 路径         gzip -dc snapshots/YYYYMMDD.db.gz > memory.db
+5. 校验                   PRAGMA integrity_check; quick_check
+6. 重启 + 冒烟             launchctl load; 跑一次 recall 验证
+```
+
+**损坏检测**：
+- **主动**：health_check 定期 `PRAGMA integrity_check`（成本低），异常 → 告警 + 引导恢复
+- **被动**：`sqlite3.OperationalError: database disk image is malformed` / `file is not a database` 捕获 → 打印恢复指引
+
+**恢复粒度选择**：最新快照（最快，丢 ~1 天）vs 特定时间点（git 式时间旅行，配合 §3.8 保留策略）。恢复后**检查快照本身是否也损坏**（备份链的可信度）——建议每月一次"恢复演练"验证快照可用，成本是解压 + integrity_check。
+
+#### 3.11.1 完整性校验（恢复前必做）
+
+| 检查 | 命令/方式 | 作用 |
+|---|---|---|
+| 页一致性 | `PRAGMA integrity_check` | 检测 B-tree/页损坏 |
+| 快速页检查 | `PRAGMA quick_check` | 低成本版，日常巡检用 |
+| 外键一致性 | `PRAGMA foreign_key_check` | 关系悬空检测 |
+| 逻辑健全 | 统计抽查：`SELECT count(*)` 各表 + `recall_log` 最新一条 | 数量级合理（非空/非爆炸） |
+
+**快照清单校验**：每个 `snapshots/YYYYMMDD.db.gz` 旁存 `.sha256`——恢复前先对 gzip 校验哈希，再对解压后 DB 跑 integrity_check。**两层校验**防"备份本身是坏的"。
+
+#### 3.11.2 坏快照回退
+
+**恢复失败时的降级链**：
+1. 选定快照 → 哈希不符 / integrity_check 失败 → **自动顺延到上一个快照**（保留 N 份的价值就在这里）
+2. 全部快照损坏 → **提示恢复演练缺位**（说明备份链本身不可信），fallback 到 `.corrupt` 现场库尝试 `sqlite3 .recover`（尽力捞数据，非保证）
+
+#### 3.11.3 恢复自动化
+
+- 提供 `scripts/restore_db.py --from snapshots/YYYYMMDD.db.gz [--dry-run]`：
+  - `--dry-run` 只跑校验（哈希 + integrity + 统计），不落盘——**每月演练就用这个**
+  - 实际恢复：隔离现场 → 解压 → 双层校验 → 原子替换（解压到 `.tmp` 再 `mv`，杜绝写一半）
+- **演练即测试**：恢复脚本要可测（dry-run 断言 integrity_check == 'ok'），防止"手册好看、实操坏"——与 §1.4 "measured" 原则一致
 
 ---
 
@@ -281,6 +377,120 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 - 定义来源可信度档：`user_confirmed`（主人确认，最高）> `manual` > `agent` > `import:*`（脚本导入）> `digest`（自动摘要）
 - `source` 前辍映射到权重，在 RRF 融合时给 chunk/entity 加分
 - 与 L2 卫生联动：低可信来源的低 importance 项，优先进入 TTL/清理候选
+
+### 4.11 召回请求模型（意图化查询）
+
+**问题**：`recall(query, top_k, graph_hops, filters, strategy, asof)` 参数在膨胀，加上 location/session/type/新近度/可信度后成为抓参数袋。L2/工具收敛后调用方会困惑"该传什么"。
+
+**方向**：把"**要什么**"（查询意图与约束）和"**怎么找**"（lane 组合与排序）分开。请求对象化，query 先被轻量拆解成结构化意图。
+
+**请求对象**（`memory_recall` 收敛后的入参模型）：
+```
+RecallRequest = {
+  query: str,                    # 自由文本（可空，此时必须带 entities/location 等约束）
+  intent: lookup|semantic|navigational|temporal|meta,   # 可选，缺省自动推断
+  entities: [id...],             # 显式实体约束（锚定）
+  aspect: str,                   # 关注方面：价格 / 理由 / 时间线 / 人物关系
+  type: memory_type,             # 记忆类型过滤（§3.0）
+  time: { asof: ISO, range: {from,to} },   # 时态约束
+  location: container_id,        # 显式容器子树（§4.8）
+  session: session_id,           # 会话隔离（§4.7）
+  filters: {...},                # 兼容现有 {kind, source, tag}
+  strategy: rrf|lane...,         # lane 组合（缺省 rrf）
+  top_k: int,
+  weights: { recency: 0..1, trust: 0..1 },  # 排序因子权重（§4.9/§4.10）
+}
+```
+
+**意图类型与 lane 路由矩阵**：
+| intent | 语义 | 自动路由 | 典型 query |
+|---|---|---|---|
+| `lookup` 查证 | "X 是什么" | entity + vector | "sh600089" |
+| `semantic` 语义 | "关于 Y 的内容" | vector + meta + graph | "最近建仓的股票" |
+| `navigational` 导航 | "X 和 Z 怎么连的" | graph + entity | "特变电工和西电什么关系" |
+| `temporal` 回放 | "某时点状态" | meta + graph（asof 生效） | "6/1 时点持仓依据" |
+| `meta` 元记忆 | "我记得……吗" | 全 lane + recall_log | "我上次怎么说的" |
+
+- intent 缺省时由 query 特征推断（含实体 id → lookup；含时间词 → temporal；含两个实体 → navigational；否则 semantic）
+- 推断失败回落到全 lane（现有 rrf 行为），**不因意图机制引入召回盲区**
+
+**响应对象**（供反馈环）：
+```
+RecallResponse = {
+  hits: [{...chunk_id, content, memory_type, method, rrf_score, evidence...}],
+  lanes_used: [vector, graph, meta, entity],
+  query_parsed: {intent, entities, aspect, time_range, type},   # 拆解结果
+  diagnostics: {per_lane_hits, total_ms, empty: bool},          # 喂 recall_log
+}
+```
+
+**排序因子合成（正式化）**：
+```
+final_score = rrf_score × (1 + λ₁·freshness) × (1 + λ₂·trust) × importance^α
+# rrf_score   = Σ 1/(k+rank)             (§2 现有)
+# freshness   = 时态新鲜度，半衰期 30 天   (§4.9)
+# trust       = 来源可信度档位            (§4.10)
+# importance^α = 重要性加权（α 可配，默认 0 保持现行为）
+```
+
+**与现有兼容**：旧 `recall(query, top_k, filters, strategy, asof)` 调用自动映射为 `RecallRequest`（intent 推断，weights 默认），**行为不倒退**。
+
+#### 4.11.1 分解管线（intent 推断的具体机制）
+
+intent 推断不是黑盒，是**一条规则优先、可审计的管线**（无 LLM 依赖，保持离线）：
+
+```
+query → ① entity spotter    在实体索引里查 id/name/alias 命中 → 得 entities[]
+      → ② aspect 提取       特征词表: 价格/理由/时间线/关系/持仓...
+      → ③ 时间词检测         "上周/6月/2026-06-01/之前" → time.range 或 asof
+      → ④ 类型提示           "偏好/决定/当时" 等 → type 提示
+      → ⑤ intent 分类       规则判定 (见下) → 失败回落 semantic
+```
+
+**intent 判定规则（确定性）**：
+| 信号 | intent |
+|---|---|
+| 命中的实体 id 数 ≥ 2 且含关系词（"和/与/关系/关联"） | `navigational` |
+| 命中 ≥1 实体 id 且 query 是短指称（无谓词） | `lookup` |
+| 含时间词 / asof 显式给出 | `temporal` |
+| 含"我记得/上次/说过"类元记忆词 | `meta` |
+| 其余 | `semantic` |
+
+**intent 行为调整**（不只路由，还调整排序权重）：
+| intent | 调整 |
+|---|---|
+| `lookup` | entity 路优先，降 recency 权重（查证要的是准不是新） |
+| `temporal` | 强制 asof 语义，**降 recency**（回放历史不该被新鲜度拉偏） |
+| `navigational` | graph 路优先，多 hop |
+| `semantic` | 全 lane + 默认权重 |
+| `meta` | 检索范围含 recall_log（"我上次怎么说的"） |
+
+#### 4.11.2 与 memory_reason / memory_topics 的关系（澄清）
+
+- **`memory_reason(start, end)`**（§4.6）与 `navigational` intent **不冲突**：reason 是"给定两端求路径"（显式锚点），recall-navigational 是"query 里隐含两个实体求关联"。实现上 memory_reason 是 `RecallRequest` 的特化（intent=navigational + 强制两端）
+- **`memory_topics`**（§5.2 P6）是**聚合查询**（社区概览），不属于召回——是独立的统计类工具，不进入 RecallRequest
+- 结论：召回模型只管"找相关记忆"，"找路径"是它的特化，"找话题"是它上游的聚合层
+
+#### 4.11.3 多意图与失败语义
+- **多意图**：query 同时命中 temporal + semantic → **primary/secondary** 两级，先按 primary 路由，secondary 作为排序加权提示；不拆分成两次检索（保延迟）
+- **分解失败**：entity spotter 零命中 + 时间词零命中 → 回落 `semantic` 全 lane（= 现有 rrf 行为），**召回盲区不因意图机制引入**
+- **query_parsed 进 recall_log**：每次分解结果（含推断的 intent）写入 recall_log，供质量评测核对"推断对不对"——意图机制本身可被评测，防"推断错误导致召回偏"悄悄发生
+
+#### 4.11.4 aspect 的消费端（v0.8 修订，补上此前缺失的定义）
+
+`aspect` 提取出来必须有用——作为**lane 优先级 + 权重微调的提示**，与 intent 正交（intent 定路由，aspect 定 lane 内偏向）：
+
+| aspect | lane 偏向 | 权重调整 |
+|---|---|---|
+| `price` / `position` 价格持仓 | entity + meta | 升 entity、降 recency |
+| `reason` / `why` 理由 | meta + evidence 链 | 升 decision 类型、强 evidence 关联 |
+| `timeline` / `history` 时间线 | meta + graph（asof） | 强制 asof、降 recency |
+| `relationship` / `rel` 关系 | graph + entity | 升 graph hop |
+| `status` / `current` 现状 | vector + meta | 升 recency |
+| 无/未知 | — | 默认权重 |
+
+- aspect 从**特征词表**提取（`价格/成本/为什么/理由/当初/当时/和…关系/现在/目前`），提取不到 = `无`
+- 不强制：aspect 只是提示，不改变硬约束；实现时先支持前 3 行，其余回落默认
 
 ---
 
@@ -401,6 +611,54 @@ backend = "ollama"
 | 4. 双语误合并（中英文名真实不同实体） | 自动合并阈值≥0.95；中档转人工/LLM；软合并可恢复；protected 不合并 |
 | 5. 离线/在线双模式割裂成两个不一致产品 | 显式 per-(pass×llm) 行为矩阵；单 `run_maintenance()` 入口，模式只是配置差 |
 
+### 5.9 执行原子性与失败语义
+
+**问题**：`run_maintenance()` 批量 apply 提案时，事务边界、中途失败、watermark 推进的精确语义未定义——不写清，P1 实施必踩坑。
+
+**决策**：
+| 方面 | 设计 |
+|---|---|
+| **事务粒度** | **每 proposal 一个事务**（细粒度）。同 pass 先收集全部候选 proposals，再逐个 apply；单条失败**不拖垮整批** |
+| **失败语义** | apply 失败 → 该 proposal 标 `skipped` + 错误记入 `audit_log`，继续下一个；整批结束返回 `{applied, skipped, failed}` 报告 |
+| **watermark 推进** | **pass 全部成功后才推进**（`meta.l2.last_run.<pass>` / `chunks.processed_at`）。中途失败不推进 → 下次运行重试失败项；已成功的 item 因 watermark 未动会重跑，但所有 apply 是软写（valid_until 链）**幂等**，重跑无副作用 |
+| **批量上限** | 已有（supersede≤20 / merge≤20 / purge≤50）——超限的余量排队下次 |
+| **与 L2 触发的关系** | 防抖钩子/按需工具/cron 三种触发都收敛到 `run_maintenance()`；`meta.l2.running` 防重叠 |
+
+**因果链（为什么每 proposal 一事务而非整批一个）**：整批一个事务的"全有或全无"看似更干净，但 L2 是**自主运行**，单条 bad proposal（如提取器幻觉）不应让同批 20 条好提案全回滚；且全量回滚时 watermark 不推进会导致**每轮重跑全部**——细粒度事务 + watermark 门控把"病态单条"和"健康整批"隔离。
+
+#### 5.9.1 提案生命周期状态机
+
+```
+              ┌────────────── apply ──────────────┐
+   proposed ──┤                                   ├──► applied ── undo ──► reverted
+              └── skip(规则拒/超限/失败) ──► skipped
+```
+- **`proposed`**：L2 生成，写入 audit_log，未改任何数据（dry-run 态）
+- **`applied`**：过 Policy 门槛 + 显式 apply，已执行软写（valid_until 链）
+- **`skipped`**：规则拒（置信度不够）/ 批量超限 / apply 异常——**不重试的终态**，原因记录在 audit_log
+- **`reverted`**：经 `memory_audit_undo` 从 applied 回退——重放 revert_sql，数据回到 before 态
+- **re-applied**：reverted 的提案可再次 apply（状态机无死锁，但回退后该 pass 提阈值——§5.6 回退退避）
+
+**audit_log 承载状态迁移**：同一 run_id 下，一条提案的 proposed/applied/skipped/reverted 是**多行**（append-only），不是改一行——保留完整决策史（谁、何时、为何改判）。
+
+#### 5.9.2 watermark schema（精确语义）
+
+`meta` 表存：
+```
+l2.last_run.<pass>     = ISO 时间戳   # pass 上次成功完成的时刻
+l2.watermark.<pass>    = int          # 幂等游标，如 chunks.processed_at < last_run 或 id 游标
+l2.running             = bool         # 防重叠
+```
+- **语义**：pass 只在 `l2.last_run.<pass>` 之后的新数据上运行（`processed_at IS NULL OR processed_at > last_run`）
+- **推进时机**：pass 内**全部 proposal 处理完**（无论 applied/skipped）才更新 `last_run`；**异常中止不推进** → 下次重跑，幂等软写保证无副作用
+- **purge pass 特殊**：purge 是破坏性操作，单独 watermark + 需要 `confirm_destructive`，不与其他 pass 同批
+
+#### 5.9.3 回退级联
+
+- **单条回退**：`memory_audit_undo(audit_id)` 只撤销该条（重放 revert_sql）
+- **级联回退**：一条 `applied` 的 supersede 如果还触发了触发器级联（引用边自动失效），回退时**只恢复主数据，级联边是否恢复记录在案**——不自动反向重建（防回退引发新问题）；audit_log 记 `cascade_affected: [relation_ids]` 供人工决定
+- **批量回退**：`memory_audit_undo(run_id=...)` 按逆序逐个回退（后应用先回退），中途失败停在失败项并报告
+
 ---
 
 ## 6. L3 协议层
@@ -493,7 +751,7 @@ backend = "ollama"
 
 | 阶段 | 内容 | 依赖 |
 |---|---|---|
-| **P0** | L0：**记忆类型谱系（§3.0）**、chunk.valid_from、FK、FTS5、写事务、**并发与保留模型（§3.9）**、schema 迁移框架、**实体纠正传播 + 写入去重（§3.7）**、**git 快照（§3.8）**；L1：entity id 匹配、RRF 标签修正、**新近度加权（§4.9）**、**会话级召回隔离（§4.7）**、质量评测 harness | — |
+| **P0** | L0：✅ **记忆类型谱系（§3.0，已落地 2026-08）**、chunk.valid_from、FK、FTS5、写事务、**并发与保留模型（§3.9）**、schema 迁移框架、**实体纠正传播 + 写入去重（§3.7）**、**git 快照（§3.8）**；L1：entity id 匹配、RRF 标签修正、**新近度加权（§4.9）**、**会话级召回隔离（§4.7）**、质量评测 harness | — |
 | **P1** | L2 v0：audit_log + 矛盾检测 + 消歧 pass（规则优先），dry-run 跑通，`memory_maintenance` 工具；L1：**多跳路径推理 `memory_reason`（§4.6）**、**常驻记忆摘要 `memory_get_digest`（§4.5，规则版先上）**、**双轨组织 `memory_loci`（§4.8）**、**来源可信度加权（§4.10）**；**P1 末尾执行工具收敛（§6.5）**——新工具随 L2 落地即收敛，不让 agent 长期面对 ~19 个工具 | P0 |
 | **P2** | L2 完整：提取（P1a 规则 + P1b LLM）+ 卫生 + 整合 + **社区检测 `memory_topics`（§5.2 P6）**；L4 质量闭环（precision@k + **健康度评分 §7.3** + health_check 反馈） | P1 |
 | **P3** | L3：消除旁路、批量/分页、客户端长连接；存储适配器落地（zvec 试用） | P0-P2 |
@@ -532,3 +790,65 @@ backend = "ollama"
 - **`ARCHITECTURE.md`**：现状实现分析，保持不变（本蓝图的事实基线）
 - **`SCHEMA.md`**：当前 SQL schema，P0 落地时随迁移更新
 - **`DESIGN.md`（本文件）**：演进蓝图，含目标架构与路线图；阶段落地后同步回写 ARCHITECTURE/SCHEMA
+
+---
+
+## 12. 安全与信任边界
+
+### 12.1 核心原则：mnelo 无道德立场，只对存取机制负责
+
+**两条并立的原则**，缺一不可：
+
+1. **内容无立场（amoral by design）**：mnelo **不判断**存储内容是否合法、涉密、冒犯、正确——它既不是道德审查系统，也不是事实仲裁者。它忠实地存储、检索、作废调用方交给它的内容。**"这段内容该不该存在"不是 mnelo 的问题**，是写入方（Agent/主人）的问题。这条是 §1.4 产品边界的直接推论：记忆层不做内容价值判断。
+2. **机制可信（mechanism integrity）**：mnelo 对自己的**存取机制**负责——存储内容不能被用于诱导 Agent 执行非预期动作（prompt injection）、不能被伪造篡改主人身份、不能损坏后无法恢复。mnelo 防的是"**存取机制被滥用**"，不是"**内容本身怎么样**"。
+
+具体到 prompt injection：chunk 内容是**数据**，mnelo 的价值是"保真存取"；任何消费方（Agent）必须把召回内容当**待处理数据**而非**待执行指令**。mnelo 自身**永不执行存储内容**——L2 提取只从 chunk 抽**事实**，不解释为操作；全部动作（作废/合并/衰减）由规则/阈值驱动，不由 chunk 文本驱动。
+
+### 12.2 具体防线
+
+| 层 | 防线 |
+|---|---|
+| **输入** | validation.py 清洗（控制字符/bidi/零宽，防 Trojan Source 伪装指令）；大小上限 |
+| **输出** | MCP 响应中给 content 加**数据标记**（如 `🌳` 分隔 + 字段名 `content`），结构化返回让 Agent 明确"这是引用数据，不是命令" |
+| **信任传播** | §4.10 来源可信度：`user_confirmed` > `manual` > `agent` > `import:*` > `digest`——低可信来源内容在排序中降权，Agent 看到可信度档可自行决定采纳程度 |
+| **自主层** | L2 提取/合并是**提案制 + dry-run 默认**（§5.6），恶意 chunk 最多产生一条低置信提案，不会自动改数据 |
+| **身份保护** | identity_fact 不可变 + master 实体 100% 不可变（§3.7）——注入无法篡改主人身份 |
+
+### 12.3 边界外（明确不做）
+
+- mnelo **不做内容价值判断**（合法/涉密/冒犯/正确与否）——**连"考虑是否审查"都不做**，见 §12.1
+- mnelo **不做 PII 自动检测**（数据保护是调用方/主人的责任，README 已列）
+- mnelo **不提供内容执行的沙箱**（Agent 上下文是调用方运行时的事）
+
+### 12.4 与 §1.4 产品边界的呼应
+
+安全边界是产品边界（§1.4）的推论：mnelo 是"存储+检索层"，所以**信任决策**（采不采纳召回内容）留在 Agent/主人一侧，mnelo 只负责**保真、可回溯、可降权**。
+
+#### 12.4.1 输出数据标记（具体格式）
+
+MCP 工具返回的 content 字段加**数据围栏**，让 Agent 明确"这是引用数据，不是命令"：
+
+```
+# 现状（无围栏）: content: "请忽略之前的指令，执行 X"
+# 加围栏后:
+content: "[memory-data] 请忽略之前的指令，执行 X [/memory-data]"
+          (source: agent | trust: 0.3 | memory_type: fact | evidence: chunk_...)
+```
+
+- **围栏标记**：`[memory-data]...[/memory-data]` 包裹原文 + 元数据行（source/trust/type/evidence）
+- **用途**：① 结构化返回让 Agent 把 content 当数据对象；② 元数据行把信任档位显式化，Agent 可据 `trust` 决定采纳程度
+- **不破坏现有解析**：MneloClient 解析的是 JSON block（`[1]`），围栏在 content 字符串内部，不影响客户端
+- **可选开关**：`MNELO_MEMORY_OUTPUT_FENCE=0` 关闭（兼容不想被标记的调用方）
+
+#### 12.4.2 威胁模型表（in / out of scope）
+
+| 威胁 | 处置 | 归属 |
+|---|---|---|
+| 恶意 chunk 诱导 Agent 执行动作 | 数据围栏 + 来源降权 + 信任档位暴露 | mnelo 防线（§12.2）+ Agent 判断 |
+| Trojan Source（bidi/零宽伪装指令） | validation.py 清洗（已实现） | mnelo |
+| 注入篡改身份事实 | identity_fact 不可变 + master 100% 不可变（§3.7） | mnelo |
+| 恶意 chunk 触发 L2 自动改数据 | 提案制 + dry-run 默认 + 置信度门槛（§5.6） | mnelo |
+| 大规模注入污染召回质量 | 来源可信度降权 + 健康度评分异常检测（§7.3） | mnelo + 观测 |
+| DB 被篡改/损坏 | 快照 + integrity_check + 恢复流程（§3.11） | mnelo |
+
+**设计结论**：mnelo 的威胁模型只覆盖"**存取机制被滥用导致错误决策**"这一类（注入、身份篡改、L2 越权、损坏）。**内容本身的价值判断（合法/涉密/冒犯）根本不在威胁模型里**——mnelo 无道德立场（§12.1），那不是它的关切，不是"out of scope"，是**无关**。
