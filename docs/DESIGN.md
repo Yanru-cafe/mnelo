@@ -2,7 +2,7 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.9 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
+> **版本**：v0.10 · 2026-08 · 依据 7/21 修复后的代码状态（vec0 查询、asof、init_db、路径已修）。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
 > **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
@@ -10,6 +10,7 @@
 > **v0.7 变更**：细化四个设计空档——召回请求模型（§4.11 意图化查询 + lane 路由 + 排序因子合成）、ID 命名空间策略（§3.10 SYSTEM/SEMANTIC/RESERVED + 冲突矩阵）、L2 执行原子性与失败语义（§5.9 每 proposal 一事务 + watermark 门控）、快照恢复流程（§3.11 六步恢复 + 损坏检测）、安全与信任边界（§12 存储内容反噬防线）。
 > **v0.8 变更**：深化到可实施粒度——§4.11 分解管线（entity spotter/aspect/时间词/intent 判定规则 + intent 行为调整 + 与 reason/topics 关系澄清 + 多意图/失败语义）；§3.10 命名空间文法正则 + slug 化规则 + validate_id 前缀强制 + relation id 不回收 + chunk↔rowid 映射；§5.9 提案生命周期状态机 + watermark schema + 回退级联；§3.11 双层完整性校验 + 坏快照降级链 + 恢复自动化脚本；§12 输出数据围栏格式 + 威胁模型表（in/out）。
 > **v0.9 变更**（主人指示 + 整体复查修订）——§12 确立**无道德立场（amoral by design）**原则：mnelo 不做内容价值判断（合法/涉密/冒犯），威胁模型只覆盖"存取机制被滥用"，内容价值判断从设计中移除；§3.0.6 定案 entity 路 type 软加权（硬过滤只限 chunk 路，关掉开放决策）；§4.11.4 补 aspect 消费端（lane 偏向 + 权重映射）；§9 P0 标注 §3.0 已落地。
+> **v0.10 变更**：6 处遗留加深到可实施粒度——§3.4.1 写事务边界表 + embed 同步/异步取舍；§4.1.1-4.1.3 FTS5 中文分词器决策（trigram）+ 外部内容表触发器 + 软删一致性 + BM25×importance 查询；§4.8.1 location 各 lane 过滤语义 + 空子树/复合约束；§4.11 排序因子默认值（λ₁=0.3/λ₂=0.2/α=0/半衰期 30 天）；§4.5.1 digest 生成刷新机制（三块来源 + dirty 触发 + LLM 可选）；§3.7.1 dedup_check 结构化三元组匹配键 + 场景表。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -183,6 +184,20 @@ relation = (source_id, target_id, relation_label, weight, confidence,
 ### 3.4 写路径事务化
 - `remember()` / `update()` 的 chunk+entities+relations+vector 多步写入包**显式事务**（`BEGIN`/`COMMIT`，异常 `ROLLBACK`），杜绝部分写入
 
+#### 3.4.1 事务边界（精确）
+
+| 写操作 | 事务包含 | 提交点 | 失败回滚 |
+|---|---|---|---|
+| `remember()` | chunk + entities + relations + **vector 嵌入** | 全部成功才 COMMIT | 任一步异常 → ROLLBACK，**不留孤儿**（chunk 无向量 / 实体无 chunk） |
+| `update()` | 新 chunk + 旧 chunk supersede + 触发器级联 + 向量删旧嵌新 | 同上 | 同上 |
+| `correct()`（§3.7） | 实体属性 + 别名 + 级联关系 | 同上 | 同上 |
+| `forget()` | 软删 + 级联失效 + purged_queue 入队 | 同上 | 同上 |
+
+**关键点——embed 在事务内**：向量嵌入（`embed_bytes`）是**外部 IO + CPU 密集**，放事务内会让写路径变慢、且 embed 失败会回滚整条写。权衡决策：
+- **默认**：embed **在事务内**（一致性优先——chunk 必须有向量，宁慢勿残）
+- **可选**：`MNELO_MEMORY_EMBED_ASYNC=1` 时 embed 移出事务（异步补嵌入队列），写路径快、但向量可能短暂缺失——由 `repair_vectors.py` / 异步 worker 兜底
+- 二者都保证：**不存在"chunk 写成功但向量永远缺"的静默状态**（同步=回滚保证；异步=队列保证）
+
 ### 3.5 Schema 迁移机制
 - 基于 `meta.schema_version`（现 1.0）建立正式迁移流程：`scripts/migrate/*.py` 逐版本升级，禁止跳版本
 - 现有 `migrate_to_mnelo.py` 归入此框架
@@ -204,6 +219,28 @@ Memory
   - **不可变边界（明确化）**：`master` 用户实体 = **100% 不可变**（任何路径含 correct() 都拒绝）；其它 `user_confirmed=1` 实体**仅豁免 L2 自动 pass**，`correct()` 显式调用仍允许；`identity_fact` 走专用路径（identity_fact_manager）
   - 这样既防"自主层悄悄改主人身份"，又不堵死"主人自己明确要改"的唯一入口
 - **写入时去重（NOOP 决策）**：`remember()` 可选开关 `dedup_check=True`——写入前检索同主语同谓词的现存事实，命中则走 update/合并而非新增。默认关（保持显式语义 + 写入低延迟），L2 仍负责事后清理
+
+#### 3.7.1 dedup_check 匹配键（精确）
+
+**匹配键 = 结构化三元组，不是文本相似**——避免把"相关"当"重复"：
+
+```
+匹配键: (主语 entity_id, 谓词 relation_label, 宾语/值)
+命中规则:
+  · relations 表存在 (source_id=主语, relation=谓词, valid_until IS NULL)
+    且 target 与候选宾语相同或别名命中
+  · 或 entities 表存在同 id 且 memory_type 一致的同谓词属性
+```
+
+| 场景 | 动作 |
+|---|---|
+| 三元组完全命中 | **update 而非新增**（走 §3.7 correct 或 supersede 链） |
+| 主语同、谓词同、宾语不同 | **矛盾候选**——不静默覆盖，记 `conflict_candidate`（§5.4 语义） |
+| 主语同、谓词不同 | 不判重（不同方面的事实） |
+| 无结构化匹配但文本高相似 | **不判重**（文本相似 ≠ 事实重复；交给 L2 P3/P5） |
+
+- **代价**：`dedup_check=True` 每次 remember 多 1-2 次索引查询 + 可能一次 embedding 相似度（默认关即零代价）
+- **与 L2 关系**：写时去重是"源头拦截"，L2 P2/P3 是"事后清理"——二者互补，写时只拦最确定的，不确定的全留给 L2
 
 ### 3.8 记忆快照（版本化备份）⟵ 借鉴 Letta MemFS
 Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻量版，但**针对 SQLite 单文件 + WAL 的实际情况修正**：
@@ -320,6 +357,56 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 - 查询改写：`LIKE %q%` → `MATCH`，对含符号的 token（`sh600089`、`D∩W`）保留 LIKE 回退
 - 收益：O(N) 全扫 → 索引检索；时间/重要度过滤下推到 SQL
 
+#### 4.1.1 分词器决策（中文场景的关键）
+
+| 分词器 | 中文表现 | 结论 |
+|---|---|---|
+| `unicode61`（默认） | 按空格/标点切，中文整句成一个大 token——**查"建仓"命中不了"今日建仓股票"** | ✗ |
+| `trigram` | 3-gram 切，中文子串可命中，索引体积 ~3× | **主选** |
+| 自定义 `jieba` 外置分词 | 语义分词最好，但引入外部依赖 + 写入路径分词开销 | 可选（离线场景降级 trigram） |
+
+**决策**：`chunks_fts` 用 **`trigram` tokenizer**（对中文子串召回够用、零外部依赖）。含符号 token（`sh600089`、`D∩W`）在 trigram 下可能被切碎——这正是 **LIKE 回退**保留的原因（§4.1 主条）。
+
+#### 4.1.2 表结构与同步（软删一致性）
+
+```
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+    content, source, session_id,
+    tokenize='trigram'
+);
+-- 外部内容表 + 触发器维护 (FTS5 外部内容表模式)
+CREATE TRIGGER trg_chunks_fts_insert AFTER INSERT ON chunks
+    BEGIN INSERT INTO chunks_fts(rowid, content, source, session_id)
+          VALUES (new.rowid, new.content, new.source, new.session_id); END;
+CREATE TRIGGER trg_chunks_fts_delete AFTER DELETE ON chunks
+    BEGIN INSERT INTO chunks_fts(chunks_fts, rowid, content, source, session_id)
+          VALUES ('delete', old.rowid, old.content, old.source, old.session_id); END;
+CREATE TRIGGER trg_chunks_fts_update AFTER UPDATE ON chunks
+    BEGIN INSERT INTO chunks_fts(chunks_fts, rowid, content, source, session_id)
+          VALUES ('delete', old.rowid, old.content, old.source, old.session_id);
+          INSERT INTO chunks_fts(rowid, content, source, session_id)
+          VALUES (new.rowid, new.content, new.source, new.session_id); END;
+```
+
+**软删一致性**：mnelo 用 `valid_until` 软删而非 DELETE——FTS 索引里仍留着已软删 chunk 的 token。**查询侧过滤**（`WHERE rowid IN (SELECT id FROM chunks WHERE valid_until IS NULL ...)`）解决，不物理删 FTS 行（保历史可回放）。**不建 FTS 删除触发器**（软删是 UPDATE valid_until，UPDATE 触发器已覆盖）
+
+#### 4.1.3 查询设计（BM25 + importance）
+
+```
+SELECT c.id, c.content, c.source, c.timestamp, c.importance,
+       bm25(chunks_fts) AS fts_score
+FROM chunks_fts JOIN chunks c ON c.rowid = c.id
+WHERE chunks_fts MATCH ?
+  AND c.valid_until IS NULL            -- 软删过滤
+  AND c.memory_type = ?                -- 类型过滤 (§3.0)
+ORDER BY c.importance * -bm25(chunks_fts) DESC   -- importance 与 BM25 结合
+LIMIT ?
+```
+
+- `-bm25()` 越低越好，`importance * -bm25` 升序 = 重要且相关优先
+- 与现有 `_meta_recall` 的 filters（source/type/time_range）下推同构
+- 保留 `LIKE %q%` 回退：当 query 含 trigram 切碎风险的高符号 token 时走旧路（§4.1 主条）
+
 ### 4.2 entity 路补 id 通道
 - 现状只匹配 `name LIKE` / `aliases_json LIKE`；查询 `sh600089`（实体 id）时 entity 路空手而归
 - 补 `id LIKE` 通道（优先级：id > name > alias），并修正"按 id 查实体"的召回空窗
@@ -338,6 +425,22 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 - 借鉴：`Memory` 自动维护一份 **500–2000 字的记忆摘要**（主人身份 + 近期高 importance 决策），提取规则进 L2；新 MCP 工具 `memory_get_digest` 或 MCP initialize 时自动注入 Agent 上下文
 - 摘要本身也是 chunk（`source='digest'`），可更新/作废，遵循同一套双时态
 - 与 identity_facts 的关系：identity_facts 是"结构化身份事实"，摘要是"面向 Agent 上下文的压缩叙事"，二者互为视图
+
+#### 4.5.1 生成与刷新机制（精确）
+
+**内容来源（固定三块，规则优先）**：
+| 块 | 来源 | 方式 |
+|---|---|---|
+| 身份 | identity_facts（`kind=identity_fact`） | 直接读出，无 LLM |
+| 近期关键 | 高 importance（≥0.8）且近期（30 天）的 decision/episode chunks | 规则抽取首句 + 证据链接 |
+| 进行中 | 最近写入的 session 主题（session_id 分组聚合） | 规则聚合 |
+
+**刷新触发**：增量重建，非全量重写——
+- 写入侧：新 identity_fact 或高 importance decision 落地时置 `digest_dirty` 标志
+- 读取侧：`memory_get_digest` 遇 dirty → 重建（规则块 O(1) 读，秒级）；否则返回缓存
+- **LLM 可选**：`l2.llm.enabled` 时，摘要块 3 用 LLM 压缩（否则规则截断首句 + 省略号）
+- **双时态**：每次重建 = 新摘要 chunk + 旧摘要 superseded（复用 §3.0 版本链），历史摘要可回放
+- **体积护栏**：上限 2000 字，超限截断 + 记 `digest_truncated` 标志（可观测）
 
 ### 4.6 多跳路径推理 ⟵ 借鉴 Cognee CoT graph traversal
 - 现状：图路只有 2-hop BFS 返回邻居，回答不了"X 和 Y 怎么连起来的"
@@ -358,11 +461,26 @@ Letta 2026 年把记忆改成 git 版本化的文件系统。mnelo 移植为轻�
 
 - **显式轨道**：实体 `kind='container'`（或 `locus`）+ `contains` 关系边形成树。几乎零 schema 改动——容器就是实体，收纳就是边
   - `remember(location=<容器id>)` 建收纳边
-  - `recall(location=...)` 把召回限定在容器子树内（graph/meta 路自然支持，vector 路加过滤）
+  - `recall(location=...)` 把召回限定在容器子树内（各 lane 语义见下）
   - 容器带 `order` 属性支持路线巡游（宫殿式的按序访问）
 - **涌现轨道**：向量相似 + L2 P6 社区检测（自动聚类，人不用管）
 - **约束（防止两条轨道打架）**：`location` 只是召回的一个**可选约束**，不是新主路径；默认不传=全局语义召回。显式结构是"加固"，不是"替代"
 - 新工具 `memory_loci_*`（建容器 / 放置 / 子树导航），并入 §6.5 工具收敛后的"组织"意图组
+
+#### 4.8.1 location 过滤的各 lane 语义（精确）
+
+`location=<容器id>` 限定到**子树**（容器及其所有子孙），各 lane 的实现：
+
+| lane | location 实现 | 说明 |
+|---|---|---|
+| **graph** | 从容器出发的子树 BFS 已在 `graph_query` 能力内——先取子树节点集 `S`，再查与 `S` 相连的 chunks/entities | **最自然**，子树即图遍历 |
+| **meta** | 子查询取 `S` 的 chunks：`AND chunk_id IN (SELECT ... 子树内 chunk)` | 一次子查询下推 |
+| **entity** | 实体 id ∈ `S` | 实体在容器内才算 |
+| **vector** | 向量命中后回查 chunk 是否 ∈ `S`（后过滤） | 向量索引无容器概念，只能后过滤 |
+
+- **种子语义**：容器树关系本身是 `contains` 边（evidence_chunk_id 指向建容器的 chunk），子树计算走 §3.10.2 的 relation 查询
+- **空子树**：`location` 指向空容器 → 全 lane 返回空（显式约束优先，不悄悄放大到全局）
+- **与 session/type 复合**：`location` 与 `session`、`type`、`asof` 是 AND 关系（多重约束叠加）
 
 ### 4.9 新近度加权进 RRF ⟵ 借鉴 Zep/Graphiti 时态检索
 现状：asof/valid_until 让"某时点有效"**可查**，但**排序时不奖励新近度**——昨天的重要事实和半年前的同等重要事实同分。个人记忆里"现在的相关度"几乎总该加权：
@@ -432,6 +550,17 @@ final_score = rrf_score × (1 + λ₁·freshness) × (1 + λ₂·trust) × impor
 # trust       = 来源可信度档位            (§4.10)
 # importance^α = 重要性加权（α 可配，默认 0 保持现行为）
 ```
+
+**因子默认值（v0.9 补，实施起点）**：
+| 因子 | 默认 | 说明 |
+|---|---|---|
+| `λ₁`（freshness） | **0.3** | 新鲜度至多贡献 30%——避免"新但无关"压制"旧但相关" |
+| `λ₂`（trust） | **0.2** | 信任档位至多贡献 20%——降权为主，不主导 |
+| `α`（importance） | **0** | 保持现状（importance 已用于 lane 内排序，不在跨 lane 叠加） |
+| freshness 半衰期 | **30 天** | 30 天前的记忆新鲜度减半 |
+
+- 全部经 `RecallRequest.weights` 可调；P2 质量评测（§4.4）用真实数据校准
+- **temporal / lookup intent 强制降 recency**（§4.11.1 行为调整）：此时 `λ₁` 视为 0
 
 **与现有兼容**：旧 `recall(query, top_k, filters, strategy, asof)` 调用自动映射为 `RecallRequest`（intent 推断，weights 默认），**行为不倒退**。
 
