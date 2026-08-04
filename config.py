@@ -178,7 +178,16 @@ class Config:
 
     def describe(self) -> str:
         """One-line summary for startup banner."""
-        return f"tz={self.timezone} warm_up={self.warm_up_embedder} embedder={self.embedder_model}/{self.embedder_dim}d"
+        digest_part = (
+            f" digest={'on' if self.digest_enabled else 'off'}/{self.digest_max_chars}c"
+            if self.digest_enabled
+            else ""
+        )
+        return (
+            f"tz={self.timezone} warm_up={self.warm_up_embedder} "
+            f"embedder={self.embedder_model}/{self.embedder_dim}d"
+            f"{digest_part}"
+        )
 
 
 # Eager load on import
