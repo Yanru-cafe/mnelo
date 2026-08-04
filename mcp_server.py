@@ -254,6 +254,11 @@ TOOLS = [
         },
     },
     {
+        "name": "memory_audit_undo",
+        "description": "Undo one applied audit record; executes its stored multi-statement revert_sql.",
+        "inputSchema": {"type": "object", "properties": {"audit_id": {"type": "integer"}}, "required": ["audit_id"]},
+    },
+    {
         "name": "memory_maintenance",
         "description": "[H-1 §5.7] L2 主动层入口. dry_run 默认 true; l2.enabled=1 才生效. [H-3 §5.9.2] confirm_destructive=True 允许 TTL 真删 (默认 false 安全).",
         "inputSchema": {
@@ -332,6 +337,7 @@ _TOOL_REGISTRY = {
     "memory_stats": ("stats", None),
     # === [H-1 8/4] DESIGN §5.7 (3 L1 入口 + 1 stats 整合) ===
     "memory_audit_list": ("list_audit", None),  # 不走 _handle_simple (有枚举过滤)
+    "memory_audit_undo": ("audit_undo", None),
     "memory_maintenance": ("run_maintenance", None),  # 不走 _handle_simple (passes 列表)
 }
 
