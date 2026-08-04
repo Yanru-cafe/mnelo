@@ -9,6 +9,7 @@
 CREATE TABLE entities (
     id TEXT PRIMARY KEY,
     kind TEXT NOT NULL,                     -- stock / concept / event / person / chunk / task / canonical_fact
+    memory_type TEXT DEFAULT 'fact',        -- [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral
     name TEXT,
     summary TEXT,
     properties_json TEXT,
@@ -32,6 +33,7 @@ CREATE INDEX idx_entities_supersede ON entities(superseded_by) WHERE superseded_
 CREATE TABLE chunks (
     id TEXT PRIMARY KEY,
     content TEXT NOT NULL,
+    memory_type TEXT DEFAULT 'fact',        -- [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral
     source TEXT,
     session_id TEXT DEFAULT 'default',
     timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),

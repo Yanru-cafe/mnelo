@@ -45,6 +45,21 @@ from validation import (
 DB_PATH = _config_module.resolve_db_path()
 
 
+# [P0 §3.0] 记忆类型谱系 — 提取/矛盾/卫生/召回按类型区分。
+# 常量单一事实源在 validation.MEMORY_TYPES, 这里复用避免两份定义漂移。
+from validation import MEMORY_TYPES as _MEMORY_TYPES
+
+
+def norm_memory_type(t) -> str:
+    """校验 + 归一化 memory_type, 非法值抛 ValidationError."""
+    if t is None:
+        return "fact"
+    t = str(t).strip().lower()
+    if t not in _MEMORY_TYPES:
+        raise ValidationError("memory_type", f"unknown memory_type {t!r} (allowed: {sorted(_MEMORY_TYPES)})")
+    return t
+
+
 def now(tz: str = None) -> str:
     """Return current time as ISO 8601 string with seconds precision (e.g. '2026-07-18T15:48:00').
 
@@ -194,6 +209,24 @@ class Memory:
         else:
             logger.info(f"[P2-1] Embedder warm-up disabled ({_cfg.describe()})")
 
+        # [P0 §3.0] 存量库轻量自动迁移 (幂等): 补 memory_type 列
+        self._migrate_schema()
+
+    def _migrate_schema(self) -> None:
+        """[P0 §3.0] 自动迁移存量库: 给 entities/chunks 补 memory_type 列.
+
+        幂等 — 已存在则跳过。作为 schema 迁移机制 (§3.5) 的第一步,
+        后续 schema 演进沿用此模式 (PRAGMA table_info 检查 + ALTER)。
+        """
+        for table in ("entities", "chunks"):
+            cols = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if "memory_type" not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN memory_type TEXT DEFAULT 'fact'"
+                )
+                logger.info(f"[P0-3.0] migrated {table}: added memory_type column")
+        self._conn.commit()
+
     def close(self) -> None:
         """Close the underlying SQLite connection."""
         self._conn.close()
@@ -218,15 +251,18 @@ class Memory:
         tags: List[str] = None,
         session_id: str = "default",
         timestamp: str = None,
+        memory_type: str = "fact",
     ) -> str:
         """写入一条 chunk + 实体 + 关系.
 
         entities = [{id, kind, name, summary?, aliases?, properties?}]
         relations = [{source_id, target_id, relation, weight?, properties?,
                       valid_from?, valid_until?, evidence_chunk_id?}]
+        memory_type: [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral
         """
         ts = timestamp or now()
         chunk_id = generate_id("chunk")
+        memory_type = norm_memory_type(memory_type)
 
         # [7/19 P0-3] chunk content 大小 + 控制字符 + bidi override 验证
         content = validate_chunk_content(content)
@@ -235,12 +271,13 @@ class Memory:
         # 1. 写 chunk
         self._conn.execute(
             """
-            INSERT INTO chunks (id, content, source, session_id, timestamp, importance, metadata_json, valid_until)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+            INSERT INTO chunks (id, content, memory_type, source, session_id, timestamp, importance, metadata_json, valid_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
         """,
             (
                 chunk_id,
                 content,
+                memory_type,
                 source,
                 session_id,
                 ts,
@@ -251,6 +288,8 @@ class Memory:
 
         # 2. 写 entities (insert or ignore — 实体可能已存在)
         for ent in entities or []:
+            ent = dict(ent)
+            ent.setdefault("memory_type", memory_type)
             self._upsert_entity(ent)
 
         # 3. 写 relations
@@ -702,7 +741,7 @@ class Memory:
             distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
             # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             chunk = self._conn.execute(
-                "SELECT id, content, source, timestamp, importance FROM chunks "
+                "SELECT id, content, memory_type, source, timestamp, importance FROM chunks "
                 "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
                 (v_rowid, asof),
             ).fetchone()
@@ -710,6 +749,8 @@ class Memory:
                 continue
             if filters:
                 if "source" in filters and chunk["source"] != filters["source"]:
+                    continue
+                if "type" in filters and chunk["memory_type"] != norm_memory_type(filters["type"]):
                     continue
             results.append(self._hit_dict(chunk, method="vector", distance=float(distance)))
         return results[:top_k]  # type: ignore
@@ -742,7 +783,7 @@ class Memory:
             distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
             # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             chunk = conn.execute(
-                "SELECT id, content, source, timestamp, importance FROM chunks "
+                "SELECT id, content, memory_type, source, timestamp, importance FROM chunks "
                 "WHERE rowid = ? AND (valid_until IS NULL OR valid_until > ?)",
                 (v_rowid, asof),
             ).fetchone()
@@ -751,6 +792,8 @@ class Memory:
             if filters:
                 if "source" in filters and chunk["source"] != filters["source"]:
                     continue
+                if "type" in filters and chunk["memory_type"] != norm_memory_type(filters["type"]):
+                    continue
             results.append(self._hit_dict(chunk, method="vector", distance=float(distance)))
         return results[:top_k]  # type: ignore
 
@@ -758,7 +801,7 @@ class Memory:
         """[P2+ #2] 独立 conn 版 meta recall."""
         # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
         sql = """
-            SELECT id, content, source, timestamp, importance FROM chunks
+            SELECT id, content, memory_type, source, timestamp, importance FROM chunks
             WHERE (valid_until IS NULL OR valid_until > ?)
               AND content LIKE ?
         """
@@ -766,6 +809,9 @@ class Memory:
         if filters and "source" in filters:
             sql += " AND source = ?"
             params.append(filters["source"])
+        if filters and "type" in filters:
+            sql += " AND memory_type = ?"
+            params.append(norm_memory_type(filters["type"]))
         sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
         params.append(top_k)
         rows = conn.execute(sql, params).fetchall()
@@ -785,18 +831,20 @@ class Memory:
                 continue
             like = f"%{tok}%"
             # [7/21 fix] asof: entity 在 asof 时点有效 = valid_from <= asof AND (valid_until IS NULL OR > asof)
-            rows = conn.execute(
-                """
+            sql = """
                 SELECT id, name, kind, summary, importance, aliases_json
                 FROM entities
                 WHERE (valid_from IS NULL OR valid_from <= ?)
                   AND (valid_until IS NULL OR valid_until > ?)
                   AND (name LIKE ? OR aliases_json LIKE ?)
-                ORDER BY importance DESC
-                LIMIT ?
-            """,
-                (asof, asof, like, like, top_k),
-            ).fetchall()
+            """
+            params = [asof, asof, like, like]
+            if filters and "type" in filters:
+                sql += " AND memory_type = ?"
+                params.append(norm_memory_type(filters["type"]))
+            sql += " ORDER BY importance DESC LIMIT ?"
+            params.append(top_k)
+            rows = conn.execute(sql, params).fetchall()
             for r in rows:
                 # [7/19 v0.5.5] Robust aliases parsing:
                 # aliases_json may be NULL (SQL), 'null' (JSON literal),
@@ -924,7 +972,7 @@ class Memory:
         """路 3: 元数据 (精确 LIKE + 时间近)."""
         # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
         sql = """
-            SELECT id, content, source, timestamp, importance FROM chunks
+            SELECT id, content, memory_type, source, timestamp, importance FROM chunks
             WHERE (valid_until IS NULL OR valid_until > ?)
               AND content LIKE ?
         """
@@ -932,6 +980,9 @@ class Memory:
         if filters and "source" in filters:
             sql += " AND source = ?"
             params.append(filters["source"])
+        if filters and "type" in filters:
+            sql += " AND memory_type = ?"
+            params.append(norm_memory_type(filters["type"]))
         sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
         params.append(top_k)
 
@@ -1025,10 +1076,13 @@ class Memory:
                   AND (valid_until IS NULL OR valid_until > ?)
                   AND kind IN ({",".join("?" * len(kind_filter))})
                   AND ({" OR ".join(like_clauses)})
-                ORDER BY importance DESC, recall_count DESC
-                LIMIT ?
             """
-            cur_params = [asof, asof] + list(kind_filter) + params + [take]
+            cur_params = [asof, asof] + list(kind_filter) + params
+            if filters and "type" in filters:
+                sql += " AND memory_type = ?"
+                cur_params.append(norm_memory_type(filters["type"]))
+            sql += " ORDER BY importance DESC, recall_count DESC LIMIT ?"
+            cur_params.append(take)
             rows = self._conn.execute(sql, cur_params).fetchall()
             for r in rows:
                 if r["id"] in seen_ids:
@@ -1237,13 +1291,15 @@ class Memory:
             self._conn.execute(
                 """
                 UPDATE entities
-                SET name = COALESCE(?, name),
+                SET memory_type = COALESCE(?, memory_type),
+                    name = COALESCE(?, name),
                     summary = COALESCE(?, summary),
                     aliases_json = COALESCE(?, aliases_json),
                     properties_json = COALESCE(?, properties_json)
                 WHERE id = ? AND valid_until IS NULL
             """,
                 (
+                    ent.get("memory_type"),
                     ent.get("name"),
                     ent.get("summary"),
                     json.dumps(ent.get("aliases", []), ensure_ascii=False) if "aliases" in ent else None,
@@ -1276,7 +1332,8 @@ class Memory:
                 self._conn.execute(
                     """
                     UPDATE entities
-                    SET name = COALESCE(?, name),
+                    SET memory_type = COALESCE(?, memory_type),
+                        name = COALESCE(?, name),
                         summary = COALESCE(?, summary),
                         aliases_json = COALESCE(?, aliases_json),
                         properties_json = COALESCE(?, properties_json),
@@ -1285,6 +1342,7 @@ class Memory:
                     WHERE id = ?
                 """,
                     (
+                        ent.get("memory_type"),
                         ent.get("name"),
                         ent.get("summary"),
                         json.dumps(ent.get("aliases", []), ensure_ascii=False) if "aliases" in ent else None,
@@ -1298,13 +1356,14 @@ class Memory:
             # Plain INSERT
             self._conn.execute(
                 """
-                INSERT INTO entities (id, kind, name, summary, aliases_json, properties_json,
+                INSERT INTO entities (id, kind, memory_type, name, summary, aliases_json, properties_json,
                                       source, importance, valid_from, valid_until)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
             """,
                 (
                     ent["id"],
                     ent["kind"],
+                    ent.get("memory_type", "fact"),
                     ent.get("name"),
                     ent.get("summary"),
                     json.dumps(ent.get("aliases", []), ensure_ascii=False),
