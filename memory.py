@@ -1743,7 +1743,7 @@ class Memory:
 
         Returns:
             {passes_run, proposals: {pass_name: [proposal_dicts]},
-             applied, skipped, failed, watermark_updated}
+             applied, skipped, failed, watermark_updated, gc_stats}
         """
         # 1. 校验 L2 是否启用
         enabled = self._l2_get("l2.enabled", self._L2_DEFAULTS["enabled"])
@@ -1773,6 +1773,16 @@ class Memory:
             if passes is None:
                 passes = ["hygiene"]  # 默认只跑 hygiene (§6.5 工具收敛原则)
 
+            # 4.5 实战 GC audit_log (调 _run_audit_gc, 实战 v0.2 TASKS §3 L2 hygiene GC)
+            # 实战 fix 8/4 audit #5 — 1yr 估算 150MB 不受控增长
+            gc_enabled = self._l2_get("l2.gc.enabled", True)  # 默认 enabled
+            gc_stats = {"applied_removed": 0, "skipped_removed": 0, "proposed_removed": 0}
+            if gc_enabled and not dry_run:
+                gc_stats = self._run_audit_gc()
+            # dry_run 时也跑 (实战只 reports, 不真删)
+            elif gc_enabled and dry_run:
+                gc_stats = self._run_audit_gc(dry_run=True)
+
             # 5. run_id + timestamp
             import time as _time
             run_id = f"run_{int(_time.time() * 1000)}"
@@ -1787,6 +1797,7 @@ class Memory:
                 "skipped": 0,
                 "failed": 0,
                 "watermark_updated": [],
+                "gc_stats": gc_stats,  # [H-3 audit #5] audit_log GC 实战
             }
 
             for pname in passes:
@@ -2143,11 +2154,15 @@ class Memory:
                 )
 
             # 2. INSERT purged_queue (30 天延迟物理清, 跟 DESIGN §3.8 一致)
+            # [fix 8/4 audit #4] 用 Python now() + timedelta 而不是 SQLite 'now', '+30 days',
+            #    实战避免 T+ ISO vs 空格秒混用 (v0.3 报告 §0 nuance B)
+            from datetime import timedelta as _td
+            purged_at_iso = (datetime.now() + _td(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
             self._exec_clean(
                 """INSERT INTO purged_queue
                        (target_id, target_kind, purged_at, done)
-                   VALUES (?, 'chunk', datetime('now', '+30 days'), 0)""",
-                (chunk_id,),
+                   VALUES (?, 'chunk', ?, 0)""",
+                (chunk_id, purged_at_iso),
             )
 
             # 3. 写 audit_log applied 行 (§5.9.1 append-only)
@@ -2200,6 +2215,97 @@ class Memory:
         except sqlite3.IntegrityError:
             # UNIQUE 撞, 已写过一个 skipped 同 run_id + ref_id — OK
             pass
+
+    # audit_log GC 默认 retention (8/4 review §3 L2 hygiene GC)
+    _AUDIT_GC_APPLIED_DAYS = 90
+    _AUDIT_GC_SKIPPED_DAYS = 30
+    _AUDIT_GC_PROPOSED_DAYS = 7  # 仅当 ref_id 已 applied 才清 proposed
+
+    def _run_audit_gc(self, dry_run: bool = False) -> Dict[str, int]:
+        """[H-3 audit #5 8/4] audit_log GC 实战 v0.2 TASKS §3 L2 hygiene.
+
+        实战策略:
+          - applied + created_at < now-90d → DELETE (实战 90 天审计 trace)
+          - skipped + created_at < now-30d → DELETE (skipped 不持久)
+          - proposed + created_at < now-7d AND 同一 ref_id 已 applied → DELETE
+            (实战: applied 留下, proposed 占位清掉)
+          - reverted 不动 (实战 v0.5 §5.9.1 "被 undo 实战保留")
+
+        Returns:
+            {applied_removed, skipped_removed, proposed_removed}
+
+        实战每 runs (8/4 实测 ~13445 行累积, 实战若 GC 开, 删 ~30% = 实战 减少 ~4000 行).
+        """
+        from datetime import timedelta as _td
+        now = datetime.now()
+        applied_cutoff = (now - _td(days=self._AUDIT_GC_APPLIED_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+        skipped_cutoff = (now - _td(days=self._AUDIT_GC_SKIPPED_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+        proposed_cutoff = (now - _td(days=self._AUDIT_GC_PROPOSED_DAYS)).strftime("%Y-%m-%dT%H:%M:%S")
+
+        stats = {"applied_removed": 0, "skipped_removed": 0, "proposed_removed": 0}
+
+        if dry_run:
+            # 只统计, 不真删
+            stats["applied_removed"] = self._exec_clean(
+                """SELECT COUNT(*) FROM audit_log
+                   WHERE status = 'applied' AND created_at < ?""",
+                (applied_cutoff,),
+            ).fetchone()[0]  # type: ignore[arg-type]
+            stats["skipped_removed"] = self._exec_clean(
+                """SELECT COUNT(*) FROM audit_log
+                   WHERE status = 'skipped' AND created_at < ?""",
+                (skipped_cutoff,),
+            ).fetchone()[0]  # type: ignore[arg-type]
+            stats["proposed_removed"] = self._exec_clean(
+                """SELECT COUNT(*) FROM audit_log p
+                   WHERE p.status = 'proposed' AND p.created_at < ?
+                     AND EXISTS (
+                       SELECT 1 FROM audit_log a
+                       WHERE a.ref_id = p.ref_id AND a.status = 'applied'
+                         AND a.run_id = p.run_id
+                     )""",
+                (proposed_cutoff,),
+            ).fetchone()[0]  # type: ignore[arg-type]
+            return stats
+
+        # 真删 — 实战 §5.9 "每事务细粒度", GC 实战 one DELETE per status
+        try:
+            cur = self._exec_clean(
+                """DELETE FROM audit_log
+                   WHERE status = 'applied' AND created_at < ?""",
+                (applied_cutoff,),
+            )
+            stats["applied_removed"] = cur.rowcount
+        except Exception as e:
+            logger.warning(f"[audit_gc] applied DELETE failed: {e}")
+
+        try:
+            cur = self._exec_clean(
+                """DELETE FROM audit_log
+                   WHERE status = 'skipped' AND created_at < ?""",
+                (skipped_cutoff,),
+            )
+            stats["skipped_removed"] = cur.rowcount
+        except Exception as e:
+            logger.warning(f"[audit_gc] skipped DELETE failed: {e}")
+
+        try:
+            cur = self._exec_clean(
+                """DELETE FROM audit_log p
+                   WHERE p.status = 'proposed' AND p.created_at < ?
+                     AND EXISTS (
+                       SELECT 1 FROM audit_log a
+                       WHERE a.ref_id = p.ref_id AND a.status = 'applied'
+                         AND a.run_id = p.run_id
+                     )""",
+                (proposed_cutoff,),
+            )
+            stats["proposed_removed"] = cur.rowcount
+        except Exception as e:
+            logger.warning(f"[audit_gc] proposed DELETE failed: {e}")
+
+        self._conn.commit()
+        return stats
 
     def stats(self) -> Dict:
         """统计 + [H-1 §6.5 v0.2 TASKS] hygiene 子键.
