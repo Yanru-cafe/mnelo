@@ -2,8 +2,9 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.12 · 2026-08-04 · 依据 7/21 修复 + 8/4 实战数据评估 (v0.3 报告) + 8/4 bug 修 (4bd654d) 后的状态。
+> **版本**：v0.13 · 2026-08-04 · 依据 7/21 修复 + 8/4 实战数据评估 (v0.3 报告) + 8/4 bug 修 (4bd654d) + 8/4 H-1 落地 (d98cd93/3421d99) + 8/4 可逆压缩 (v0.13) 后的状态。
 > **v0.12 变更**（hermes 实战数据评审 8/4 + 主人 deepseek-v4-flash 交叉验证 + bug 修复）——§1.1 **实战回灌**：实测召回量 1.1 次/日（人脑级）+ Phase 1 placeholder id 100% 命名错位 + Phase 2 30 天延迟清的"延期/清"两步半完成状态；**§3.8 §5.6 done bug 修**：`run_purge_worker()` 落地 (commit 4bd654d, 125 行) — 3 phase (clean_orphan_target_ids / 物理删 + set done=1 / vec0 orphan cleanup)；§1.1 标注 TASKS 未建 schema 前置 (`user_confirmed` / `processed_at` / `audit_log` 仍缺 — H0 真前置)；§3.0 memory_type 字段已落地但实战 0% non-fact (根因：写入方不分类 + 无 P1 提取器)；§8.3 P3 升级档触发条件实战 scale 评估 (4344 chunks 距 50 万差 115 倍，延迟 30ms 内 — 升级档面向未来备选)。
+> **v0.13 变更**（8/4 可逆压缩设计）——§4.5.2 新增**可逆压缩**（⟵ 借鉴 Headroom CCR）：摘要行带 `source_chunk_ids` provenance 指针 + `memory_get_digest(ref=...)` 按需展开；信息单源不破，截断可恢复。§5.7 工具清单同步 `memory_get_digest(ref=None)` 双模式。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
 > **v0.5 变更**：Q4 修正——快照改 `sqlite3 .backup` → `snapshots/YYYYMMDD.db.gz` 归档、rsync 到 NAS，git 跟踪二进制方案排除；修正 DB 体积基线（实测 44.72MB+WAL，README ~24MB 已过期）。Q5——健康度权重不预设，P2 等权 + 0.6 警戒线起步。
@@ -490,6 +491,23 @@ LIMIT ?
 - **双时态**：每次重建 = 新摘要 chunk + 旧摘要 superseded（复用 §3.0 版本链），历史摘要可回放
 - **体积护栏**：上限 2000 字，超限截断 + 记 `digest_truncated` 标志（可观测）
 
+#### 4.5.2 可逆压缩（⟵ 借鉴 Headroom CCR，v0.13）
+
+**思想**：Headroom 的 CCR（可逆压缩）= 压缩版进上下文、原稿本地缓存可回溯。mnelo **天然满足可逆性**（chunk 永不丢、摘要是派生视图），缺的是**显式 provenance 指针 + 按需展开路径**。补两点：
+
+1. **每条摘要行带 `source_chunk_ids` 指针**（复用 evidence_chunk_id 同构）：
+   - 摘要行 = 压缩视图，指针指向生成它的原始 chunk（真相源）
+   - 信息单源不破——摘要行携带的信息，原始 chunk 全都有
+2. **展开路径 `memory_get_digest(ref=<行指针>)`**（非新工具，digest 工具双模式）：
+   - 无 ref → 返回摘要（压缩视图，进上下文）
+   - 带 ref → 返回该行对应的原始 chunk（按需回溯，取细节）
+   - 语义：Agent 上下文用压缩版省 token，需要细节时**显式展开**而非依赖压缩版
+
+**取舍**：
+- **保真优先**：摘要行宁可截断也绝不引入 chunk 没有的信息（§3.0.1 信息单源）
+- **指针生命周期**：摘要行来源 chunk 被 supersede → 指针指向该版本链（digest 重建时刷新）；摘要自身被 supersede → 指针随旧摘要保留（历史可回放）
+- **与 §4.5 体积护栏联动**：展开路径让"截断"可恢复——`digest_truncated` 不是丢信息，是被截断行可经指针取回原文
+
 ### 4.6 多跳路径推理 ⟵ 借鉴 Cognee CoT graph traversal
 - 现状：图路只有 2-hop BFS 返回邻居，回答不了"X 和 Y 怎么连起来的"
 - 借鉴：新增 `Memory.reason(start_id, end_id, max_hops=4)`，返回**完整路径链**
@@ -752,7 +770,7 @@ Applier  = 接受提案 → 调 Memory 公开写方法 → audit_log(status='app
   - `memory_audit_undo(audit_id)` — 撤销已 apply 动作
   - `memory_merge_confirm(proposal_id)` — 把 proposed 提升为 applied（桥接现有手动 entity_resolve 流）
   - `memory_hygiene_stats()` — importance/TTL/purge 积压报告
-  - `memory_get_digest()` — 常驻记忆摘要（§4.5，⟵ Letta）
+  - `memory_get_digest(ref=None)` — 常驻记忆摘要（§4.5，⟵ Letta + Headroom CCR）；`ref` 展开到原始 chunk
   - `memory_reason(start_id, end_id, max_hops)` — 多跳路径推理（§4.6，⟵ Cognee）
   - `memory_topics()` — 社区/话题概览（§5.2 P6，⟵ Zep）
   - `memory_correct(entity_id, changes)` — 实体纠正传播（§3.7，⟵ Mem0）
