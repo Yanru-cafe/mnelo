@@ -64,14 +64,14 @@ class TestRememberClassification(unittest.TestCase):
             f"应自动分类 preference, 实际: {mtype}")
 
     def test_02_default_none_triggers_episode(self):
-        """[§5.4.2] remember("记录今天建仓了 sh600089") (默认 None) → episode (时间+动作复合)"""
+        """[§5.4.2 主人 spec] remember("我今天建仓了 sh600089") (默认 None) → episode (我+时间+动作复合)"""
         cid = self.mem.remember(
-            content="记录今天建仓了 sh600089",
+            content="我今天建仓了 sh600089",
             source=self.src,
         )
         mtype = self._read_chunk_type(cid)
         self.assertEqual(mtype, "episode",
-            f"应自动分类 episode (时间+动作), 实际: {mtype}")
+            f"应自动分类 episode (我+时间+动作), 实际: {mtype}")
 
     def test_03_explicit_fact_respected(self):
         """[§5.4.3] 显式传 memory_type='fact' (即使是 preference 内容) → 仍 fact"""
@@ -136,12 +136,12 @@ class TestRememberClassification(unittest.TestCase):
             f"英文应分类 preference, 实际: {mtype}")
 
     def test_09_all_5_types_classifiable(self):
-        """[E4 全面性] 5 类型 P1a 全可分类"""
+        """[E4 全面性] 5 类型 P1a 全可分类 (v0.2 严格化: episode/preference/decision 用第一人称)"""
         cases = [
             ("我偏好简洁日报", "preference"),
             ("我决定明天减仓", "decision"),
-            ("今天建仓了 sh600089", "episode"),
-            ("记录一下做周报的步骤", "procedure"),
+            ("我今天建仓了 sh600089", "episode"),
+            ("步骤 1. 启动\n步骤 2. 配置\n步骤 3. 测试", "procedure"),
             ("临时草稿，稍后处理", "ephemeral"),
         ]
         for content, expected in cases:
