@@ -530,6 +530,25 @@ In short: **vec0 is designed for disk-first storage, not RAM-resident**. Past 1M
 
 ---
 
+## 🔎 Search backend (deployment matrix)
+
+mnelo 的向量索引后端可切换（[DESIGN §3.6/§8.3](docs/DESIGN.md)），**默认 sqlite-vec 零额外依赖、任何 CPU 可用**。
+
+| 后端 | CPU 要求 | 特性 | 何时用 |
+|---|---|---|---|
+| **sqlite-vec**（默认） | 任意（纯 SQLite 扩展） | 暴力 KNN；零额外依赖 | 所有机器，包括 VPS / 旧客户端 |
+| **zvec**（可选） | **AVX2+**（M 系列 / 2020+ x86_64 / 现代 ARM） | HNSW + 原生 FTS（BM25 + jieba 中文） | 需要更大规模向量 / 全文检索的机器 |
+
+**部署规则**：
+- **不装 zvec** → 完全无需配置，默认 sqlite_vec 全功能可用
+- **装了但 CPU 不支持**（如旧 VPS 上 `import zvec` 崩溃）→ mnelo **子进程自动检测**，安全回落 sqlite_vec，不影响运行
+- **启用 zvec**：`pip install -r requirements-zvec.txt` + `config.toml` 设 `[search] backend = 'zvec'`（或 env `MNELO_MEMORY_SEARCH_BACKEND=zvec`）
+- `scripts/health_check.py` 会报告实际生效的后端（配置 zvec 但不可用 → 标记 degraded）
+
+> ⚠️ zvec 0.6 在旧 x86_64 CPU（Ivy Bridge/Haswell 之前的 VPS）上 `import` 即 Illegal instruction 崩溃——**这些机器不要装 zvec**。
+
+---
+
 ## 🧪 Run tests
 
 ```bash

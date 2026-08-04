@@ -21,3 +21,9 @@ starlette>=0.36.0
 # TOML config loader — only needed on Python <3.11.
 # On 3.11+ the stdlib `tomllib` is used instead.
 tomli>=2.0; python_version<"3.11"
+
+# --- 可选后端: zvec (DESIGN §8.3 升级档) ---
+# 默认检索后端是 sqlite-vec (本文件已覆盖, 任何 CPU 可用)。
+# 只有 CPU 支持 AVX2+ 且需要 HNSW/原生 FTS 的机器才装 zvec:
+#   pip install -r requirements-zvec.txt
+# 详见 requirements-zvec.txt (含 CPU 支持矩阵)。

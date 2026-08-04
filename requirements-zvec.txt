@@ -1,0 +1,13 @@
+# 可选：zvec 检索后端 (DESIGN §8.3 升级档)
+#
+# 默认后端是 sqlite-vec (零额外依赖, 任何 CPU 可用)。
+# 只有需要 HNSW + 原生 FTS 的机器才装 zvec:
+#   pip install -r requirements-zvec.txt
+#
+# ⚠️ zvec 0.6 原生扩展要求较新 CPU 指令 (AVX2+):
+#   - 支持: Apple Silicon (M 系列)、2020+ Intel/AMD x86_64、现代 ARM
+#   - 不支持: 老 x86_64 (如 Ivy Bridge/Haswell 之前的 VPS)、部分低端 ARM
+#   - 旧 CPU 上 `import zvec` 会 Illegal instruction 崩溃 — 别装
+#   未装 / 装了但 CPU 不支持 → mnelo 自动回落 sqlite_vec (子进程检测, 安全)
+# 启用: config.toml [search] backend = 'zvec' 或 env MNELO_MEMORY_SEARCH_BACKEND=zvec
+zvec>=0.6.0
