@@ -1366,6 +1366,131 @@ class Memory:
             "dry_run": False,
         }
 
+    def run_purge_worker(
+        self,
+        dry_run: bool = False,
+        clean_orphan_target_ids: bool = True,
+        batch_size: int = 200,
+    ) -> Dict[str, int]:
+        """[8/4 fix] Purge worker — 30 天延迟清的真正实现 (deepseek 提议 + hermes 评审).
+
+        修 v0.5.12 实战发现的 2 个 bug:
+        - bug 1: forget() 后 purged_queue.done 永远 0 — 30 天延迟清 半完成
+        - bug 2: 100% target_id 命名错位 (placeholder id) — 即使加 worker 也清不动
+
+        修法 (deepseek 提议, v0.3 报告 §6 采纳):
+        1. bug 2 先: clean_orphan_target_ids=True → DELETE purged_queue WHERE target_id 不在主表
+        2. bug 1 后: dry_run=False → 物理删 chunks/entities/relations WHERE valid_until != NULL AND id IN purged_queue done=0 AND purged_at < today
+
+        Args:
+            dry_run: 只报数, 不删. 默认 False (跟 cleanup_orphan_vectors 一致).
+            clean_orphan_target_ids: 是否先清命名错位的脏数据. 默认 True (v0.5.12 100% 是脏数据).
+            batch_size: 单次物理删批量上限. 默认 200 (v0.3 报告 §9 H-1 推荐值).
+
+        Returns:
+            Dict:
+              - `orphan_purged_queue_rows`: 清掉的 placeholder id 行数
+              - `chunks_physically_deleted`: 真物理删的 chunk 数
+              - `entities_physically_deleted`: 真物理删的 entity 数
+              - `relations_physically_deleted`: 真物理删的 relation 数
+              - `vectors_orphans_cleaned`: cleanup_orphan_vectors 跑过的孤儿数
+              - `dry_run`: 是否 dry-run
+        """
+        from datetime import datetime as _dt
+
+        stats = {
+            "orphan_purged_queue_rows": 0,
+            "chunks_physically_deleted": 0,
+            "entities_physically_deleted": 0,
+            "relations_physically_deleted": 0,
+            "vectors_orphans_cleaned": 0,
+            "dry_run": dry_run,
+        }
+
+        today_iso = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # === Phase 1: clean_orphan_target_ids — 清命名错位的脏数据 (bug 2) ===
+        if clean_orphan_target_ids:
+            if dry_run:
+                # dry_run: 只数, 不删
+                count_sql = """
+                    SELECT COUNT(*) FROM purged_queue
+                    WHERE done = 0
+                      AND (
+                        (target_kind = 'chunk'    AND target_id NOT IN (SELECT id FROM chunks))
+                        OR (target_kind = 'entity'   AND target_id NOT IN (SELECT id FROM entities))
+                        OR (target_kind = 'relation' AND target_id NOT IN (SELECT id FROM relations))
+                      )
+                """
+                stats["orphan_purged_queue_rows"] = self._conn.execute(count_sql).fetchone()[0]
+            else:
+                orphan_sql = """
+                    DELETE FROM purged_queue
+                    WHERE done = 0
+                      AND (
+                        (target_kind = 'chunk'    AND target_id NOT IN (SELECT id FROM chunks))
+                        OR (target_kind = 'entity'   AND target_id NOT IN (SELECT id FROM entities))
+                        OR (target_kind = 'relation' AND target_id NOT IN (SELECT id FROM relations))
+                      )
+                """
+                cur = self._conn.execute(orphan_sql)
+                stats["orphan_purged_queue_rows"] = cur.rowcount
+                logger.info(f"[purge_worker] cleaned {cur.rowcount} orphan purged_queue rows (placeholder id)")
+
+        if dry_run:
+            return stats
+
+        # === Phase 2: 30 天延迟清 — 物理删 chunks/entities/relations (bug 1) ===
+        # 选 done=0 AND purged_at < today 的 target_id, 物理删 + set done=1
+        # 注意: 一次 batch_size 限制, 避免大批量 delete 阻塞
+        for kind, table in [("chunk", "chunks"), ("entity", "entities"), ("relation", "relations")]:
+            due_sql = """
+                SELECT id FROM purged_queue
+                WHERE done = 0
+                  AND target_kind = ?
+                  AND purged_at < ?
+                ORDER BY purged_at
+                LIMIT ?
+            """
+            due_ids = [
+                r[0] for r in
+                self._conn.execute(due_sql, (kind, today_iso, batch_size)).fetchall()
+            ]
+            if not due_ids:
+                continue
+
+            # 物理删 (从主表) — 用 cursor 拿 rowcount
+            ph = ",".join("?" * len(due_ids))
+            cur = self._conn.execute(
+                f"DELETE FROM {table} WHERE id IN ({ph})", due_ids
+            )
+            deleted = cur.rowcount
+            stats[f"{table}_physically_deleted"] = deleted
+
+            # set done=1
+            cur = self._conn.execute(
+                f"UPDATE purged_queue SET done = 1 WHERE target_kind = ? AND id IN ({ph})",
+                [kind, *due_ids],
+            )
+            updated = cur.rowcount
+            logger.info(
+                f"[purge_worker] {kind}: deleted {deleted} rows from {table}, "
+                f"marked {updated} purged_queue rows done=1"
+            )
+
+        # === Phase 3: vec0 orphan vectors 清理 (跟 cleanup_orphan_vectors 同款) ===
+        try:
+            vec_stats = self.cleanup_orphan_vectors(dry_run=False)
+            stats["vectors_orphans_cleaned"] = (
+                vec_stats.get("soft_deleted_cleaned", 0)
+                + vec_stats.get("truly_orphan_cleaned", 0)
+            )
+        except Exception as e:
+            logger.warning(f"[purge_worker] cleanup_orphan_vectors failed: {e}")
+
+        self._conn.commit()
+        return stats
+
 
 # === 自测 ===
 if __name__ == "__main__":
