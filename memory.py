@@ -1850,6 +1850,12 @@ class Memory:
                     )
                     results["passes_run"].append("hygiene")
                     results["proposals"]["hygiene"] = res["proposals"]
+                    # [H4 §3.4] purge_candidates 聚合: 只挑 ttl_soft_delete 的 proposals
+                    # (decay_importance 是降权不是真删, 不算 purge)
+                    results["purge_candidates"] = [
+                        p for p in res["proposals"]
+                        if p.get("action") == "ttl_soft_delete"
+                    ]
                     results["applied"] += res["applied"]
                     results["skipped"] += res["skipped"]
                     results["failed"] += res.get("failed", 0)
@@ -2627,10 +2633,34 @@ class Memory:
                  / NULLIF(COUNT(*), 0), 0.0) AS freshness
                FROM chunks WHERE valid_until IS NULL"""
         ).fetchone()["freshness"]
+        # [H4 §3.4] purge_candidates: 现在可被 purge 的 chunk 数 (TTL 过期 + 仍 active).
+        # 跟 purge_backlog (已在 purged_queue, 等 30 天延迟) 区分 — 这是待入队的候选.
+        # 每个 memory_type 用自己的 TTL 下界 (memory.py:1612 _MEMORY_TYPE_TTL_DAYS) —
+        # 聚合求和, 跟 run_maintenance Phase 2 报告数严格对齐 (reviewer P1-1).
+        per_type = []
+        params = []
+        for _mtype, _ttl in self._MEMORY_TYPE_TTL_DAYS.items():
+            if _ttl is None:
+                continue  # procedure 永久
+            per_type.append(
+                f"SELECT COUNT(*) AS n FROM chunks WHERE valid_until IS NULL "
+                f"AND memory_type = '{_mtype}' "
+                f"AND timestamp < datetime('now', ?)"
+            )
+            params.append(f"-{_ttl} days")
+        if per_type:
+            union_sql = " UNION ALL ".join(per_type)
+            row = self._conn.execute(
+                f"SELECT COALESCE(SUM(n), 0) FROM ({union_sql})", params
+            ).fetchone()
+            purge_candidates = row[0] if row else 0  # type: ignore[index]
+        else:
+            purge_candidates = 0
         stats["hygiene"] = {
             "importance_floor": floor,
             "decay_candidates": decay_candidates,
             "decay_floor_chunks": decay_floor_chunks,
+            "purge_candidates": purge_candidates,
             "purge_backlog": purge_backlog,
             "audit_log_total": audit_log_total,
             "freshness": float(freshness or 0.0),
