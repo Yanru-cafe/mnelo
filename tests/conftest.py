@@ -35,6 +35,10 @@ def pytest_runtest_setup(item):
 # [7/19 patch] 强制从 repo 本地代码 import (与 tests/test_edge_cases.py 同策略)
 import importlib.util as _ilu
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+# [8/6 fix] conftest 缺 sys.path.insert 让 test 文件能 import repo 模块 (search_index, memory, etc).
+# 主人 65c5723 改了硬编码 mac 路径, 但没补 sys.path. pytest 启动时 cwd 不一定是 repo root.
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 def _load_from_repo(mod_name: str):
     spec = _ilu.spec_from_file_location(mod_name, _REPO_ROOT / f'{mod_name}.py')  # type: ignore[arg-type]
@@ -45,6 +49,7 @@ def _load_from_repo(mod_name: str):
 
 _load_from_repo('config')
 _load_from_repo('embedder')
+_load_from_repo('search_index')
 _load_from_repo('memory')
 
 # [Round 3 fix] conftest 也 force repo validation rebind — 防
