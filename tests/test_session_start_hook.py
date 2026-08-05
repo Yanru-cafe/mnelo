@@ -35,7 +35,10 @@ def _run_script(env_extra=None):
 class TestSessionStartHookSilent(unittest.TestCase):
     def test_01_mcp_down_is_silent(self):
         """mnelo MCP 未跑 → stdout 空 + exit 0 + 无错误日志 (容错核心)."""
-        r = _run_script()
+        # [8/5 fix] 强制 SSE 指向死端口模拟 MCP 不可达 — 避免 live server
+        # 在跑时拿到真 digest 把测试弄挂 (主人 8/5 开 inject_on_initialize=true 后
+        # live 状态默认有 digest). 容错路径要真静默.
+        r = _run_script({"MNELO_MEMORY_SSE_URL": "http://127.0.0.1:1/sse"})
         self.assertEqual(r.returncode, 0, f"exit 应 0, got {r.returncode}")
         self.assertEqual(r.stdout.strip(), "", f"stdout 应空, got: {r.stdout!r}")
         # stderr 不应有 mnelo_client ERROR (容错路径要真静默)
@@ -79,6 +82,10 @@ class TestBootstrapVenv(unittest.TestCase):
             os.environ[mod._BOOTSTRAP_MARKER] = "1"
         else:
             os.environ.pop(mod._BOOTSTRAP_MARKER, None)
+        # [8/5 fix] mock venv path — 真实环境 (仓库) 不一定有 .venv, 但测试要验
+        # "缺 mcp 时找 venv 路径并 exec" 这个逻辑. mock Path.exists 让所有路径"存在".
+        real_exists = mod.Path.exists
+        mod.Path.exists = lambda self: True
         try:
             result = mod._bootstrap_venv()
         except SystemExit:
@@ -86,6 +93,7 @@ class TestBootstrapVenv(unittest.TestCase):
             result = "execve_attempted"
         finally:
             builtins.__import__ = orig_import
+            mod.Path.exists = real_exists
             if orig_marker is not None:
                 os.environ[mod._BOOTSTRAP_MARKER] = orig_marker
             else:

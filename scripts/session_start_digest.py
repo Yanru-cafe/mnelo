@@ -71,13 +71,16 @@ def main() -> int:
     if _bootstrap_venv():
         return 0  # 已 re-exec, 不会到这
     try:
-        from mnelo_client import MneloClient
+        from mnelo_client import MneloClient, DEFAULT_SSE_URL
+        # [8/5 fix] 允许通过 MNELO_MEMORY_SSE_URL 覆盖默认 URL — 测试可注入死端口
+        # 模拟 MCP 不可达. 默认仍为 127.0.0.1:8086 (向后兼容).
+        sse_url = os.environ.get("MNELO_MEMORY_SSE_URL", DEFAULT_SSE_URL)
 
         # 容错路径要真正静默: mnelo_client 在 import 时 setLevel(INFO)+挂 handler,
         # 必须在 import 之后压制 — mnelo 未跑时它会打 ERROR 日志, 对 SessionStart
         # 钩子是噪音 (期望失败场景不该刷错误)。
         logging.getLogger("mnelo_client").setLevel(logging.CRITICAL)
-        digest = MneloClient().get_digest()  # 默认 ref=None → 摘要压缩视图
+        digest = MneloClient(sse_url=sse_url).get_digest()  # 默认 ref=None → 摘要压缩视图
     except Exception:
         # mnelo 未跑/超时 → 静默退出, 不阻断会话
         return 0
