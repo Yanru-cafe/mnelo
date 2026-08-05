@@ -55,7 +55,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | **Protocol** | MCP over SSE (127.0.0.1:8086) — **14 tools**, Bearer auth |
 | **Latency (warm)** | p50 = **18 ms**, p95 = **24 ms** (zvec 0.6 @ 5k vectors, 4-way concurrent, 8/6) |
 | **LOC** | ~4000 lines Python (memory.py + classifier + search adapter + scripts + client) |
-| **Dependencies** | 3 core pip (`mcp[cli]`, `usearch`, `fastembed`) + 1 optional (`zvec` on AVX2+); embedding model (`BAAI/bge-small-zh-v1.5`, ~92 MB) auto-downloaded via fastembed on first use. `sqlite-vec` legacy only. |
+| **Dependencies** | 3 core pip (`mcp[cli]`, `usearch`, `fastembed`) + 1 legacy pip (`sqlite-vec`, vec0 table only) + 1 optional pip (`zvec` on AVX2+); embedding model (`BAAI/bge-small-zh-v1.5`, ~92 MB) auto-downloaded via fastembed on first use |
 | **i18n** | English + 中文 first-class; classifier handles 简体/繁體/EN |
 
 ---
@@ -440,8 +440,9 @@ If your use case is "a product serving many users / massive vector scale / a lon
 
 | Component | Size | Required | Notes |
 |---|---|---|---|
-| **Core pip packages** | ~3 MB on disk | mandatory | `mcp[cli]`, `usearch`, `fastembed` |
-| **Optional pip** (`zvec`) | ~60 MB native lib | only if CPU has AVX2+ | falls back to `usearch` automatically |
+| **Core pip packages** | ~3 MB on disk | mandatory | `mcp[cli]` (MCP server + SSE transport), `usearch` (vector library fallback), `fastembed` (embedding loader) |
+| **Legacy pip** (`sqlite-vec`) | ~1 MB | needed for tools only | `vec0` virtual table for `migrate` / `repair` / `init_db` scripts — not a runtime backend |
+| **Optional pip** (`zvec`) | ~60 MB native lib | only if CPU has AVX2+ | HNSW + native FTS + INT8; falls back to `usearch` automatically when absent |
 | **Embedding model** | ~92 MB | mandatory for first run | `BAAI/bge-small-zh-v1.5` (CN-tuned) — auto-downloaded by fastembed into `~/.cache/huggingface/hub/`. Swap to `bge-small-en-v1.5` or `paraphrase-multilingual-MiniLM-L12-v2` via `config.toml [embedder]` |
 | **Python MCP runtime** | ~50 MB | mandatory | Python 3.11 + MCP SDK + onnxruntime |
 | **Vector index** | grows with data | mandatory | `usearch` is a single file; `zvec` is a directory (5422 512-dim vectors ≈ 30 MB on disk) |

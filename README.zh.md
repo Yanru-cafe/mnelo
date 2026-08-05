@@ -55,7 +55,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | **协议** | MCP over SSE（127.0.0.1:8086）——**14 个工具**，Bearer 认证 |
 | **延迟（热）** | p50 = **18 ms**，p95 = **24 ms**（zvec 0.6 @ 5k 向量，4 路并发，8/6 实测） |
 | **代码量** | ~4000 行 Python（memory.py + 分类器 + 检索适配器 + scripts + client） |
-| **依赖** | 3 个核心 pip（`mcp[cli]`、`usearch`、`fastembed`）+ 1 个可选（`zvec` AVX2+）；embedding 模型（`BAAI/bge-small-zh-v1.5`，~92 MB）首次使用时由 fastembed 自动下载。`sqlite-vec` 仅 legacy。 |
+| **依赖** | 3 个核心 pip（`mcp[cli]`、`usearch`、`fastembed`）+ 1 个 legacy pip（`sqlite-vec`，仅 vec0 表）+ 1 个可选 pip（`zvec` AVX2+）；embedding 模型（`BAAI/bge-small-zh-v1.5`，~92 MB）首次使用时由 fastembed 自动下载 |
 | **双语** | 中英一等公民；分类器支持简体/繁體/英文 |
 
 ---
@@ -442,8 +442,9 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 
 | 组件 | 大小 | 必装？ | 备注 |
 |---|---|---|---|
-| **核心 pip 包** | ~3 MB | 必装 | `mcp[cli]`、`usearch`、`fastembed` |
-| **可选 pip**（`zvec`） | ~60 MB native | 仅 AVX2+ 机器 | 装了就跑 zvec，没装自动回退 usearch |
+| **核心 pip 包** | ~3 MB | 必装 | `mcp[cli]`（MCP server + SSE 传输）、`usearch`（向量库兜底）、`fastembed`（embedding 加载） |
+| **Legacy pip**（`sqlite-vec`） | ~1 MB | 仅工具需要 | `vec0` 虚拟表给 `migrate` / `repair` / `init_db` 脚本用——不参与运行时检索 |
+| **可选 pip**（`zvec`） | ~60 MB native | 仅 AVX2+ 机器 | HNSW + 原生 FTS + INT8；装了就跑，没装自动回退 usearch |
 | **Embedding 模型** | ~92 MB | 首次运行必装 | `BAAI/bge-small-zh-v1.5`（中文特调）——由 fastembed 自动下载到 `~/.cache/huggingface/hub/`。可换 `bge-small-en-v1.5`（英文）或 `paraphrase-multilingual-MiniLM-L12-v2`（多语）通过 `config.toml [embedder]` |
 | **Python + MCP 运行时** | ~50 MB | 必装 | Python 3.11 + MCP SDK + onnxruntime |
 | **向量索引** | 随数据增长 | 必装 | `usearch` 单文件；`zvec` 目录（5422 条 512 维向量约 30 MB） |
