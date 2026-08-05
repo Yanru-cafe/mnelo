@@ -3,7 +3,11 @@
 # Minimum dependencies to run the memory system.
 # Versions are pinned to the ones we test against; bump as needed.
 
-# Vector search extension (Python bindings for sqlite-vec)
+# Vector library (8/6 plan §1 — 向量库必选二选一, usearch 是必选兜底后端, f16 精度)
+usearch>=2.26
+
+# sqlite-vec — 仅 legacy: vec0 虚拟表建表需要 (migrate/repair/init_db 工具还用);
+# 运行时不再作为检索后端写 vectors 表。
 sqlite-vec>=0.1.9,<0.2.0
 
 # Embedder (BAAI/bge-small-zh-v1.5, CN-native)
@@ -22,8 +26,7 @@ starlette>=0.36.0
 # On 3.11+ the stdlib `tomllib` is used instead.
 tomli>=2.0; python_version<"3.11"
 
-# --- 可选后端: zvec (DESIGN §8.3 升级档) ---
-# 默认检索后端是 sqlite-vec (本文件已覆盖, 任何 CPU 可用)。
-# 只有 CPU 支持 AVX2+ 且需要 HNSW/原生 FTS 的机器才装 zvec:
+# --- 可选后端: zvec (8/6 plan — 新 CPU 优先, INT8 精度) ---
+# zvec 需 AVX2+ (import 即崩的旧 CPU 别装), auto 链上层; 装不了就用 usearch:
 #   pip install -r requirements-zvec.txt
 # 详见 requirements-zvec.txt (含 CPU 支持矩阵)。

@@ -1,10 +1,9 @@
-# 可选：usearch 检索后端 (DESIGN §8.3 升级档 — 旧 CPU 可跑的 HNSW)
+# usearch 检索后端 (8/6 plan §1 — 已从「可选」升为「必选兜底」)
 #
-# 默认后端是 sqlite-vec (零额外依赖, 任何 CPU 可用)。
-# 需要 HNSW 向量索引、且 CPU 不支持 zvec (AVX2+) 的机器装 usearch:
-#   pip install -r requirements-usearch.txt
+# usearch 现已是 mnelo 的必选依赖 (向量库必选二选一: zvec > usearch):
+# 已并入 requirements.txt, 本文件保留仅为向后兼容 (直接 `pip install -r requirements.txt` 即可)。
 #
-# usearch 硬件无关 (旧 x86_64 / ARM 均可, 本机 Ivy Bridge 实测通过)。
-# 启用: config.toml [search] backend = 'usearch' 或 env MNELO_MEMORY_SEARCH_BACKEND=usearch
-# ⚠️ 配置了 usearch 但未安装 → 默认 fail-fast (可设 MNELO_MEMORY_ALLOW_FALLBACK=1 回落到 sqlite_vec)
+# usearch 硬件无关 (旧 x86_64 / ARM 均可, 本机 Ivy Bridge 实测通过), f16 精度。
+# 启用: config.toml [search] backend = 'auto'|'usearch' 或 env MNELO_MEMORY_SEARCH_BACKEND
+# 配置了 usearch 但未安装 → RuntimeError (向量库是必选依赖, 不再回落到 sqlite_vec)。
 usearch>=2.26

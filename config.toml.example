@@ -40,12 +40,13 @@ dim = 512
 # dir = '~/.hermes/memory'
 
 [search]
-# 检索索引后端 (DESIGN §3.6/§8.3):
-#   'sqlite_vec' (默认) — vec0, 零额外依赖
-#   'zvec'              — 阿里 zvec (进程内嵌, HNSW+原生FTS). 需 AVX2+, 旧 CPU import 即崩 → 启动 fail-fast
-#   'usearch'           — HNSW, 任意 CPU (8/4 TASKS_SEARCH_INDEX.md A 组)
+# 检索索引后端 (8/6 plan §1 — 向量库必选二选一, sqlite_vec 已出局):
+#   'auto'   (默认) — 自动链 zvec > usearch: 新 CPU 用 zvec (INT8 精度), 用不了 zvec 用 usearch (f16 精度)
+#   'zvec'           — 阿里 zvec (进程内嵌, HNSW+原生FTS+INT8量化). 需 AVX2+, 旧 CPU import 即崩 → 启动 fail-fast
+#   'usearch'        — HNSW, 任意 CPU, f16 精度 (8/6 plan 精度分层)
+# 精度随后端定死: zvec=INT8, usearch=f16 (烘焙进索引类, 不做 config 项)
 # 环境变量覆盖: MNELO_MEMORY_SEARCH_BACKEND
-backend = 'sqlite_vec'
+backend = 'auto'
 
 [digest]
 # 8/4 TASKS_L2_DIGEST.md — 常驻记忆摘要 + 可逆压缩 (DESIGN §4.5 + §4.5.2 v0.13)

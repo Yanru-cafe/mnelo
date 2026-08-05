@@ -35,7 +35,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 - **memory_type 类型谱系**——每条记忆自动分类（fact / preference / episode / decision / procedure / ephemeral），**零 LLM 规则分类器**，支持简体/繁體/英文
 - **L2 自主维护层（可选）**——卫生 pass（importance 衰减、按类型 TTL、purge 候选）+ 完整 **audit_log + undo** 审计链；事实晋升（高频记忆升为 canonical_fact）
 - **会话状态摘要**——500–2000 字"当前状态"摘要，会话开场自动注入（Claude Code SessionStart 钩子 / MCP resource）
-- **可插拔向量后端**——`sqlite-vec` 默认（任意 CPU）、`usearch`（HNSW，任意 CPU）、`zvec`（HNSW + 原生 FTS，AVX2+）
+- **向量后端（必选二选一，8/6）**——运行时必须 `usearch`（HNSW，任意 CPU，f16）或 `zvec`（HNSW + 原生 FTS + INT8，AVX2+）；`sqlite_vec` 已出局
 
 **为什么 4 路召回赢**：每路互补盲区——向量漏字面（商品/品类代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **8.5 ms** / p95 = **10 ms** @ 6.3k chunks），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
 
@@ -46,7 +46,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | | |
 |---|---|
 | **存储** | 单 SQLite 文件（~45 MB @ 4498 entities / 4343 chunks，2026-08 实测） |
-| **向量后端** | `sqlite-vec`（默认，任意 CPU）· `usearch`（HNSW，任意 CPU）· `zvec`（HNSW+FTS，AVX2+） |
+| **向量后端** | `usearch`（HNSW，任意 CPU，f16）· `zvec`（HNSW+FTS+INT8，AVX2+）——必选二选一（8/6） |
 | **嵌入模型** | `bge-small-zh-v1.5`（512 维，中文原生；英文/多语可换） |
 | **召回** | 4 路混合：`vector + graph + meta + entity` → RRF 融合 |
 | **记忆类型** | fact / preference / episode / decision / procedure / ephemeral（零 LLM 自动分类） |
@@ -55,7 +55,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | **协议** | MCP over SSE（127.0.0.1:8086）——**14 个工具**，Bearer 认证 |
 | **延迟（热）** | p50 = **8.5 ms**，p95 = **10 ms**（6.3k chunks 基线） |
 | **代码量** | ~4000 行 Python（memory.py + 分类器 + 检索适配器 + scripts + client） |
-| **依赖** | `mcp[cli]`、`sqlite-vec`、`fastembed`（+ 可选 `usearch` / `zvec`） |
+| **依赖** | `mcp[cli]`、`usearch`、`fastembed`（+ 可选 `zvec` on AVX2+；`sqlite-vec` 仅 legacy vec0 表） |
 | **双语** | 中英一等公民；分类器支持简体/繁體/英文 |
 
 ---
@@ -134,11 +134,12 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 
 | 后端 | CPU | 特性 | 何时用 |
 |---|---|---|---|
-| **sqlite-vec**（默认） | 任意 | 暴力 KNN，零依赖 | 一切机器，含 VPS/旧客户端 |
+| **zvec** | **AVX2+** | INT8 | HNSW + 原生 FTS（BM25 + jieba 中文）+ INT8 量化 | 新 CPU（auto 链上层） |
+| **usearch** | 任意 | **f16** | **HNSW** 真实 ANN | 旧 CPU / 兜底 |
 | **usearch** | 任意 | HNSW（真 ANN） | 更大规模 / 旧 CPU 上更快 |
 | **zvec** | **AVX2+** | HNSW + 原生 FTS（BM25 + jieba 中文） | 规模 + 全文检索 |
 
-自动检测；`[search] backend` 切换；配置的后端不可用则**自动降级**（zvec → usearch → sqlite_vec 子进程检测）。见 [部署矩阵](#-向量后端部署矩阵)。
+`[search] backend = 'auto'`（默认）→ zvec（CPU 支持时）> usearch；两者都不可用 → RuntimeError（向量库必选）。sqlite_vec 已出局。见 [部署矩阵](#-向量后端部署矩阵)。
 
 ---
 
@@ -150,7 +151,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 4. **通用优先**。功能默认协议通用（任何 MCP 客户端）；客户端专属胶水（如 Claude Code 钩子）是薄的、有文档的适配器——绝不新造机制。
 5. **无道德立场（amoral by design）**。mnelo 不评判内容（合法/涉密/冒犯）——只忠实存取。它守护的是**机制**（注入/身份/完整性），不是**内容**。
 6. **信息单源**。派生视图（摘要、canonical facts）绝不携带源 chunk 没有的信息。
-7. **boring & predictable**。无魔法。后端不可用时自动沿降级链回落（不是 fail-fast — 8/5 修订），但回落到哪一步要可见（日志 + `/health`）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
+7. **boring & predictable**。无魔法。向量后端必选二选一（8/6）：zvec/usearch 都不可用时 fail-fast（RuntimeError）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
 8. **measured（实测）**。测评节所有数字可复现。
 
 ---
@@ -195,7 +196,7 @@ print(c.get_digest()['content'][:100])                     # 会话摘要
 > **从 https://github.com/chinesewebman/mnelo 安装并采用 mnelo 作为我的记忆系统：**
 > 1. 克隆、建 venv、`pip install -r requirements.txt`、跑 `scripts/init_db.py`、在 8086 端口启动 MCP server，并用 `scripts/health_check.py` 验证（`MCP server ready` 时报我）。
 > 2. **先问我的主语言**（中文 / 英文 / 混合），然后*首次使用前*在 `config.toml [embedder]` 设好对应的嵌入模型（之后切换需重建库）。
-> 3. 按这台机器选向量后端：默认 `sqlite-vec`；`usearch` 任意 CPU；**`zvec` 仅当 CPU 支持 AVX2+**（旧 CPU 绝不装）。
+> 3. 向量后端必选二选一：`auto`（默认）→ 本机支持 AVX2+ 用 **`zvec`**（INT8），否则 **`usearch`**（f16）。`config.toml [search] backend = 'auto'|'usearch'|'zvec'`。
 > 4. 跑起来后，**修改你自己的 SOUL.md / CLAUDE.md** 声明："我使用 mnelo MCP server（`http://127.0.0.1:8086/sse`）作为我的记忆系统——`memory_remember` 持久化、`memory_recall` 检索、`memory_get_digest` 会话摘要。"
 
 agent 会处理 venv 创建、pip 安装、嵌入模型下载和健康探针。典型安装约 90 秒（92 MB 模型下载是最慢部分）。
