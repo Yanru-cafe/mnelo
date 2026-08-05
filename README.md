@@ -242,6 +242,33 @@ If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for yo
 
 **4. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
 
+**📌 Adding a new entity kind** (open taxonomy — no registration needed): entity `kind` is free-form; "adding a kind" simply means *starting to use it*. When the user introduces a new kind, record it as a convention and use it consistently:
+
+> Add a new entity kind: `product`, for product-related entities. When using `memory_remember` for products, pass `kind: 'product'` and keep naming/aliases consistent (e.g. id `product:sku-1024`). Record this convention in your CLAUDE.md/SOUL.md and use it consistently; filter product recalls with `kind: 'product'`.
+
+Optionally: add the kind to `[recall] boost_kinds` to give it the same recall boost as `stock`; backfill existing entities via `correct()` or a script.
+
+**🧠 Using mnelo — write & retrieve well** (what to remember, how to structure it):
+
+**1. `memory_type` — the chunk's lifecycle type.** The rule classifier auto-tags new writes, but pass the type explicitly when you know it:
+
+| Type | Use when | Example you'd classify |
+|---|---|---|
+| `preference` | a like / dislike / style preference | "我偏好简洁日报" |
+| `decision` | a decision + (ideally) its reasoning | "我决定下月采购 CAT-1024" |
+| `episode` | a dated event | "今天建仓了 CAT-1024" |
+| `procedure` | steps / how-to / workflow | "做周报的流程…" |
+| `ephemeral` | draft / placeholder / WIP | "临时草稿，稍后处理" |
+| `fact` | everything else (default) | — |
+
+Write: `memory_remember(content, ..., memory_type='decision')` when you know it; **omit it to let the auto-classifier decide** (it handles 简体/繁體/EN).
+
+**2. Entity `kind` — how to structure concepts.** Create an entity when a thing is **referenced across chunks, has aliases, or is a graph anchor** — not for one-off mentions. Keep IDs consistent: `kind:slug` (e.g. `product:sku-1024`), aliases in `aliases_json`. Attach entities to chunks via `memory_remember(entities=[{id, kind, name, aliases}])`, and connect concepts via `memory_relate(source_id, target_id, relation, evidence_chunk_id=...)` — every relation should point back to the chunk that justifies it.
+
+**3. Recall before you answer.** Before answering anything that might live in the user's memory (identity, decisions, ongoing work), call `memory_recall` — with filters when useful (`{'type': 'decision'}`, `{'source': ...}`). At session start the digest (`memory_get_digest`) already gives you the current state; expand a line with `ref` when you need the underlying detail.
+
+**4. Consistency is the contract.** Types and kinds only pay off if used consistently. When you introduce a new kind, record the convention in your CLAUDE.md/SOUL.md (see "Adding a new entity kind" above).
+
 ---
 
 ## 🔎 Search backend (deployment matrix)
