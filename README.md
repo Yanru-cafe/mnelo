@@ -460,10 +460,10 @@ mnelo/
 
 mnelo has 2 supported runtime vector backends ([DESIGN §3.6/§8.3](docs/DESIGN.md)):
 
-| Backend | CPU | Quantization | Features | When |
-|---|---|---|---|---|
-| **zvec** | AVX2+ (M-series / 2020+ x86_64 / modern ARM) | INT8 | HNSW + native FTS (BM25 + jieba) | First choice on modern hardware; M2 measured 5k vectors p50=18ms |
-| **usearch** | any | f16 | HNSW | Fallback when zvec is unavailable |
+| Backend | Quantization | When |
+|---|---|---|
+| **zvec** | INT8 | Modern CPUs (M-series / AVX2+); M2 measured 5k vectors p50=18ms |
+| **usearch** | f16 | Any CPU — fallback when zvec unavailable |
 
 The `build_search_index()` factory detects via **main-process import** (macOS 26 launchd forks hit BlockingIOError running zvec native mmap, so we import in-process): zvec installed → zvec; otherwise usearch. If neither is installed → `RuntimeError` (a vector library is a mandatory dependency). **Default `auto` chain** — `config.toml [search] backend = 'auto'`; override via env `MNELO_MEMORY_SEARCH_BACKEND=zvec|usearch`.
 

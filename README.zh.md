@@ -318,10 +318,10 @@ python scripts/restore_db.py --from 2026-08-05-030000
 
 mnelo 有 2 个支持的 runtime 向量后端（[DESIGN §3.6/§8.3](docs/DESIGN.md)）：
 
-| 后端 | CPU | 量化 | 特性 | 何时用 |
-|---|---|---|---|---|
-| **zvec** | AVX2+（M 系列 / 2020+ x86_64 / 现代 ARM） | INT8 | HNSW + 原生 FTS（BM25 + jieba） | M2 实测 5k vectors p50=18ms；大首选 |
-| **usearch** | 任意 | f16 | HNSW | zvec 跑不了时的兜底 |
+| 后端 | 量化 | 何时用 |
+|---|---|---|
+| **zvec** | INT8 | 新 CPU（M 系列 / AVX2+）；M2 实测 5k vectors p50=18ms |
+| **usearch** | f16 | 任意 CPU——zvec 装不上时的兜底 |
 
 `build_search_index()` 工厂**主进程 import 检测**（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，所以走主进程）：装 zvec 就走 zvec，否则走 usearch。两者都不可用 → `RuntimeError`（向量库是必选依赖）。**默认 `auto` 链，`config.toml [search] backend = 'auto'`；显式可用 env `MNELO_MEMORY_SEARCH_BACKEND=zvec|usearch`。**
 
