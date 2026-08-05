@@ -31,6 +31,28 @@ def test_health_endpoint_returns_json():
     assert "freshness" in body["hygiene"]
 
 
+def test_health_threshold_boundary_is_configurable(monkeypatch):
+    from starlette.testclient import TestClient
+
+    class FakeMemory:
+        values = {"purge_backlog": 10, "decay_floor_chunks": 20, "freshness": 0.5}
+        def stats(self):
+            return {"hygiene": self.values}
+
+    fake = FakeMemory()
+    monkeypatch.setattr(mcp_server, "_mem_instance", fake)
+    monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 10)
+    monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 20)
+    client = TestClient(mcp_server._build_sse_app("test-token"))
+    assert client.get("/health").json()["status"] == "ok"
+    fake.values = {**fake.values, "purge_backlog": 11}
+    assert client.get("/health").json()["status"] == "degraded"
+    fake.values = {"purge_backlog": 5, "decay_floor_chunks": 21, "freshness": 0.5}
+    assert client.get("/health").json()["status"] == "degraded"
+    fake.values = {"purge_backlog": 9, "decay_floor_chunks": 19, "freshness": 0.5}
+    assert client.get("/health").json()["status"] == "ok"
+
+
 def test_health_endpoint_error_schema_is_stable(monkeypatch):
     from starlette.testclient import TestClient
 
