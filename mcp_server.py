@@ -286,6 +286,21 @@ TOOLS = [
             },
         },
     },
+    # === [S1 8/5] TASKS_L2_SESSION_STATE §1.3A: 常驻摘要 MCP 工具 ===
+    # 任一 MCP 客户端可用, 跟 G7 resources/list+read 是同一个通用层薄包装.
+    {
+        "name": "memory_get_digest",
+        "description": "[S1 8/5] 常驻记忆摘要 (DESIGN §4.5 + 可逆压缩 v0.13 + TASKS_L2_DIGEST §1.1). 缺省/省略 ref → 摘要压缩视图 (content + line_refs); 传 ref=<行号> → 展开该行源 chunk. 非法 ref → {error: ...}.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "行号 (缺省/省略 = 摘要; 传字符串 = 展开该行源 chunk)",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -347,6 +362,8 @@ _TOOL_REGISTRY = {
     "memory_audit_list": ("list_audit", None),  # 不走 _handle_simple (有枚举过滤)
     "memory_audit_undo": ("audit_undo", None),
     "memory_maintenance": ("run_maintenance", None),  # 不走 _handle_simple (passes 列表)
+    # === [S1 8/5] TASKS_L2_SESSION_STATE §1.3A ===
+    "memory_get_digest": ("get_digest", None),  # 简单委托 — _handle_simple 直接走
 }
 
 
