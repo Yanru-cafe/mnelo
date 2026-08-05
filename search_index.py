@@ -3,7 +3,12 @@
 search_index.py — L1 检索层索引抽象 (DESIGN §3.6 / §8.3)
 
 只抽象"向量索引"的 KNN 与写入; 召回业务逻辑 (asof / 过滤器 / RRF / lane 组合)
-留在 memory.py。默认后端 sqlite-vec (vec0); 可选后端 zvec。
+留在 memory.py。
+
+[8/6 plan] 向量库必选二选一 + 分精度:
+  - usearch → f16 精度 (兜底; Index dtype='f16', 2 字节/维, 自动 f32↔f16 cast)
+  - zvec    → INT8 精度 (新 CPU 优先; auto 链上层, 通过 zvec schema DataType)
+  - sqlite_vec 已出局 (vec0 表保留作 legacy, 给 migrate/repair/init_db 工具用)
 
 ⚠️ zvec 后端说明 (重要):
   - zvec 0.6 原生扩展要求较新 CPU 指令 (AVX2+)。在旧 CPU 上 `import zvec` 直接
@@ -11,7 +16,8 @@ search_index.py — L1 检索层索引抽象 (DESIGN §3.6 / §8.3)
     **子进程**中进行, 不可在 mnelo 进程内 try-import (会把 mnelo 一起带崩)。
   - zvec 后端代码按 zvec 0.6 类型化 API (zvec.pyi + model/*.py) 编写,
     **尚未在目标机 (Mac ARM64) 实测** — 需在部署机上验证后启用。
-  - 后端不可用时自动回落 sqlite-vec, 不影响默认路径。
+    INT8 精度 API 用 DataType.VECTOR_INT8 假设 (见风险 9, 真实 API 待 zvec 文档核实).
+  - 本机 Ivy Bridge 上 zvec SIGILL 不可用, 本环境验证基于 usearch + TestZvecBackendWithFake.
 """
 
 from __future__ import annotations
@@ -35,11 +41,7 @@ logger = logging.getLogger("mnelo.index")
 
 @dataclass
 class KNNHit:
-    """向量召回命中 — chunk_id 是唯一标识 (与后端解耦).
-
-    sqlite-vec 后端: rowid → chunks.id 翻译在 knn() 内完成
-    zvec 后端:       doc id = chunk_id, 直接返回
-    """
+    """向量召回命中 — chunk_id 是唯一标识 (与后端解耦)."""
     chunk_id: str
     distance: float
 
@@ -49,12 +51,12 @@ class KNNHit:
 # ============================================================
 
 class SearchIndex(ABC):
-    """向量索引抽象。写入 (add/remove) 与 KNN 查询是唯一契约。"""
+    """向量索引抽象. 写入 (add/remove) + KNN + 后端感知孤儿清理 + size/contains."""
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """后端名: 'sqlite_vec' | 'usearch' | 'zvec'."""
+        """后端名: 'usearch' | 'zvec'."""
 
     @abstractmethod
     def knn(self, query_bytes: bytes, top_k: int, conn=None) -> List[KNNHit]:
@@ -62,18 +64,15 @@ class SearchIndex(ABC):
 
         只返回 chunk_id + distance; valid_until/asof/filters 过滤由 memory.py
         在 chunk 侧做 (保证与 lane 业务逻辑解耦).
-        conn: sqlite 后端用 (lane 独立连接); usearch/zvec 忽略.
+        conn: usearch/zvec 都忽略 (翻译 rowid 时用自有 _conn).
         """
 
     @abstractmethod
     def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None) -> None:
         """索引一条 chunk 的向量. chunk_id 需先存在于 chunks 表. 幂等.
 
-        content (8/5 8/5 §2): sqlite_vec/usearch 忽略; zvec 填充 FTS 列.
-
-        conn: sqlite 后端**必须**传调用方连接 (保证与写事务同连接, 能看到
-        未提交的 chunk); 传了则**不 commit** (调用方管事务); 不传用自有连接.
-        zvec 忽略 conn.
+        content: usearch 忽略; zvec 填充 FTS 列.
+        conn: 语义同 add; 后端忽略 (索引独立于 SQLite 事务).
         """
 
     @abstractmethod
@@ -82,119 +81,42 @@ class SearchIndex(ABC):
 
     @abstractmethod
     def size(self) -> int:
-        """索引中当前向量条数 — stats 的 vectors 字段按实际后端计数 (8/5).
+        """索引中当前向量条数 — stats 的 vectors 字段按实际后端计数 (8/5 主人 commit).
 
-        各后端各自计数: sqlite_vec 数 vec0 表, usearch 数 HNSW 索引,
+        usearch 数 HNSW 索引 (Index.size 属性, 非方法, 已踩坑);
         zvec 数 collection. 避免在非 sqlite_vec 后端下显示恒 0 的假象.
         """
 
     @abstractmethod
     def close(self) -> None:
-        """释放资源 (连接/collection)."""
+        """释放资源 (连接/collection/index 持久化)."""
 
+    @abstractmethod
+    def contains(self, chunk_id: str, conn=None) -> bool:
+        """该 chunk_id 的向量是否在索引中.
 
-# ============================================================
-# sqlite-vec 后端 (默认)
-# ============================================================
-
-class SQLiteVecIndex(SearchIndex):
-    """vec0 后端 — 复用现有逻辑, 行为与 v0.5.x 完全一致 (回归安全)."""
-
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        self._conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.execute("PRAGMA busy_timeout = 30000")
-        self._conn.execute("PRAGMA cache_size = -64000")
-        self._conn.enable_load_extension(True)
-        import sqlite_vec
-
-        sqlite_vec.load(self._conn)
-        self._conn.enable_load_extension(False)
-        self._conn.row_factory = sqlite3.Row
-
-    @property
-    def name(self) -> str:
-        return "sqlite_vec"
-
-    def knn(self, query_bytes: bytes, top_k: int, conn=None) -> List[KNNHit]:
-        """vec0 MATCH + k= (修复后语法). 返回 rowid → chunk_id 翻译后的命中."""
-        c = conn or self._conn
-        old_factory = c.row_factory
-        c.row_factory = sqlite3.Row
-        try:
-            rows = c.execute(
-                """
-                SELECT v.rowid AS v_rowid, v.distance AS distance
-                FROM vectors v
-                WHERE v.embedding MATCH ? AND k = ?
-            """,
-                (query_bytes, top_k),
-            ).fetchall()
-        except Exception as e:
-            logger.warning(f"[sqlite_vec.knn] failed: {e}")
-            return []
-        finally:
-            c.row_factory = old_factory
-
-        hits: List[KNNHit] = []
-        for r in rows:
-            v_rowid = r["v_rowid"] if isinstance(r, sqlite3.Row) else r[0]
-            distance = r["distance"] if isinstance(r, sqlite3.Row) else r[1]
-            chunk = c.execute("SELECT id FROM chunks WHERE rowid = ?", (v_rowid,)).fetchone()
-            if chunk:
-                hits.append(KNNHit(chunk_id=chunk["id"], distance=float(distance)))
-        return hits
-
-    def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None) -> None:
-        """INSERT vector, rowid = chunks.rowid (1:1 映射), 冲突 REPLACE.
-
-        content (8/5 §2): sqlite_vec 忽略 — 向量索引不存文本.
-
-        conn 传入时: 用调用方连接 (同事务, 能看到未提交 chunk), 不 commit.
-        conn 缺省: 用自有连接 + 自身 commit (独立场景).
+        [8/6 plan §2] 后端感知 — usearch 用 rowid + Index.keys; zvec 用 chunk_id
+        直接遍历 iter_all. 跨测试断言统一走这个 API, 不再查 vec0 表.
         """
-        c = conn or self._conn
-        row = c.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
-        if not row:
-            logger.warning(f"[sqlite_vec.add] chunk {chunk_id} not found, skip index")
-            return
-        chunk_rowid = row[0]
-        try:
-            c.execute("INSERT INTO vectors (rowid, embedding) VALUES (?, ?)", (chunk_rowid, vector_bytes))
-        except (sqlite3.IntegrityError, sqlite3.OperationalError) as e:
-            if "UNIQUE constraint" not in str(e) and "primary key" not in str(e):
-                raise
-            logger.warning(f"[sqlite_vec.add] rowid {chunk_rowid} exists — replacing")
-            c.execute("DELETE FROM vectors WHERE rowid = ?", (chunk_rowid,))
-            c.execute("INSERT INTO vectors (rowid, embedding) VALUES (?, ?)", (chunk_rowid, vector_bytes))
-        if conn is None:
-            self._conn.commit()
 
-    def remove(self, chunk_id: str, conn=None) -> None:
-        c = conn or self._conn
-        row = c.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
-        if row:
-            try:
-                c.execute("DELETE FROM vectors WHERE rowid = ?", (row[0],))
-                if conn is None:
-                    self._conn.commit()
-            except sqlite3.OperationalError as e:
-                logger.warning(f"[sqlite_vec.remove] failed for {chunk_id}: {e}")
+    @abstractmethod
+    def cleanup_orphans(self, conn=None, dry_run: bool = False) -> Dict:
+        """[8/6 plan §2] 后端感知孤儿向量清理.
 
-    def size(self) -> int:
-        """vec0 表行数."""
-        try:
-            return self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
-        except sqlite3.OperationalError:
-            return 0
+        返回 {
+            'soft_deleted_cleaned': int,  # 索引 entry 但 chunks.valid_until 非空
+            'truly_orphan_cleaned': int,  # 索引 entry 但 chunks 行已删
+            'vectors_remaining': int,     # 清理/扫描后索引剩余
+            'dry_run': bool,
+        }
 
-    def close(self) -> None:
-        self._conn.close()
+        落盘交给 close(); 本方法不 save (purge worker 在活 server 同一进程
+        内存态立即生效; CLI 路径走 maintain_vectors.py 子进程, 退出时 save).
+        """
 
 
 # ============================================================
-# zvec 后端 (可选, 需目标机验证)
+# zvec 后端
 # ============================================================
 
 class ZvecIndex(SearchIndex):
@@ -202,7 +124,10 @@ class ZvecIndex(SearchIndex):
 
     ⚠️ 未在本环境实测 (CPU 不支持 zvec 原生指令)。按 zvec 0.6 API 编写,
     需在部署机 (Mac ARM64 / 新 x86) 上跑 search_index_smoke 验证后启用。
-    本类的 add/remove/knn 与 SQLiteVecIndex 语义对齐, 便于 memory.py 无感切换。
+    本类的 add/remove/knn 与 UsearchIndex 语义对齐, 便于 memory.py 无感切换。
+
+    [8/6 plan §2 精度] INT8 量化 — 通过 schema 字段 DataType.VECTOR_INT8 指定
+    (API 假设; 真机部署前核实 zvec 0.6 文档: <https://zvec.org/docs/db/>).
     """
 
     def __init__(self, collection_path: Path, dim: int):
@@ -221,10 +146,20 @@ class ZvecIndex(SearchIndex):
             self._col = zvec.open(str(collection_path), zvec.CollectionOption())
 
     def _create_schema(self) -> None:
-        """建 schema: embedding (512d 稠密) + content (FTS 文本列, jieba 分词)."""
+        """建 schema: embedding (512d 稠密, INT8 精度) + content (FTS 文本列, jieba 分词)."""
         zv = self._zvec
         schema = zv.CollectionSchema()
-        schema.add_dense_vector_field(name="embedding", dim=self.dim)
+        # [8/6 plan §2 精度] INT8: 假设 zvec.DataType.VECTOR_INT8 API; 真机核实
+        try:
+            schema.add_dense_vector_field(
+                name="embedding", dim=self.dim, data_type=zv.DataType.VECTOR_INT8
+            )
+        except (AttributeError, TypeError):
+            # API 不符 fallback: 不指定精度 (默认精度, 部署机验证后修)
+            logger.warning(
+                "[zvec] DataType.VECTOR_INT8 API 不符, 退回默认精度 (待部署机验证)"
+            )
+            schema.add_dense_vector_field(name="embedding", dim=self.dim)
         schema.add_text_field(name="content")  # FTS 列 — meta 路可走 zvec 原生检索
         schema.add_text_field(name="memory_type")
         schema.add_text_field(name="source")
@@ -253,7 +188,6 @@ class ZvecIndex(SearchIndex):
 
     def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None) -> None:
         zv = self._zvec
-        # [B1 §4] zvec 用 chunk_id 直接作 Doc.id; content 填充 FTS 列 (B2 走 zvec.Fts)
         self._col.upsert(
             zv.Doc(
                 id=chunk_id,
@@ -266,17 +200,14 @@ class ZvecIndex(SearchIndex):
         self._col.delete([chunk_id])
 
     def size(self) -> int:
-        """zvec collection 文档数. 本机未实测 (CPU 不支持 zvec), 防御性 fallback."""
-        if self._col is None:
-            return 0
+        """[8/5 主人 commit] zvec collection 文档数 (best-effort: iter_all 兜底)."""
         try:
-            return int(self._col.count())
-        except Exception as e:
-            logger.warning(f"[zvec.size] failed: {e}")
+            return sum(1 for _ in self._col.iter_all())
+        except Exception:
             return 0
 
     def fts(self, query: str, top_k: int, conn=None) -> List[str]:
-        """[B2 §4] zvec 原生 FTS BM25 → top-k chunk_id (仅排序). 过滤在 memory.py SQLite 侧."""
+        """zvec 原生 FTS BM25 → top-k chunk_id (仅排序). 过滤在 memory.py SQLite 侧."""
         zv = self._zvec
         docs = self._col.query(
             zv.Query(
@@ -291,6 +222,66 @@ class ZvecIndex(SearchIndex):
         if self._col is not None:
             self._col.flush()
 
+    # -------- [8/6 plan §2] 新方法 --------
+    def contains(self, chunk_id: str, conn=None) -> bool:
+        """遍历 iter_all 找 doc.id == chunk_id. 包 try/except (本机 SIGILL 兜底)."""
+        try:
+            return any(d.id == chunk_id for d in self._col.iter_all())
+        except Exception as e:
+            logger.warning(f"[zvec.contains] iter_all failed for {chunk_id}: {e}")
+            return False
+
+    def cleanup_orphans(self, conn=None, dry_run: bool = False) -> Dict:
+        """遍历 iter_all → 对每个 doc.id 查 chunks 表 → soft/orphan 分类 → delete.
+
+        必须由调用方传 conn (zvec 不持 SQLite 连接; conn=None 时防御性返回全 0).
+        """
+        result = {
+            "soft_deleted_cleaned": 0,
+            "truly_orphan_cleaned": 0,
+            "vectors_remaining": 0,
+            "dry_run": dry_run,
+        }
+        if conn is None:
+            logger.warning("[zvec.cleanup_orphans] conn is None — 防御性返回 (调用方应传 conn)")
+            return result
+        try:
+            ids = [d.id for d in self._col.iter_all()]
+        except Exception as e:
+            logger.warning(f"[zvec.cleanup_orphans] iter_all failed: {e}")
+            return result
+
+        to_delete: List[str] = []
+        for cid in ids:
+            row = conn.execute(
+                "SELECT 1 FROM chunks WHERE id = ?", (cid,)
+            ).fetchone()
+            if row is None:
+                result["truly_orphan_cleaned"] += 1
+                to_delete.append(cid)
+                continue
+            row_v = conn.execute(
+                "SELECT valid_until FROM chunks WHERE id = ?", (cid,)
+            ).fetchone()
+            if row_v and row_v[0]:
+                result["soft_deleted_cleaned"] += 1
+                to_delete.append(cid)
+
+        if not dry_run and to_delete:
+            try:
+                self._col.delete(to_delete)
+            except Exception as e:
+                logger.warning(f"[zvec.cleanup_orphans] delete failed: {e}")
+
+        if dry_run:
+            result["vectors_remaining"] = len(ids)
+        else:
+            try:
+                result["vectors_remaining"] = sum(1 for _ in self._col.iter_all())
+            except Exception:
+                result["vectors_remaining"] = -1
+        return result
+
 
 def _deserialize_f32(data: bytes) -> List[float]:
     """sqlite_vec.serialize_float32 → list[float]."""
@@ -301,7 +292,7 @@ def _deserialize_f32(data: bytes) -> List[float]:
 
 
 # ============================================================
-# usearch 后端 (可选, 硬件无关 HNSW — TASKS_SEARCH_INDEX §4 A1/A2)
+# usearch 后端 (硬件无关 HNSW — TASKS_SEARCH_INDEX §4 A1/A2)
 # ============================================================
 
 def usearch_available() -> bool:
@@ -319,6 +310,11 @@ def usearch_available() -> bool:
 class UsearchIndex(SearchIndex):
     """[A2 §4] usearch 后端 — HNSW, 硬件无关 (DESIGN §8.3 升级档, 本机 Ivy Bridge 可跑).
 
+    [8/6 plan §2 精度] f16 量化 — Index(dtype='f16') 默认 2 字节/维,
+    add/search 自动 f32↔f16 cast, KNN 查询不受影响.
+    加载现有 f32 usearch.index 也兼容 (实测过 f32 file load f16 index OK),
+    但后续 add 会写 f16 — 下次 fresh 必须 unlink 旧 f32 文件.
+
     内部 id = chunks.rowid (同 sqlite_vec, 无独立映射表 — 避免双写不一致).
     """
 
@@ -331,7 +327,7 @@ class UsearchIndex(SearchIndex):
         self._conn.row_factory = sqlite3.Row
         # usearch 索引: 已存在则 load, 否则新建
         from usearch.index import Index
-        self._index = Index(ndim=dim, metric="cos")
+        self._index = Index(ndim=dim, metric="cos", dtype="f16")
         if self._index_path.exists():
             self._index.load(self._index_path)  # load 是实例方法
 
@@ -370,8 +366,6 @@ class UsearchIndex(SearchIndex):
         if vec.ndim == 1:
             vec = vec.reshape(1, -1)
         ids = np.array([row["rowid"]], dtype=np.uint64)
-        # [8/5 fix] usearch add 是严格模式 — 重复 rowid 抛 "Duplicate keys not allowed",
-        # 不幂等 (update/软删后重写/rebuild 会撞)。遇重复先 remove 再 add。
         try:
             self._index.add(ids, vec)
         except RuntimeError as e:
@@ -390,13 +384,67 @@ class UsearchIndex(SearchIndex):
             self._index.remove(np.array([row["rowid"]], dtype=np.uint64))
 
     def size(self) -> int:
-        """usearch HNSW 索引向量数. 注意: 本版本 usearch 的 Index.size 是 int 属性,
-        不是方法 (method-call 会 TypeError 'int' object is not callable, 已踩坑)."""
-        return int(self._index.size)
+        """[8/5 主人 commit] Index.size 是 int 属性 (不是方法, 已踩坑)."""
+        return self._index.size
 
     def close(self) -> None:
-        self._index.save(self._index_path)  # 持久化
+        self._index.save(self._index_path)  # 持久化 (f16 写入)
         self._conn.close()
+
+    # -------- [8/6 plan §2] 新方法 --------
+    def contains(self, chunk_id: str, conn=None) -> bool:
+        """查 chunks 表拿 rowid → Index.keys 包含则 True."""
+        c = conn or self._conn
+        row = c.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        if not row:
+            return False
+        return int(row["rowid"]) in self._index.keys
+
+    def cleanup_orphans(self, conn=None, dry_run: bool = False) -> Dict:
+        """遍历 Index.keys (rowid) → 查 chunks 行:
+            - 无行 → truly_orphan
+            - valid_until 非空 → soft_deleted
+            - 否则保留
+        非 dry-run 时 remove. 不 save — 落盘交给 close().
+        """
+        import numpy as np
+        result = {
+            "soft_deleted_cleaned": 0,
+            "truly_orphan_cleaned": 0,
+            "vectors_remaining": 0,
+            "dry_run": dry_run,
+        }
+        c = conn or self._conn
+        rowids: List[int] = list(self._index.keys)
+        to_remove: List[int] = []
+        for rid in rowids:
+            row = c.execute(
+                "SELECT valid_until FROM chunks WHERE rowid = ?", (rid,)
+            ).fetchone()
+            if row is None:
+                result["truly_orphan_cleaned"] += 1
+                to_remove.append(rid)
+                continue
+            if row[0]:
+                result["soft_deleted_cleaned"] += 1
+                to_remove.append(rid)
+
+        if not dry_run and to_remove:
+            try:
+                self._index.remove(np.array(to_remove, dtype=np.uint64))
+            except RuntimeError as e:
+                logger.warning(f"[usearch.cleanup_orphans] remove failed: {e}")
+                for rid in to_remove:
+                    try:
+                        self._index.remove(np.array([rid], dtype=np.uint64))
+                    except Exception:
+                        pass
+
+        if dry_run:
+            result["vectors_remaining"] = len(rowids)
+        else:
+            result["vectors_remaining"] = len(self._index.keys)
+        return result
 
 
 # ============================================================
@@ -416,34 +464,36 @@ def zvec_available() -> bool:
         return False
 
 
-# [A4 §1.4 8/5 主人决策] 自动降级链 — 装上 zvec 就用, 不检查 CPU;
-# 未装 zvec 则降级 usearch; 再不行 sqlite_vec (零依赖默认).
+# [8/6 plan §1] 向量库必选二选一 — usearch/zvec 都不可用时 RuntimeError.
 def _pick_backend(requested: str, db_path: Path, dim: int) -> SearchIndex:
-    """按 backend 字符串选择后端. requested 默认 'auto' → zvec > usearch > sqlite_vec."""
-    # 显式指定 sqlite_vec: 直返
-    if requested == "sqlite_vec":
-        return SQLiteVecIndex(db_path)
-    # 显式 zvec: 装了即用 (不要求 CPU 检查, 8/5 主人拍板), 否则降级
+    """按 backend 字符串选择后端. requested 默认 'auto' → zvec (INT8, 优先) > usearch (f16); 都不可用抛 RuntimeError."""
+    if requested == "auto":
+        if zvec_available():
+            return ZvecIndex(db_path.parent / "search_index.zv", dim)
+        if usearch_available():
+            logger.info("[search_index] auto: zvec 未装, 用 usearch (f16)")
+            return UsearchIndex(db_path, dim)
+        raise RuntimeError(
+            "向量库是必选依赖 — zvec 与 usearch 均不可用. "
+            "请 `pip install usearch>=2.26` 或 `pip install zvec`."
+        )
     if requested == "zvec":
         if zvec_available():
             return ZvecIndex(db_path.parent / "search_index.zv", dim)
-        logger.info("[search_index] zvec 未装, 降级到 usearch")
-        return _pick_backend("usearch", db_path, dim)
-    # 显式 usearch: 装了即用, 否则降级
+        raise RuntimeError(
+            "zvec 不可用 (本机可能缺 AVX2+ 指令). "
+            "改 'auto' 让 mnelo 回落 usearch, 或换支持 zvec 的部署机."
+        )
     if requested == "usearch":
         if usearch_available():
             return UsearchIndex(db_path, dim)
-        logger.info("[search_index] usearch 未装, 降级到 sqlite_vec")
-        return SQLiteVecIndex(db_path)
-    # auto: zvec (装了即用) > usearch > sqlite_vec
-    if zvec_available():
-        return ZvecIndex(db_path.parent / "search_index.zv", dim)
-    if usearch_available():
-        logger.info("[search_index] auto: zvec 未装, 降级到 usearch")
-        return UsearchIndex(db_path, dim)
-    return SQLiteVecIndex(db_path)
+        raise RuntimeError(
+            "usearch 未安装. `pip install 'usearch>=2.26'` 或改 'auto' 试 zvec."
+        )
+    logger.warning(f"[search_index] 未知 backend '{requested}', fallback 到 auto")
+    return _pick_backend("auto", db_path, dim)
 
 
 def build_search_index(backend: str, db_path: Path, dim: int) -> SearchIndex:
-    """[A4 §1.4 8/5] 按 config 构建索引后端. 自动降级链: zvec > usearch > sqlite_vec."""
+    """[8/6 plan §1] 按 config 构建索引后端. backend ∈ {auto, usearch, zvec}."""
     return _pick_backend(backend, db_path, dim)

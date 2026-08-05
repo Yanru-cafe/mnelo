@@ -1415,78 +1415,31 @@ class Memory:
         return stats
 
     def cleanup_orphan_vectors(self, dry_run: bool = False) -> Dict[str, int]:
-        """[7/19 v0.5.6] Drift fix: clean up orphan vectors in vec0.
+        """[8/6 plan §3] 后端感知孤儿向量清理 — 薄委托给 self._index.cleanup_orphans.
 
-        Three categories of orphan vectors accumulate over time:
-        1. **Soft-deleted chunks** — `chunks.valid_until IS NOT NULL` (forgotten/updated).
-           Their embeddings are excluded by `_vector_recall` filter, so they waste space.
-        2. **Truly orphan** — `vectors.rowid` doesn't match any `chunks.rowid`.
-           These come from crashed inserts, manual SQL, or earlier migration scripts.
-        3. **Stale** — could not be identified by SQL alone (e.g. vector with valid
-           rowid but mismatched chunk_id). Not handled here; out of scope.
+        旧版 (7/19 v0.5.6) 直接 SQL 查/删 vec0 `vectors` 表; usearch/zvec 下该表
+        恒空, 真实孤儿 (索引里但 chunks 行已删/软删) 不被清. 改为委托后端感知实现:
+          - UsearchIndex: list(_index.keys) → 查 chunks.valid_until → remove 孤儿
+          - ZvecIndex: iter_all() → 查 chunks.valid_until → delete 孤儿
+        SQLite 事务由调用方管 (本方法只 commit 写操作).
 
         Args:
-            dry_run: if True, report counts without deleting (for safe inspection).
+            dry_run: if True, report counts without removing (for safe inspection).
 
         Returns:
             Dict with counts:
-              - `soft_deleted_cleaned`: vectors whose chunks have valid_until IS NOT NULL.
-              - `truly_orphan_cleaned`: vectors with no matching chunk rowid.
-              - `vectors_remaining`: count after cleanup.
-              - `dry_run`: True if no changes were made.
+              - `soft_deleted_cleaned`: index entries whose chunks.valid_until 非空
+              - `truly_orphan_cleaned`: index entries with no matching chunk row
+              - `vectors_remaining`: count after cleanup
+              - `dry_run`: True if no changes were made
         """
-        # Category 1: vectors for soft-deleted chunks
-        soft_deleted_rows = self._conn.execute(
-            """
-            SELECT v.rowid FROM vectors v
-            JOIN chunks c ON c.rowid = v.rowid
-            WHERE c.valid_until IS NOT NULL
-            """
-        ).fetchall()
-        soft_deleted_count = len(soft_deleted_rows)
-
-        # Category 2: truly orphan vectors (no matching chunk)
-        truly_orphan_rows = self._conn.execute(
-            """
-            SELECT v.rowid FROM vectors v
-            WHERE NOT EXISTS (SELECT 1 FROM chunks c WHERE c.rowid = v.rowid)
-            """
-        ).fetchall()
-        truly_orphan_count = len(truly_orphan_rows)
-
-        if dry_run:
-            return {
-                "soft_deleted_cleaned": soft_deleted_count,
-                "truly_orphan_cleaned": truly_orphan_count,
-                "vectors_remaining": self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0],
-                "dry_run": True,
-            }
-
-        # Apply cleanup
-        all_orphan_rowids = [r[0] for r in soft_deleted_rows] + [r[0] for r in truly_orphan_rows]
-        if all_orphan_rowids:
-            placeholders = ",".join("?" * len(all_orphan_rowids))
+        result = self._index.cleanup_orphans(conn=self._conn, dry_run=dry_run)
+        if not dry_run:
             try:
-                self._conn.execute(
-                    f"DELETE FROM vectors WHERE rowid IN ({placeholders})",
-                    all_orphan_rowids,
-                )
-            except sqlite3.OperationalError as e:
-                logger.warning(f"orphan vector cleanup failed: {e}")
-                return {
-                    "soft_deleted_cleaned": 0,
-                    "truly_orphan_cleaned": 0,
-                    "vectors_remaining": self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0],
-                    "error": str(e),
-                }
-
-        self._conn.commit()
-        return {
-            "soft_deleted_cleaned": soft_deleted_count,
-            "truly_orphan_cleaned": truly_orphan_count,
-            "vectors_remaining": self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0],
-            "dry_run": False,
-        }
+                self._conn.commit()
+            except Exception as e:
+                logger.warning(f"[cleanup_orphan_vectors] commit failed: {e}")
+        return result
 
     def run_purge_worker(
         self,

@@ -72,6 +72,11 @@ def _force_repo_validation():
 _force_repo_validation()
 
 
+# [8/6 plan §9] 让 from helpers import cleanup_chunks 可用
+_TESTS_DIR = Path(__file__).resolve().parent
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 import pytest  # noqa: E402
 
 

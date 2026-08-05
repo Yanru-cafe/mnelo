@@ -38,8 +38,10 @@ def _setup_minimal_digest(mem):
 
 
 def _cleanup_s1(mem):
-    mem._conn.execute("DELETE FROM chunks WHERE source='s1_test'")
-    mem._conn.execute("DELETE FROM vectors WHERE rowid IN (SELECT rowid FROM chunks WHERE source='s1_test')")
+    # [8/6 plan §10] 顺序 bug 修复: 原先 DELETE chunks 再 DELETE vectors,
+    # 子查询空, vectors 残留. helper 先 _index.remove 再 DELETE chunks.
+    from helpers import cleanup_chunks
+    cleanup_chunks(mem, source='s1_test')
     mem._conn.execute("DELETE FROM entities WHERE id='s1_test_id'")
     mem._conn.execute("DELETE FROM meta WHERE key IN ('digest_chunk_id', 'digest_dirty')")
     mem._conn.commit()
