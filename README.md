@@ -35,7 +35,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 - **memory_type taxonomy** — every memory auto-classified (fact / preference / episode / decision / procedure / ephemeral) by a zero-LLM rule classifier, bilingual (简体/繁體/EN)
 - **L2 autonomous maintenance layer** — optional hygiene pass (importance decay, per-type TTL, purge candidates) with a full **audit_log + undo** trail; fact-promotion that graduates high-value memories to canonical facts
 - **Session-state digest** — a 500–2000 char "current state" summary injected into your agent at session start (Claude Code SessionStart hook / MCP resource)
-- **Pluggable vector backends** — `sqlite-vec` default (any CPU), `usearch` (HNSW, any CPU), `zvec` (HNSW + native FTS, AVX2+)
+- **Vector backends (mandatory 二选一, 8/6)** — runtime must be `usearch` (HNSW, any CPU, f16) or `zvec` (HNSW + native FTS + INT8, AVX2+); `sqlite_vec` removed as a backend
 
 **Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (product / category codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **8.5 ms** / p95 = **10 ms** on baseline 6.3k chunks), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
 
@@ -46,7 +46,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | | |
 |---|---|
 | **Storage** | Single SQLite file (~45 MB @ 4498 entities / 4343 chunks, 2026-08 measured) |
-| **Vector backends** | `sqlite-vec` (default, any CPU) · `usearch` (HNSW, any CPU) · `zvec` (HNSW+FTS, AVX2+) |
+| **Vector backends** | `usearch` (HNSW, any CPU, f16) · `zvec` (HNSW+FTS+INT8, AVX2+) — mandatory 二选一 (8/6) |
 | **Embedder** | `bge-small-zh-v1.5` (512-dim, CN-native; EN/multilingual swappable) |
 | **Recall** | 4-way hybrid: `vector + graph + meta + entity` → RRF fusion |
 | **Memory types** | fact / preference / episode / decision / procedure / ephemeral (auto-classified, zero-LLM) |
@@ -55,7 +55,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | **Protocol** | MCP over SSE (127.0.0.1:8086) — **14 tools**, Bearer auth |
 | **Latency (warm)** | p50 = **8.5 ms**, p95 = **10 ms** (baseline 6.3k chunks) |
 | **LOC** | ~4000 lines Python (memory.py + classifier + search adapter + scripts + client) |
-| **Dependencies** | `mcp[cli]`, `sqlite-vec`, `fastembed` (+ optional `usearch` / `zvec`) |
+| **Dependencies** | `mcp[cli]`, `usearch`, `fastembed` (+ optional `zvec` on AVX2+; `sqlite-vec` kept only for legacy vec0 table) |
 | **i18n** | English + 中文 first-class; classifier handles 简体/繁體/EN |
 
 ---
@@ -130,15 +130,16 @@ A **500–2000 char digest** (identity facts + recent key decisions + in-progres
 - Locale auto-detect (`MNELO_MEMORY_LANG` > `LC_ALL` > `LANG` > `en`)
 - Classifier handles 简体 / 繁體 / English (via char-map normalization)
 
-### 🔎 Pluggable vector backends
+### 🔎 Vector backends (mandatory 二选一, 8/6)
 
-| Backend | CPU | Features | When |
-|---|---|---|---|
-| **sqlite-vec** (default) | any | brute-force KNN, zero deps | everything incl. VPS/old clients |
-| **usearch** | any | HNSW (real ANN) | larger scale / faster recall on old CPUs |
-| **zvec** | **AVX2+** | HNSW + native FTS (BM25 + jieba 中文) | scale + full-text search |
+Vector library is **mandatory**: runtime backend must be `usearch` or `zvec` — `sqlite_vec` is removed as a backend (its `vectors` table stays only as legacy for migration tools).
 
-Auto-detected; `[search] backend` switches; if the configured backend is unavailable, the factory **auto-falls back** along the `zvec → usearch → sqlite_vec` chain via subprocess `import`-check. See the [deployment matrix](#-search-backend-deployment-matrix).
+| Backend | CPU | Precision | Features | When |
+|---|---|---|---|---|
+| **zvec** | **AVX2+** | INT8 | HNSW + native FTS (BM25 + jieba 中文) | new CPUs (auto chain top) |
+| **usearch** | any | **f16** | HNSW (real ANN) | old CPUs / fallback |
+
+`[search] backend = 'auto'` (default) picks zvec → usearch; precision is baked in per backend. See the [deployment matrix](#-search-backend-deployment-matrix).
 
 ---
 
@@ -195,7 +196,7 @@ Non-technical? Skip all the steps above — hand this to any AI coding agent (Cl
 > **Install and adopt mnelo from https://github.com/chinesewebman/mnelo as my memory system:**
 > 1. Clone, set up the venv, `pip install -r requirements.txt`, run `scripts/init_db.py`, launch the MCP server on port 8086, and verify with `scripts/health_check.py` (report back when `MCP server ready`).
 > 2. **Ask me my primary language first** (中文 / English / mixed), then set the matching embedding model in `config.toml [embedder]` *before* first use (switching later requires re-initializing the DB).
-> 3. Choose the vector backend for this machine: default `sqlite-vec` unless there's a reason to upgrade; `usearch` for any CPU; **`zvec` only if this CPU supports AVX2+** (never on old CPUs).
+> 3. Vector backend is mandatory 二选一: `auto` (default) picks **`zvec`** if this CPU supports AVX2+ else **`usearch`** (f16). Configure via `config.toml [search] backend = 'auto'|'usearch'|'zvec'`.
 > 4. After it's running, **update your own SOUL.md / CLAUDE.md** to declare: "I use the mnelo MCP server (`http://127.0.0.1:8086/sse`) as my memory system — `memory_remember` to persist, `memory_recall` to retrieve, `memory_get_digest` for the session digest."
 
 The agent handles venv creation, pip install, the embedding-model download, and the health probe. Typical install ~90s (the 92 MB model download is the slow part).
@@ -228,8 +229,8 @@ If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for yo
 - Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To leave `.hermes` behind entirely, also redirect the health-check report dir with `MNELO_CRON_OUTPUT_DIR` (default `~/.hermes/cron/output`, recreated by `health_check.py` on every run).
 
 **2. Choose the vector backend — based on the actual machine.**
-- Default **`sqlite-vec`** works on any CPU — use it unless there's a reason not to.
-- Larger scale or faster recall on an older CPU → **`usearch`** (any CPU).
+- **`usearch`** (f16) works on any CPU — the default fallback.
+- **`zvec`** (INT8) only if this CPU supports AVX2+ — auto chain top.
 - **`zvec`** adds native full-text, but **requires AVX2+** — do **not** install it on old CPUs (it crashes on `import` there). Detect the CPU or ask.
 - Configure via `config.toml [search] backend` or env `MNELO_MEMORY_SEARCH_BACKEND`.
 
@@ -313,31 +314,29 @@ Write: `memory_remember(content, ..., memory_type='decision')` when you know it;
 
 ## 🔎 Search backend (deployment matrix)
 
-mnelo's vector index backend is pluggable ([DESIGN §3.6/§8.3](docs/DESIGN.md)). **Default `sqlite-vec` needs zero extra deps and runs on any CPU.**
+Vector index backend is **mandatory 二选一** (8/6 decision): must be `usearch` or `zvec`. `sqlite_vec` is removed as a backend; its `vectors` table stays only as legacy for migration tools.
 
-| Backend | CPU requirement | Features | When to use |
-|---|---|---|---|
-| **sqlite-vec** (default) | any (pure SQLite ext) | brute-force KNN; zero deps | all machines, incl. VPS / old clients |
-| **usearch** (optional) | any (hardware-agnostic) | **HNSW** real ANN | need real ANN on old CPUs |
-| **zvec** (optional) | **AVX2+** (M-series / 2020+ x86_64 / modern ARM) | HNSW + native FTS (BM25 + jieba 中文) | scale + full-text search |
+| Backend | CPU requirement | Precision | Features | When to use |
+|---|---|---|---|---|
+| **zvec** | **AVX2+** (M-series / 2020+ x86_64 / modern ARM) | INT8 | HNSW + native FTS (BM25 + jieba 中文) + INT8 quantization | new CPUs (auto chain top) |
+| **usearch** | any (hardware-agnostic) | **f16** | **HNSW** real ANN | old CPUs / fallback |
 
 **Deployment rules**:
-- **Not installed** → default `sqlite_vec`, fully functional, no config.
-- **Installed but CPU unsupported** (e.g. `import zvec` crashes on an old VPS) → mnelo detects in a **subprocess** (safe — doesn't crash the host process) and **auto-falls back** along the chain below.
-- **Enable usearch/zvec**: `pip install -r requirements-usearch.txt` (or `-zvec.txt`) + `config.toml` `[search] backend = 'usearch'|'zvec'` (or env `MNELO_MEMORY_SEARCH_BACKEND`).
-- `scripts/health_check.py` reports the active backend; `/health` surfaces maintenance recommendations when degraded.
+- `config.toml [search] backend = 'auto'` (default) → **zvec** if its CPU supports it, else **usearch**.
+- **zvec on an unsupported CPU** (e.g. `import zvec` crashes on an old VPS) → factory detects in a **subprocess** (safe — doesn't crash the host process) and uses usearch.
+- **Neither available** → `RuntimeError` — the vector library is a mandatory dependency (`pip install 'usearch>=2.26'` or `zvec`).
+- **Precision is baked in** per backend (zvec=INT8, usearch=f16), not configurable.
+- `scripts/health_check.py` reports the active backend + precision; `/health` surfaces maintenance recommendations when degraded.
 
-**Auto-fallback chain (8/5 主人 decision)**: `build_search_index()` factory implements a **zvec → usearch → sqlite_vec** cascade via subprocess `import`-check — install one, run; the factory picks the highest-priority backend that imports cleanly. No fail-fast: even on a CPU that can't run zvec, the system stays usable (usearch if installed, else sqlite_vec). The factory always returns a working index.
-
-**Switching backends** (sqlite_vec → usearch/zvec): requires full re-embed of all chunks:
+**Switching backends** (usearch ↔ zvec): requires full re-embed of all chunks:
 ```bash
-python scripts/rebuild_index.py --backend usearch    # full re-embed from chunks
-python scripts/repair_index.py --backend usearch     # remove orphan vectors (chunk gone but index not)
+python scripts/rebuild_index.py --backend usearch --fresh   # full re-embed from chunks (fresh = unlink old index)
+python scripts/repair_index.py --backend usearch            # remove orphan vectors (chunk gone but index not)
 # Or dry-run first:
 python scripts/rebuild_index.py --backend usearch --dry-run
 ```
 
-> ⚠️ zvec 0.6 on pre-Ivy-Bridge x86_64 crashes on `import` — don't install it there. The factory will skip it automatically, but installing a package you can't run wastes disk.
+> ⚠️ zvec 0.6 on pre-Ivy-Bridge x86_64 crashes on `import` — don't install it there. The factory will skip it and fall back to usearch.
 
 ---
 
