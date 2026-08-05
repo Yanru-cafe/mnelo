@@ -139,32 +139,37 @@ class ZvecIndex(SearchIndex):
         import zvec  # noqa: F401
 
         self._zvec = zvec
-        if not collection_path.exists():
-            self._col = zvec.create_and_open(str(collection_path), zvec.CollectionOption())
-            self._create_schema()
+        # [8/6 fix] zvec 0.6 schema-first API: create_and_open(path, schema, option),
+        # 不接受空 schema. 旧路径 create → create(schema) 已被 0.6 废弃.
+        # 修法: 一次性 _build_schema() 拿 schema → create_and_open(path, schema)
+        if collection_path.exists():
+            self._col = zvec.open(str(collection_path))
         else:
-            self._col = zvec.open(str(collection_path), zvec.CollectionOption())
+            schema = self._build_schema()
+            self._col = zvec.create_and_open(str(collection_path), schema)
 
-    def _create_schema(self) -> None:
-        """建 schema: embedding (512d 稠密, INT8 精度) + content (FTS 文本列, jieba 分词)."""
+    def _build_schema(self) -> "zvec.CollectionSchema":
+        """建 schema: embedding (512d FP32 + HNSW) + content (FTS jieba) + memory_type + source."""
         zv = self._zvec
-        schema = zv.CollectionSchema()
-        # [8/6 plan §2 精度] INT8: 假设 zvec.DataType.VECTOR_INT8 API; 真机核实
-        try:
-            schema.add_dense_vector_field(
-                name="embedding", dim=self.dim, data_type=zv.DataType.VECTOR_INT8
-            )
-        except (AttributeError, TypeError):
-            # API 不符 fallback: 不指定精度 (默认精度, 部署机验证后修)
-            logger.warning(
-                "[zvec] DataType.VECTOR_INT8 API 不符, 退回默认精度 (待部署机验证)"
-            )
-            schema.add_dense_vector_field(name="embedding", dim=self.dim)
-        schema.add_text_field(name="content")  # FTS 列 — meta 路可走 zvec 原生检索
-        schema.add_text_field(name="memory_type")
-        schema.add_text_field(name="source")
-        self._col.create(schema)
-        self._col.create_index(field_name="embedding", index_type="HNSW")
+        # [8/6 fix] zvec 0.6 declarative API: CollectionSchema(name, fields=[...], vectors=[...])
+        # 旧 method-style add_*_field 在 0.6 不存在. VECTOR_FP32 = 跟 sqlite-vec / usearch 同精度.
+        # HNSW 用默认 HnswIndexParam() (ef_construction=200, m=16 文档 default).
+        # FTS 用 jieba (中文 tokenizer, 主人偏好, 见 README §向量后端部署矩阵).
+        schema = zv.CollectionSchema(
+            name=self.collection_path.stem,
+            fields=[
+                zv.FieldSchema(name="content", data_type=zv.DataType.STRING,
+                               index_param=zv.FtsIndexParam(tokenizer_name="jieba")),
+                zv.FieldSchema(name="memory_type", data_type=zv.DataType.STRING),
+                zv.FieldSchema(name="source", data_type=zv.DataType.STRING),
+            ],
+            vectors=[
+                zv.VectorSchema(name="embedding", data_type=zv.DataType.VECTOR_FP32,
+                                dimension=self.dim,
+                                index_param=zv.HnswIndexParam()),
+            ],
+        )
+        return schema
 
     @property
     def name(self) -> str:
@@ -183,31 +188,93 @@ class ZvecIndex(SearchIndex):
         )
         hits = []
         for d in docs[:top_k]:
-            hits.append(KNNHit(chunk_id=d.id, distance=float(d.score)))
+            # [8/6 fix] zvec doc id = chunks.rowid (int, 生产路径). 翻译回 chunk_id via SQLite.
+            # 测试路径 (conn=None, fake zvec): d.id 可能是 chunk_id 本身 (非 int), 直接用.
+            try:
+                zvec_doc_id = int(d.id)
+                if conn is not None:
+                    row = conn.execute(
+                        "SELECT id FROM chunks WHERE rowid = ?", (zvec_doc_id,)
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    chunk_id = row[0]
+                else:
+                    # 生产路径但 conn=None 兜底 (不推荐)
+                    chunk_id = str(zvec_doc_id)
+            except (TypeError, ValueError):
+                # 测试路径 / 旧 rebuild 残留 (chunk_id 直接当 zvec_id)
+                chunk_id = str(d.id)
+            hits.append(KNNHit(chunk_id=chunk_id, distance=float(d.score)))
         return hits
 
-    def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None) -> None:
+    def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None,
+            memory_type: str = "", source: str = "") -> None:
         zv = self._zvec
+        # [8/6 fix] zvec 0.6 schema 所有 STRING 字段 nullable=False (default), 必传.
+        if (not content or not memory_type or not source) and conn is not None:
+            row = conn.execute(
+                "SELECT content, memory_type, source FROM chunks WHERE id = ?",
+                (chunk_id,),
+            ).fetchone()
+            if row:
+                content = content or (row["content"] if hasattr(row, "keys") else row[0]) or ""
+                memory_type = memory_type or (row["memory_type"] if hasattr(row, "keys") else row[1]) or "fact"
+                source = source or (row["source"] if hasattr(row, "keys") else row[2]) or ""
+        # [8/6 fix] zvec 0.6 doc id 必须 [A-Za-z0-9_-]; 但 mnelo chunk_id 含 ':' / 中文.
+        # 实战方案: 用 chunks.rowid (int) 当 zvec doc id — 稳定 + 唯一 + 不丢信息.
+        # knn() / remove() / contains() / cleanup_orphans() 都通过 rowid join 翻译.
+        if conn is not None:
+            row = conn.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"chunk {chunk_id} not found in chunks table (no rowid)")
+            zvec_id = str(row[0])
+        else:
+            # fallback (测试路径): sanitize. 不推荐生产用.
+            zvec_id = chunk_id.replace(":", "_").replace(" ", "_")
         self._col.upsert(
             zv.Doc(
-                id=chunk_id,
-                fields={"content": content or ""},
+                id=zvec_id,
+                fields={
+                    "content": content or "",
+                    "memory_type": memory_type or "fact",
+                    "source": source or "",
+                },
                 vectors={"embedding": _deserialize_f32(vector_bytes)},
             )
         )
 
     def remove(self, chunk_id: str, conn=None) -> None:
-        self._col.delete([chunk_id])
+        # [8/6 fix] zvec doc id = chunks.rowid, 翻译: chunk_id → rowid → zvec_id
+        zvec_id = self._chunk_id_to_zvec_id(chunk_id, conn)
+        if zvec_id is not None:
+            self._col.delete([zvec_id])
+
+    def _chunk_id_to_zvec_id(self, chunk_id: str, conn) -> Optional[str]:
+        """[8/6 fix] chunk_id → chunks.rowid → zvec doc id (str). None = 没找到."""
+        if conn is None:
+            return chunk_id  # fallback (测试)
+        row = conn.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
+        return str(row[0]) if row else None
 
     def size(self) -> int:
-        """[8/5 主人 commit] zvec collection 文档数 (best-effort: iter_all 兜底)."""
+        """[8/5 主人 commit] zvec collection 文档数 (走 stats 属性 + iter_all 兜底)."""
+        try:
+            # zvec 0.6 stats 是 property 不是 method, 含 doc_count
+            stats = self._col.stats
+            if hasattr(stats, "doc_count"):
+                return int(stats.doc_count)
+        except Exception:
+            pass
         try:
             return sum(1 for _ in self._col.iter_all())
         except Exception:
             return 0
 
     def fts(self, query: str, top_k: int, conn=None) -> List[str]:
-        """zvec 原生 FTS BM25 → top-k chunk_id (仅排序). 过滤在 memory.py SQLite 侧."""
+        """zvec 原生 FTS BM25 → top-k chunk_id (仅排序). 过滤在 memory.py SQLite 侧.
+        [8/6 fix] d.id 是 zvec doc id (= chunks.rowid), 翻译回 chunk_id via SQLite.
+        """
         zv = self._zvec
         docs = self._col.query(
             zv.Query(
@@ -216,7 +283,19 @@ class ZvecIndex(SearchIndex):
                 param=zv.FtsQueryParam(default_operator="AND"),
             )
         )
-        return [d.id for d in docs[:top_k]]
+        result: List[str] = []
+        for d in docs[:top_k]:
+            try:
+                rowid_int = int(d.id)
+            except (TypeError, ValueError):
+                continue
+            if conn is not None:
+                row = conn.execute("SELECT id FROM chunks WHERE rowid = ?", (rowid_int,)).fetchone()
+                if row:
+                    result.append(row[0])
+            else:
+                result.append(str(d.id))
+        return result
 
     def close(self) -> None:
         if self._col is not None:
@@ -224,15 +303,19 @@ class ZvecIndex(SearchIndex):
 
     # -------- [8/6 plan §2] 新方法 --------
     def contains(self, chunk_id: str, conn=None) -> bool:
-        """遍历 iter_all 找 doc.id == chunk_id. 包 try/except (本机 SIGILL 兜底)."""
+        """[8/6 fix] chunk_id → rowid → 查 zvec collection 是否有对应 doc."""
+        zvec_id = self._chunk_id_to_zvec_id(chunk_id, conn)
+        if zvec_id is None:
+            return False
         try:
-            return any(d.id == chunk_id for d in self._col.iter_all())
+            doc = self._col.fetch([zvec_id])
+            return doc is not None and len(doc) > 0
         except Exception as e:
-            logger.warning(f"[zvec.contains] iter_all failed for {chunk_id}: {e}")
+            logger.warning(f"[zvec.contains] fetch failed for {chunk_id}: {e}")
             return False
 
     def cleanup_orphans(self, conn=None, dry_run: bool = False) -> Dict:
-        """遍历 iter_all → 对每个 doc.id 查 chunks 表 → soft/orphan 分类 → delete.
+        """遍历 iter_all → 对每个 zvec_id (= chunks.rowid) 查 chunks 表 → soft/orphan 分类 → delete.
 
         必须由调用方传 conn (zvec 不持 SQLite 连接; conn=None 时防御性返回全 0).
         """
@@ -252,20 +335,23 @@ class ZvecIndex(SearchIndex):
             return result
 
         to_delete: List[str] = []
-        for cid in ids:
+        for zvec_id in ids:
+            try:
+                rowid_int = int(zvec_id)
+            except (TypeError, ValueError):
+                # 旧 rebuild 残留 (chunk_id 直接当 zvec_id), 删掉 (不 join 找得到 rowid)
+                result["truly_orphan_cleaned"] += 1
+                to_delete.append(zvec_id)
+                continue
             row = conn.execute(
-                "SELECT 1 FROM chunks WHERE id = ?", (cid,)
+                "SELECT valid_until FROM chunks WHERE rowid = ?", (rowid_int,)
             ).fetchone()
             if row is None:
                 result["truly_orphan_cleaned"] += 1
-                to_delete.append(cid)
-                continue
-            row_v = conn.execute(
-                "SELECT valid_until FROM chunks WHERE id = ?", (cid,)
-            ).fetchone()
-            if row_v and row_v[0]:
+                to_delete.append(zvec_id)
+            elif row[0]:
                 result["soft_deleted_cleaned"] += 1
-                to_delete.append(cid)
+                to_delete.append(zvec_id)
 
         if not dry_run and to_delete:
             try:
@@ -468,15 +554,21 @@ class UsearchIndex(SearchIndex):
 # ============================================================
 
 def zvec_available() -> bool:
-    """子进程检测 zvec 是否可导入 — 防旧 CPU 上 import 崩溃带崩 mnelo 主进程."""
-    code = "import zvec; print('OK')"
+    """子进程检测 zvec 是否可导入 — 防旧 CPU 上 import 崩溃带崩 mnelo 主进程.
+
+    [8/6 fix] macOS 26 launchd 起的 MCP 进程 fork 子进程跑 zvec native .so mmap
+    必现 BlockingIOError (Errno 35 = EAGAIN, 不是 pipe 阻塞而是 fork syscall
+    期间 kernel 返 EAGAIN). 子进程检测在这环境下不可靠.
+
+    实战方案: 改在主进程直接 try-import zvec. 老 CPU (Ivy Bridge 之前) import
+    zvec 崩溃的假设本机 (M2 MacBook, AVX2+) 不适用 — 本机 0 风险. 旧 CPU 用户
+    应走 usearch 后端 (factory 自动降级).
+    """
     try:
-        r = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True, timeout=10,
-        )
-        return r.returncode == 0 and b"OK" in r.stdout
-    except Exception:
+        import zvec  # noqa: F401
+        return True
+    except Exception as e:
+        logger.warning(f"[zvec_available] main-process import failed: {type(e).__name__}: {e}")
         return False
 
 
