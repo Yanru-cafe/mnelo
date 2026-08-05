@@ -172,18 +172,20 @@ print(c.get_digest()['content'][:100])                     # session digest
 "
 ```
 
-### 🤖 Claude Code integration (SessionStart hook)
+### 🤖 Session-state injection — generic, any MCP client
 
-mnelo ships a Claude Code **SessionStart hook** that injects the digest into every new session — so your agent opens with the current memory state, no recall needed:
+mnelo is a **generic agent memory system** — Hermes, Claude Code, Cursor, or any MCP client use it directly. The digest rides **standard MCP** (initialize + resource), so injecting it at session start needs **no per-client code**:
 
-```bash
-# In .claude/settings.json (mnelo repo has an example):
-#   SessionStart → python3 $CLAUDE_PROJECT_DIR/scripts/session_start_digest.py
+```toml
+# ~/.hermes/memory/config.toml — works for ANY MCP client:
+[digest]
+inject_on_initialize = true   # digest rides the MCP initialize response
 ```
 
-- **Fault-tolerant**: if mnelo MCP isn't running, the hook exits silently (never blocks session start).
-- **Self-bootstrapping**: works even when `python3` resolves outside the venv (auto re-execs into the repo venv).
-- The digest appears as a `[mnelo-digest]` fenced block (data, not instruction — DESIGN §12).
+- **Hermes / Cursor / any MCP client**: just flip that one config — the digest is delivered via MCP initialize + the `memory://session/digest` resource. No integration code.
+- **Claude Code (optional adapter)**: agents that don't read the initialize resource can use the included **SessionStart hook** (`scripts/session_start_digest.py`, wired in `.claude/settings.json`). It is a thin adapter over the same generic mechanism — **fault-tolerant** (mnelo down → silent exit 0), **self-bootstrapping** (re-execs into the repo venv if `python3` resolves elsewhere), and emits a `[mnelo-digest]` fenced block (data, not instruction — DESIGN §12).
+
+Either way, your agent opens each session already knowing the current memory state — no recall needed.
 
 ---
 
@@ -280,20 +282,25 @@ mnelo/
 
 ---
 
-## 🆚 Why mnelo?
+## 🆚 Why mnelo? (vs the mainstream agent-memory landscape)
 
-The MCP-for-memory landscape (surveyed 2026-07/08). mnelo is the only one combining **all** of: 4-way RRF recall · knowledge graph · memory-type taxonomy + auto-classifier · **autonomous maintenance with audit/undo** · session digest · pluggable vector backends · single-file SQLite · bilingual.
+mnelo sits in a different lane from the big agent-memory frameworks. **Mem0 / Letta / Zep / Cognee** are built for *product-scale deployments* — managed services or self-hosted servers, often requiring external vector/graph DBs or a full agent runtime. **mnelo is the local-first, single-file, zero-cloud option**: one SQLite file, standard MCP, works with any agent, bilingual out of the box, with an optional autonomous maintenance layer.
 
-| | mnelo | vestige | mnemo | graphmind | memory-vault |
+| | **mnelo** | **Mem0** | **Letta (MemGPT)** | **Zep/Graphiti** | **Cognee** |
 |---|---|---|---|---|---|
-| 4-way RRF recall | ✅ | – | – | – | – |
-| Knowledge graph | ✅ | – | ✅ | ✅ | ✅ |
-| memory_type + classifier | ✅ | – | – | – | – |
-| L2 maintenance + audit/undo | ✅ | – | – | – | – |
-| Session digest | ✅ | – | – | – | – |
-| Pluggable vector backends | ✅ | – | – | – | – |
-| Single-file local | ✅ | ✅ | – | ✅ | ✅ |
-| Bilingual (中/EN) | ✅ | – | – | – | – |
+| **Deployment** | one SQLite file | managed service / self-host | agent runtime (heavy) | graph DB + service | self-host pipelines |
+| **Cloud required** | **no, ever** | optional | no | optional | no |
+| **Zero-dependency install** | **3 pip pkgs** | needs vector DB | ~500MB runtime | needs Neo4j etc. | needs KG stack |
+| **Knowledge graph** | ✅ native | ✅ (paid tier) | – | ✅ (core) | ✅ (core) |
+| **4-way RRF recall** | ✅ | – | – | – | – |
+| **Bilingual (中/EN), 简/繁 classifier** | ✅ | – | – | – | – |
+| **Autonomous maintenance** | ✅ (L2, audit/undo) | ✅ (LLM extraction) | ✅ (self-editing) | – | – |
+| **Temporal model** | ✅ (`valid_until` + `asof`) | – | – | ✅ (bi-temporal) | – |
+| **Session digest injection** | ✅ (any MCP client) | – | ✅ (core memory) | – | – |
+
+**Honest trade-off**: the mainstream frameworks are more mature, have managed cloud tiers, and target large-scale or long-running-agent use cases. mnelo prioritizes the opposite: **simplicity, local-first, zero ops, one backup-able file**, and a knowledge graph + bilingual + autonomous maintenance that fits a personal agent — without needing to run a vector DB, a graph DB, or a full agent runtime.
+
+If your use case is "a product serving many users / massive vector scale / a long-lived autonomous agent runtime" → Mem0/Letta/Zep are the right tools. If it's "a personal agent's memory, local, self-hosted, bilingual, with real knowledge-graph recall and self-maintenance" → that's mnelo's lane.
 
 ---
 
