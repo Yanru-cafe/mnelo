@@ -155,12 +155,32 @@ def _rebuild_index(target: Path) -> dict:
     索引文件不在 SQLite 事务内, DB-only 备份索引天然滞后; 恢复后跑 rebuild fresh=True
     按 SQLite 真源重建. 失败不 throw — DB 已是真源, warning 让用户手动补跑.
     """
+    # [8/6 plan §7 + review P1-1] 三层 fallback: scripts pkg / cwd-relative / abs path
+    # - cwd=tests/: "from scripts" 成功 (scripts 是 cwd 子目录, 无 __init__.py 也行)
+    # - cwd=repo/: 两者都成功
+    # - cwd=其它: 绝对路径 importlib 兜底
+    _ri = None
     try:
-        from scripts import rebuild_index as _ri  # type: ignore
+        from scripts import rebuild_index as _ri_mod  # type: ignore
+        _ri = _ri_mod
     except ImportError:
+        pass
+    if _ri is None:
         try:
-            import rebuild_index as _ri  # type: ignore
-        except ImportError as e:
+            import rebuild_index as _ri_mod  # type: ignore
+            _ri = _ri_mod
+        except ImportError:
+            pass
+    if _ri is None:
+        # 绝对路径兜底
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location(
+                "rebuild_index", _REPO_ROOT / "scripts" / "rebuild_index.py"
+            )
+            _ri = _ilu.module_from_spec(_spec)  # type: ignore
+            _spec.loader.exec_module(_ri)  # type: ignore
+        except Exception as e:
             return {"error": f"rebuild_index import failed: {e}"}
     backend = getattr(_config, "search_backend", "auto") or "auto"
     try:
