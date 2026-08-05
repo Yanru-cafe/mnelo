@@ -159,21 +159,19 @@ if [ -t 0 ] && [ "${MNELO_MEMORY_BACKUP_SKIP_PROMPT:-0}" != "1" ]; then
             ;;
         *)
             echo "  快照位置:"
-            echo "    1) ~/.hermes/memory/snapshots/                       (本地, 不出机器)"
-            echo "    2) ~/macbot-memory/work/mnelo-snapshots/             (dr-backup 自动 rsync → NAS, 不推 GitHub)"
-            echo "    3) ~/macbot-memory/work/mnelo-snapshots/             (dr-backup 自动 rsync + git push → GitHub)"
-            echo "       ⚠️  GitHub 仓库 **必须是 PRIVATE** — mnelo.db 含 PII, 推 public = 泄露"
-            echo "    注: 选项 2 / 3 写到同一路径, 差异在 dr-backup.sh 配没配 git push"
-            if ! gh repo view chinesewebman/macbot-memory --json visibility 2>/dev/null | grep -q PRIVATE; then
-                warn "无法确认 macbot-memory 仓库是 private. 主人请手动验证后再启选 3."
-            fi
-            echo "    4) /path/to/custom/                                  (自定义)"
-            read -r -p "  Choose [1/2/3/4]: " loc_choice
+            echo "    1) $LIVE_ROOT/snapshots/                             (本地默认, 不出机器)"
+            echo "    2) 自定义路径                                        (NAS/同步盘/git 仓库等, 异地同步自行保证)"
+            echo "       ⚠️  快照含 KG/PII — 自定义/异地路径请确认目标安全; 若进 git 仓库务必 PRIVATE"
+            echo "    3) 交由 backup_db 默认推导                           (不写 snapshot_dir, 用 \$LIVE_ROOT/snapshots)"
+            read -r -p "  Choose [1/2/3] (Enter=1): " loc_choice
             case "$loc_choice" in
-                1) SNAP_DIR="$HOME/.hermes/memory/snapshots" ;;
-                2|"") SNAP_DIR="$HOME/macbot-memory/work/mnelo-snapshots" ;;
-                3) SNAP_DIR="$HOME/macbot-memory/work/mnelo-snapshots" ;;
-                *) SNAP_DIR="$loc_choice" ;;
+                2)
+                    read -r -p "    输入快照目录绝对路径: " custom_path
+                    SNAP_DIR="${custom_path:-$LIVE_ROOT/snapshots}" ;;
+                3)
+                    SNAP_DIR="" ;;
+                *)
+                    SNAP_DIR="$LIVE_ROOT/snapshots" ;;
             esac
 
             read -r -p "保留最近多少份全备? (老的自动删) [30]: " ret_count
@@ -186,18 +184,22 @@ if [ -t 0 ] && [ "${MNELO_MEMORY_BACKUP_SKIP_PROMPT:-0}" != "1" ]; then
             CONFIG_TOML="$LIVE_ROOT/config.toml"
             [ -f "$CONFIG_TOML" ] || cp "$REPO_ROOT/config.toml.example" "$CONFIG_TOML"
             chmod 600 "$CONFIG_TOML"
-            # 删旧 [backup] section (idempotent)
+            # 删旧 [backup] section (idempotent), 清掉 sed 残留的 .bak
             sed -i.bak '/^\[backup\]/,/^retention = /d' "$CONFIG_TOML" 2>/dev/null || true
-            cat >> "$CONFIG_TOML" <<TOML
-
-[backup]
-enabled = true
-snapshot_dir = "$SNAP_DIR"
-schedule = "wed+sun"
-retention = $RETENTION
-TOML
+            rm -f "$CONFIG_TOML.bak"
+            # [8/5 fix] snapshot_dir 仅在用户选了自定义/默认时写入 (选项 3 → 空, 走 backup_db 推导)
+            {
+                echo ""
+                echo "[backup]"
+                echo "enabled = true"
+                if [ -n "$SNAP_DIR" ]; then
+                    echo "snapshot_dir = \"$SNAP_DIR\""
+                fi
+                echo "schedule = \"wed+sun\""
+                echo "retention = $RETENTION"
+            } >> "$CONFIG_TOML"
             chmod 600 "$CONFIG_TOML"
-            ok "backup config 已写: snapshot_dir=$SNAP_DIR retention=$RETENTION"
+            ok "backup config 已写: snapshot_dir=${SNAP_DIR:-<backup_db 默认推导>} retention=$RETENTION"
 
             # 装 backup plist (macOS)
             if [ "$(uname -s)" = "Darwin" ]; then
