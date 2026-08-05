@@ -1,12 +1,13 @@
 """
-[zvec 集成] SearchIndex 适配器测试 (DESIGN §3.6/§8.3).
+[8/6 plan §12] SearchIndex 适配器测试 (DESIGN §3.6/§8.3).
 
 本环境 CPU 不支持 zvec 原生指令 (import 即崩), 故:
-- SQLiteVecIndex: 用真实后端测 (回归安全网)
+- UsearchIndex: 用真实后端测 (本机可用)
 - ZvecIndex: 用 fake zvec 模块验证 API 调用正确性 (真 zvec 需在部署机实测)
-- build_search_index 工厂: 后端选择 + zvec 不可用时回落
+- build_search_index 工厂: 后端选择 + 必选二选一 (sqlite_vec 已出局, plan §1)
 
-fake zvec 只实现 ZvecIndex 用到的 API 面, 用于验证"代码按 zvec 0.6 API 写对"。
+fake zvec 只实现 ZvecIndex 用到的 API 面 (含 iter_all, DataType.VECTOR_INT8),
+用于验证"代码按 zvec 0.6 API 写对"。
 """
 import math
 import sys
@@ -36,6 +37,13 @@ class _FakeCollection:
         for i in ids:
             self.docs.pop(i, None)
         return []
+
+    def iter_all(self):
+        """[8/6 plan §12] ZvecIndex.cleanup_orphans/contains 调 iter_all."""
+        for doc_id in list(self.docs.keys()):
+            from types import SimpleNamespace
+            vec, fields = self.docs[doc_id]
+            yield SimpleNamespace(id=doc_id, vectors={"embedding": vec}, fields=fields)
 
     def query(self, q):
         # FakeZvec.Query 返回 dict; 兼容属性访问 (真实 zvec Query 是 dataclass)
@@ -78,8 +86,9 @@ class _FakeZvec:
         def __init__(self):
             self.fields = []
 
-        def add_dense_vector_field(self, name, dim):
-            self.fields.append(("dense", name, dim))
+        def add_dense_vector_field(self, name, dim, data_type=None):
+            # [8/6 plan §2] ZvecIndex 传 data_type=DataType.VECTOR_INT8
+            self.fields.append(("dense", name, dim, data_type))
 
         def add_text_field(self, name):
             self.fields.append(("text", name))
@@ -96,6 +105,10 @@ class _FakeZvec:
         self.last_collection = col
         return col
 
+    class DataType:
+        """[8/6 plan §2] ZvecIndex 期望 DataType.VECTOR_INT8."""
+        VECTOR_INT8 = "VECTOR_INT8"
+
 
 def _install_fake_zvec():
     fz = _FakeZvec()
@@ -103,44 +116,9 @@ def _install_fake_zvec():
     return fz
 
 
-class TestSQLiteVecIndex(unittest.TestCase):
-    """真实 sqlite_vec 后端 — 回归安全网."""
-
-    @classmethod
-    def setUpClass(cls):
-        from search_index import SQLiteVecIndex
-        from config import resolve_db_path
-
-        cls.db_path = resolve_db_path()
-        cls.index = SQLiteVecIndex(cls.db_path)
-        from memory import Memory
-
-        cls.mem = Memory()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.mem.close()
-        cls.index.close()
-
-    def test_01_add_knn_remove(self):
-        import struct
-
-        from embedder import embed_bytes
-
-        # 写入两条 + 建 chunks 记录 (让 knn 能翻译 rowid→chunk_id)
-        cid1 = self.mem.remember("search_index test 一只蓝色狐狸", source="test_search_index")
-        cid2 = self.mem.remember("search_index test 一只红色狐狸", source="test_search_index")
-        v = embed_bytes("一只蓝色狐狸")
-        hits = self.index.knn(v, 5)
-        self.assertTrue(any(h.chunk_id == cid1 for h in hits), "knn 应命中 cid1")
-        self.index.remove(cid1)
-        hits2 = self.index.knn(v, 5)
-        self.assertFalse(any(h.chunk_id == cid1 for h in hits2), "remove 后不应再命中")
-        self.index.remove(cid2)
-
-
+# [8/6 plan §12] TestSQLiteVecIndex 整类删除 (sqlite_vec 已出局, plan §1)
 class TestZvecBackendWithFake(unittest.TestCase):
-    """fake zvec — 验证 ZvecIndex 按 zvec 0.6 API 调用正确."""
+    """fake zvec — 验证 ZvecIndex 按 zvec 0.6 API 调用正确 (含 INT8 精度)."""
 
     def setUp(self):
         self.fz = _install_fake_zvec()
@@ -172,7 +150,35 @@ class TestZvecBackendWithFake(unittest.TestCase):
         self.assertNotIn("chunk_a", [h.chunk_id for h in hits2])
         idx.close()
 
-    def test_03_deserialize_f32(self):
+    def test_03_size_and_contains_and_cleanup(self):
+        """[8/6 plan §12] ZvecIndex.size/contains/cleanup_orphans API 面."""
+        import struct
+
+        idx = self.module.ZvecIndex(Path("/tmp/fake_zv_sc"), dim=4)
+        v = struct.pack("4f", *[1.0, 0.0, 0.0, 0.0])
+        idx.add("chunk_a", v)
+        idx.add("chunk_b", v)
+        # size
+        self.assertEqual(idx.size(), 2)
+        # contains
+        self.assertTrue(idx.contains("chunk_a"))
+        self.assertFalse(idx.contains("chunk_x"))
+        # cleanup_orphans: conn=None 防御性返回
+        r0 = idx.cleanup_orphans(conn=None, dry_run=True)
+        self.assertEqual(r0["truly_orphan_cleaned"], 0)
+        # cleanup_orphans: 配 fake conn (返回空 → 全 orphan)
+        class FakeConn:
+            def execute(self, sql, params=()):
+                class _R:
+                    def fetchone(self_inner):
+                        return None  # chunk missing → orphan
+                return _R()
+        r = idx.cleanup_orphans(conn=FakeConn(), dry_run=False)
+        self.assertEqual(r["truly_orphan_cleaned"], 2)
+        self.assertEqual(idx.size(), 0)
+        idx.close()
+
+    def test_04_deserialize_f32(self):
         import struct
 
         from search_index import _deserialize_f32
@@ -181,7 +187,7 @@ class TestZvecBackendWithFake(unittest.TestCase):
 
 
 class TestFactory(unittest.TestCase):
-    """build_search_index 后端选择 + 回落."""
+    """[8/6 plan §12] build_search_index 后端选择 + 必选二选一 (sqlite_vec 已出局)."""
 
     def setUp(self):
         import search_index
@@ -191,21 +197,48 @@ class TestFactory(unittest.TestCase):
 
         self.db_path = resolve_db_path()
 
-    def test_01_default_is_sqlite_vec(self):
-        idx = self.module.build_search_index("sqlite_vec", self.db_path, 512)
-        self.assertEqual(idx.name, "sqlite_vec")
+    def test_01_auto_returns_usearch_or_zvec(self):
+        """[8/6 plan §1] auto 必须返回 usearch 或 zvec (sqlite_vec 已出局)."""
+        idx = self.module.build_search_index("auto", self.db_path, 512)
+        self.assertIn(idx.name, ("usearch", "zvec"),
+                      f"auto 应二选一, got {idx.name}")
         idx.close()
 
-    def test_02_zvec_unavailable_falls_back(self):
-        """[A4 8/5] zvec 不可用 → 降级链 zvec → usearch → sqlite_vec (本机 usearch 已装, 落到 usearch)."""
+    def test_02_usearch_explicit_returns_usearch(self):
+        idx = self.module.build_search_index("usearch", self.db_path, 512)
+        self.assertEqual(idx.name, "usearch")
+        idx.close()
+
+    def test_03_zvec_unavailable_raises(self):
+        """[8/6 plan §1] 显式 zvec 不可用 → RuntimeError (不再回落 usearch)."""
         self.module.zvec_available = lambda: False
-        idx = self.module.build_search_index("zvec", self.db_path, 512)
-        self.assertEqual(idx.name, "usearch", "zvec 不可用应降级 usearch")
-        idx.close()
+        with self.assertRaises(RuntimeError):
+            self.module.build_search_index("zvec", self.db_path, 512)
 
-    def test_03_zvec_available_builds_zvec(self):
+    def test_04_usearch_unavailable_raises(self):
+        """[8/6 plan §1] 显式 usearch 未安装 → RuntimeError (不再回落 sqlite_vec)."""
+        self.module.usearch_available = lambda: False
+        with self.assertRaises(RuntimeError):
+            self.module.build_search_index("usearch", self.db_path, 512)
+
+    def test_05_auto_both_unavailable_raises(self):
+        """[8/6 plan §1] auto 双不可用 → RuntimeError."""
+        self.module.zvec_available = lambda: False
+        self.module.usearch_available = lambda: False
+        with self.assertRaises(RuntimeError):
+            self.module.build_search_index("auto", self.db_path, 512)
+
+    def test_06_zvec_available_builds_zvec(self):
         _install_fake_zvec()
         self.module.zvec_available = lambda: True
         idx = self.module.build_search_index("zvec", self.db_path, 512)
         self.assertEqual(idx.name, "zvec")
+        idx.close()
+
+    def test_07_unknown_backend_falls_back_to_auto(self):
+        """[8/6 plan §1] 未知 backend → warning + fallback auto."""
+        self.module.zvec_available = lambda: False
+        self.module.usearch_available = lambda: True
+        idx = self.module.build_search_index("weird_backend", self.db_path, 512)
+        self.assertEqual(idx.name, "usearch")
         idx.close()

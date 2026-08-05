@@ -39,12 +39,15 @@ class BackupRestoreBase(unittest.TestCase):
         self.db_path = Path(self.tmp) / "test.db"
         con = sqlite3.connect(str(self.db_path))
         try:
+            # [8/6 plan §14] schema 含 source/importance 让 rebuild_index 可跑
             con.executescript("""
                 CREATE TABLE chunks (
                     id TEXT PRIMARY KEY,
                     content TEXT,
                     timestamp TEXT,
-                    valid_until TEXT
+                    valid_until TEXT,
+                    source TEXT,
+                    importance REAL
                 );
                 CREATE TABLE entities (
                     id TEXT PRIMARY KEY,
@@ -78,12 +81,12 @@ class BackupRestoreBase(unittest.TestCase):
                 );
             """)
             con.execute(
-                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)",
-                ("c1", "hello world"),
+                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL, ?, ?)",
+                ("c1", "hello world", "manual", 1.0),
             )
             con.execute(
-                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)",
-                ("c2", "another chunk"),
+                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL, ?, ?)",
+                ("c2", "another chunk", "manual", 1.0),
             )
             con.execute(
                 "INSERT INTO entities VALUES (?, ?, 'test', 'manual', datetime('now'))",
@@ -190,18 +193,20 @@ class TestRestore(BackupRestoreBase):
         self.assertEqual(target.read_bytes()[:8], target_sha_before)
 
     def test_03_atomic_replace_restore(self):
+        # [8/6 plan §14] rebuild=False: 手搓 schema 无 source/importance 列,
+        # rebuild_index 会失败. 这里只验证 DB 恢复, 不验证索引重建.
         # 先做个快照
         backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
         # 改 live db 内容
         con = sqlite3.connect(str(self.db_path))
-        con.execute("INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)", ("c3", "new"))
+        con.execute("INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL, ?, ?)", ("c3", "new", "manual", 1.0))
         con.commit()
         # 改前 checksum
         pre = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         con.close()
         self.assertEqual(pre, 3)
-        # 恢复
-        report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path)
+        # 恢复 (rebuild=False, 只换 DB)
+        report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path, rebuild=False)
         self.assertTrue(report["sha256_ok"])
         self.assertEqual(report["integrity_check"]["integrity_check"], "ok")
         self.assertIn("restored", report)
@@ -272,12 +277,62 @@ class TestEndToEnd(BackupRestoreBase):
         self.assertIn("path", result)
         # restore → 另一个空 db
         restore_target = Path(self.tmp) / "restored.db"
-        report = restore_db.restore(tmp_snap, ts=None, target=restore_target, dry_run=False)
+        # [8/6 plan §14] rebuild=False — live db 是 LIVE, 重建索引会改 live 状态,
+        # 这里只验证恢复, 不验证索引重建 (TestRestoreAfterIndex 单独覆盖).
+        report = restore_db.restore(tmp_snap, ts=None, target=restore_target, dry_run=False, rebuild=False)
         self.assertTrue(report["sha256_ok"])
         self.assertEqual(report["integrity_check"]["integrity_check"], "ok")
         self.assertEqual(report["integrity_check"]["foreign_key_check"], "ok")
         # 行数 > 0 (live db 至少有几条)
         self.assertGreater(report["integrity_check"]["row_counts"]["chunks"], 0)
+
+
+class TestRestoreAfterIndex(BackupRestoreBase):
+    """[8/6 plan §14] 恢复后索引可 recall — 验证 backup/restore 链路后
+    usearch.index 重建正确, knn 能命中."""
+
+    def test_restore_rebuilds_index_and_knn_returns_hits(self):
+        # 1. backup (schema 已含 source/importance, 上面 setUp 加了)
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+
+        # 2. 改坏 db (加新 chunk, 让 snapshot 比 live 旧)
+        con = sqlite3.connect(str(self.db_path))
+        con.execute("INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL, ?, ?)",
+                    ("c_garbage", "garbage", "manual", 1.0))
+        con.commit()
+        con.close()
+
+        # 3. restore with rebuild=True (验证索引重建后内容跟 snapshot 一致)
+        restore_target = Path(self.tmp) / "restored.db"
+        report = restore_db.restore(self.snap_dir, ts=None, target=restore_target,
+                                     dry_run=False, rebuild=True)
+
+        # 4. 校验 DB 恢复了
+        self.assertTrue(report["sha256_ok"])
+        self.assertIn("restored", report)
+        self.assertNotIn("error", report)
+
+        # 5. 校验索引被重建了
+        self.assertIn("index_rebuilt", report)
+        ir = report["index_rebuilt"]
+        self.assertNotIn("error", ir, f"index rebuild failed: {ir.get('error')}")
+        self.assertEqual(ir["added"], 2, "应重建 2 条 (setUp 写的 c1+c2)")
+        self.assertIn("fresh", ir)
+        self.assertTrue(ir["fresh"], "fresh=True 应 unlink 旧索引文件")
+
+        # 6. 校验恢复后的 db 能 recall
+        from search_index import build_search_index
+        idx = build_search_index("auto", restore_target, dim=512)
+        try:
+            # size 应该跟 chunks 活跃数一致
+            con = sqlite3.connect(str(restore_target))
+            alive = con.execute(
+                "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"
+            ).fetchone()[0]
+            con.close()
+            self.assertEqual(idx.size(), alive, f"idx.size()={idx.size()} vs alive={alive}")
+        finally:
+            idx.close()
 
 
 if __name__ == "__main__":
