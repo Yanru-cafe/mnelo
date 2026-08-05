@@ -248,6 +248,27 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 
 可选：把这个 kind 加进 `[recall] boost_kinds` 让它像 `stock` 一样召回浮顶；用 `correct()` 或脚本回填已有实体。
 
+**🧠 用 mnelo——写得好、检索得好**（记什么、怎么结构化）：
+
+**1. `memory_type`——chunk 的生命周期类型。** 规则分类器自动给新写入打标，但**你知道时就显式传**：
+
+| 类型 | 何时用 | 你会分类成的例子 |
+|---|---|---|
+| `preference` | 喜欢 / 不喜欢 / 风格偏好 | "我偏好简洁日报" |
+| `decision` | 决策 +（最好带上）理由 | "我决定下月采购 CAT-1024" |
+| `episode` | 带日期的事件 | "今天建仓了 CAT-1024" |
+| `procedure` | 步骤 / 流程 / 方法 | "做周报的流程…" |
+| `ephemeral` | 草稿 / 占位 / 进行中 | "临时草稿，稍后处理" |
+| `fact` | 其它一切（默认） | — |
+
+写入：`memory_remember(content, ..., memory_type='decision')` 知道就传；**不传则让自动分类器决定**（支持简体/繁體/英文）。
+
+**2. 实体 `kind`——概念怎么结构化。** 当一个东西**跨 chunk 被引用、有别名、或是图锚点**时才建实体——一次性提及不必建。id 保持一致：`kind:slug`（如 `product:sku-1024`），别名放 `aliases_json`。用 `memory_remember(entities=[{id, kind, name, aliases}])` 把实体挂到 chunk 上；用 `memory_relate(source_id, target_id, relation, evidence_chunk_id=...)` 连概念——**每条关系都应指回支撑它的 chunk**。
+
+**3. 回答前先检索。** 任何可能活在用户记忆里的内容（身份、决策、进行中），回答前先 `memory_recall`——需要时带 filters（`{'type': 'decision'}`、`{'source': ...}`）。会话开场 digest（`memory_get_digest`）已给你当前状态；需要细节时用 `ref` 展开某行。
+
+**4. 一致性是契约。** type 和 kind 只有一致使用才有价值。引入新 kind 时，把约定记进你的 CLAUDE.md/SOUL.md（见上面"新增实体 kind"）。
+
 ---
 
 ## 🔎 向量后端部署矩阵
