@@ -111,6 +111,8 @@
 
 **推论**：新增能力必须回答"它是在让记忆被更好地**存取**，还是在让 mnelo 变成 Agent？"——后者应拒绝或外包。
 
+**通用优先原则（v0.13 修订）**：mnelo 能力**默认通用**（任何 MCP 客户端可用）；**客户端专属件单列 + 附加说明**，作为通用层的薄适配器，不为某客户端新造机制。例：Session 状态注入 = 通用 MCP initialize 注入（primary）+ Claude Code SessionStart 钩子（optional adapter，见 TASKS_L2_SESSION_STATE Part1）。判断标准：能力是否只服务于单一 agent → 若是，降级为适配层而非核心机制。
+
 ---
 
 ## 2. 目标架构：5 层
