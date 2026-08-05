@@ -1970,17 +1970,33 @@ class Memory:
 
             # === Apply 路径 (dry_run=False) — 每 proposal 一事务 (§5.9) ===
             if not dry_run:
-                apply_ok = self._apply_decay_importance(
-                    run_id=run_id,
-                    chunk_id=chunk_id,
-                    before=before,
-                    after=after,
-                    revert_sql=revert_sql,
-                    ts=ts,
-                )
-                if apply_ok:
-                    applied += 1
-                else:
+                # [H5 P1] decay 也要包 try/except, 跟 ttl_soft_delete 路径对称.
+                # 内层 _apply_decay_importance 自己 try/except 处理 rowcount=0 等场景
+                # (返回 False); 外层处理 _apply 自身抛异常的边界.
+                try:
+                    apply_ok = self._apply_decay_importance(
+                        run_id=run_id,
+                        chunk_id=chunk_id,
+                        before=before,
+                        after=after,
+                        revert_sql=revert_sql,
+                        ts=ts,
+                    )
+                    if apply_ok:
+                        applied += 1
+                    else:
+                        failed += 1
+                except Exception as e:  # noqa: BLE001 — 提案级隔离
+                    logger.exception(
+                        f"[H5] decay_importance apply raised: {chunk_id}"
+                    )
+                    self._mark_skipped(
+                        run_id=run_id,
+                        chunk_id=chunk_id,
+                        ts=ts,
+                        reason=f"decay_importance apply raised: {type(e).__name__}: {e}",
+                        action_type="decay_importance",
+                    )
                     failed += 1
 
         # ============================================================
@@ -2080,18 +2096,34 @@ class Memory:
                         # action as failed so the watermark cannot advance.
                         failed += 1
                     else:
-                        apply_ok = self._apply_ttl_soft_delete(
-                            run_id=run_id,
-                            chunk_id=chunk_id,
-                            mtype=mtype,
-                            before=before,
-                            after=after,
-                            revert_sql=revert_sql,
-                            ts=ts,
-                        )
-                        if apply_ok:
-                            applied += 1
-                        else:
+                        # [H5 §5.9.1] 每 proposal 一事务 + 异常隔离
+                        # 外层 try/except 包 _apply_ttl_soft_delete, 避免任一 proposal
+                        # 异常打断整轮 — 失败 proposal 标 skipped + audit_log, 其它继续.
+                        try:
+                            apply_ok = self._apply_ttl_soft_delete(
+                                run_id=run_id,
+                                chunk_id=chunk_id,
+                                mtype=mtype,
+                                before=before,
+                                after=after,
+                                revert_sql=revert_sql,
+                                ts=ts,
+                            )
+                            if apply_ok:
+                                applied += 1
+                            else:
+                                failed += 1
+                        except Exception as e:  # noqa: BLE001 — 提案级隔离, 详记日志
+                            logger.exception(
+                                f"[H5] ttl_soft_delete apply raised: {chunk_id}"
+                            )
+                            self._mark_skipped(
+                                run_id=run_id,
+                                chunk_id=chunk_id,
+                                ts=ts,
+                                reason=f"ttl_soft_delete apply raised: {type(e).__name__}: {e}",
+                                action_type="ttl_soft_delete",
+                            )
                             failed += 1
 
         # ============================================================
@@ -2174,6 +2206,10 @@ class Memory:
             self._conn.commit()
             return True
         except Exception as e:
+            # [H5 P0 fix] rollback 必须在 _mark_skipped 前 — 否则 UPDATEs + purged_queue
+            # INSERT 会被 _mark_skipped 末尾的 commit() 一并提交, 留半更新 (chunk
+            # 软删除 + queue 入队 + audit_log skipped = 操作员被骗).
+            self._conn.rollback()
             # [§5.9.1] 失败标 skipped + 错误记入
             # [8/4 audit #6+8 fix] action_type 跟 applied 行一致 (实战是 'decay_importance', 不是 'failed')
             self._mark_skipped(
@@ -2241,6 +2277,9 @@ class Memory:
             self._conn.commit()
             return True
         except Exception as e:
+            # [H5 P0 fix] rollback 必须在 _mark_skipped 前 — 否则 UPDATE valid_until +
+            # INSERT purged_queue 会被 _mark_skipped 末尾的 commit() 一并提交, 留半更新.
+            self._conn.rollback()
             # [8/4 audit #6+8 fix] action_type 跟 applied 行一致
             self._mark_skipped(
                 run_id=run_id,
