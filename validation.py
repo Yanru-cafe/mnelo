@@ -14,7 +14,7 @@ validation.py — input sanitization for memory MCP tool arguments.
 """
 
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 # === Size caps ===
 MAX_CHUNK_CONTENT_BYTES = 8 * 1024  # 8 KB
@@ -221,3 +221,105 @@ def validate_holding_payload(h: Dict) -> Dict:
             out[k] = v
 
     return out
+
+
+# === [8/6 E 路线] PII scanner — advisory only, never blocks or rewrites ===
+#
+# Stance: mnelo 不读内容、不加密、不主动 block; 命中只写 audit_log + /health 计数.
+# 5 类高置信 PII + 1 类 secret 风格 token; 命中返回 list[dict], 不动 content.
+# 误报可接受: a hit means "look at this", not "this is bad".
+
+_CC_RE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_CN_MOBILE_RE = re.compile(r"\b1[3-9]\d{9}\b")
+_CN_ID_RE = re.compile(
+    r"\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b"
+)
+_SECRET_PREFIX_RE = re.compile(
+    r"\b(?:"
+    r"sk-[A-Za-z0-9_-]{20,}|"
+    r"ghp_[A-Za-z0-9]{20,}|"
+    r"gho_[A-Za-z0-9]{20,}|"
+    r"xox[abposr]-[A-Za-z0-9-]{20,}|"
+    r"AKIA[0-9A-Z]{16}|"
+    r"AIzaSy[A-Za-z0-9_-]{30,}|"
+    r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r")\b"
+)
+
+
+def _luhn_ok(digits: str) -> bool:
+    """Standard Luhn checksum. Returns True on mod-10 valid 13–19 digit string."""
+    s = [int(c) for c in digits if c.isdigit()]
+    if len(s) < 13 or len(s) > 19:
+        return False
+    checksum = 0
+    parity = (len(s) - 2) % 2
+    for i, d in enumerate(s[:-1]):
+        if i % 2 == parity:
+            d *= 2
+            if d > 9:
+                d -= 9
+        checksum += d
+    checksum += s[-1]
+    return checksum % 10 == 0
+
+
+def _hit(category: str, span_text: str, start: int, end: int) -> Dict:
+    return {
+        "category": category,
+        "match": span_text if len(span_text) <= 64 else span_text[:32] + "…",
+        "offset": start,
+        "length": end - start,
+    }
+
+
+def scan_pii_warnings(content: str) -> List[Dict]:
+    """[8/6 E 路线] Surface possible-PII categories. Advisory; never blocks.
+
+    Categories: credit_card (Luhn-valid 13–19 digits), email (RFC-lite),
+    cn_mobile (11-digit Chinese mobile), cn_id_card (GB 11643 shape),
+    secret_token (known-prefix API key / JWT / PAT).
+
+    Returns list of {category, match, offset, length} dicts. Empty input
+    returns empty list. Multiple hits in one string yield multiple dicts.
+    Caller decides whether to log, redact, or ignore.
+    """
+    if not content:
+        return []
+    hits: List[Dict] = []
+    seen: set = set()  # dedup by (category, offset)
+
+    for m in _CC_RE.finditer(content):
+        digits = m.group()
+        if _luhn_ok(digits):
+            key = ("credit_card", m.start())
+            if key not in seen:
+                hits.append(_hit("credit_card", digits, m.start(), m.end()))
+                seen.add(key)
+
+    for m in _EMAIL_RE.finditer(content):
+        key = ("email", m.start())
+        if key not in seen:
+            hits.append(_hit("email", m.group(), m.start(), m.end()))
+            seen.add(key)
+
+    for m in _CN_MOBILE_RE.finditer(content):
+        key = ("cn_mobile", m.start())
+        if key not in seen:
+            hits.append(_hit("cn_mobile", m.group(), m.start(), m.end()))
+            seen.add(key)
+
+    for m in _CN_ID_RE.finditer(content):
+        key = ("cn_id_card", m.start())
+        if key not in seen:
+            hits.append(_hit("cn_id_card", m.group(), m.start(), m.end()))
+            seen.add(key)
+
+    for m in _SECRET_PREFIX_RE.finditer(content):
+        key = ("secret_token", m.start())
+        if key not in seen:
+            hits.append(_hit("secret_token", m.group(), m.start(), m.end()))
+            seen.add(key)
+
+    return hits

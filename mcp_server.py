@@ -792,11 +792,31 @@ def _build_sse_app(auth_token: str) -> "Starlette":
                     "reason": "review recent hygiene proposals before destructive runs",
                     "args": {"pass_name": "hygiene", "limit": 20},
                 }]
+            # [8/6 E 路线] PII advisory 24h count (audit_log, pass_name=pii_audit).
+            # 不 block, 仅 surface 提醒调用方. 阈值高于 0 → 推荐用户自检.
+            pii_24h = target._conn.execute(  # noqa: SLF001 (intentional private access for /health)
+                "SELECT COUNT(*) FROM audit_log "
+                "WHERE pass_name='pii_audit' AND created_at >= datetime('now', '-1 day')"
+            ).fetchone()[0]
+            pii_recommendation = None
+            if pii_24h > 0:
+                pii_recommendation = {
+                    "tool": "memory_audit_list",
+                    "safe": True,
+                    "reason": (
+                        f"{pii_24h} chunks in the last 24h matched advisory PII patterns "
+                        "(credit card / email / cn mobile / id card / secret token); "
+                        "mnelo does NOT redact or refuse — caller decides."
+                    ),
+                    "args": {"pass_name": "pii_audit", "limit": 50},
+                }
+
             return JSONResponse({"status": status, "hygiene": {
                 "purge_backlog": backlog,
                 "importance_below_floor": floor_count,
                 "freshness": hygiene.get("freshness"),
-            }, "recommendations": recommendations})
+            }, "pii_warnings_last_24h": pii_24h, "recommendations": recommendations
+                + ([pii_recommendation] if pii_recommendation else [])})
         except Exception:
             logger.exception("health check failed")
             return JSONResponse({"status": "degraded", "hygiene": {

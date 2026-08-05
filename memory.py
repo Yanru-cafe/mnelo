@@ -435,6 +435,28 @@ class Memory:
         v_bytes = embed_bytes(content)
         self._index.add(chunk_id, v_bytes, conn=self._conn)
 
+        # 4.5 [8/6 E 路线] PII advisory scan — 命中只写 audit_log, 不改 content 不 throw
+        # mnelo 不读内容、不加密、不主动 block; 调用方自决 ("最多提醒一下").
+        from validation import scan_pii_warnings as _scan_pii
+        for hit in _scan_pii(content):
+            self._conn.execute(
+                "INSERT INTO audit_log (run_id, pass_name, action_type, ref_type, ref_id, "
+                "after_json, llm_used, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 0, 'applied', ?)",
+                (
+                    f"pii_advisory_{chunk_id}",
+                    "pii_audit",
+                    f"detected_{hit['category']}",
+                    "chunk",
+                    chunk_id,
+                    json.dumps(
+                        {"category": hit["category"], "offset": hit["offset"], "length": hit["length"]},
+                        ensure_ascii=False,
+                    ),
+                    ts,
+                ),
+            )
+
         self._conn.commit()
         # Digest only depends on identity facts and high-importance decisions/episodes.
         if (
