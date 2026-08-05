@@ -197,9 +197,10 @@ class TestFactory(unittest.TestCase):
         idx.close()
 
     def test_02_zvec_unavailable_falls_back(self):
+        """[A4 8/5] zvec 不可用 → 降级链 zvec → usearch → sqlite_vec (本机 usearch 已装, 落到 usearch)."""
         self.module.zvec_available = lambda: False
         idx = self.module.build_search_index("zvec", self.db_path, 512)
-        self.assertEqual(idx.name, "sqlite_vec", "zvec 不可用应回落 sqlite_vec")
+        self.assertEqual(idx.name, "usearch", "zvec 不可用应降级 usearch")
         idx.close()
 
     def test_03_zvec_available_builds_zvec(self):

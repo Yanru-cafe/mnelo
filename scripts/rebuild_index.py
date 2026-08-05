@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""A6 — scripts/rebuild_index.py (TASKS_SEARCH_INDEX §4 A6).
+
+后端切换重建索引脚本. usage: python scripts/rebuild_index.py [--backend usearch|sqlite_vec|auto]
+
+[8/5 主人决策] auto 优先级: zvec > usearch > sqlite_vec (同 build_search_index).
+
+[§4 A6 验收] sqlite_vec → usearch 切换后跑此脚本, recall 命中率恢复.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sqlite3
+import struct
+import sys
+from pathlib import Path
+
+# 路径: scripts/ 在 repo 根的下一层; 父目录是 repo
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from embedder import embed  # noqa: E402
+from search_index import build_search_index  # noqa: E402
+
+
+def _iter_chunks(conn):
+    """遍历所有 valid chunks (valid_until IS NULL), yield (chunk_id, content)."""
+    rows = conn.execute(
+        "SELECT id, content FROM chunks WHERE valid_until IS NULL"
+    ).fetchall()
+    for r in rows:
+        yield r["id"], r["content"]
+
+
+def _load_embedding(content: str) -> bytes:
+    """[A6 §4] 调 embedder 重新嵌入 → float32 bytes (与 sqlite-vec 兼容)."""
+    vec = embed(content)
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+def rebuild(backend: str, db_path: Path, dry_run: bool = False) -> dict:
+    """重建索引: 清掉现有 → 全量 re-add. Returns stats dict."""
+    if not db_path.exists():
+        raise FileNotFoundError(f"db not found: {db_path}")
+
+    # 建新索引 (或 dry-run 跳过)
+    if not dry_run:
+        idx = build_search_index(backend, db_path, dim=512)
+    else:
+        # dry-run: 不真正建索引, 只统计
+        idx = None
+
+    added = 0
+    failed = 0
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        for cid, content in _iter_chunks(conn):
+            if dry_run:
+                added += 1
+                continue
+            try:
+                vec = _load_embedding(content)
+                idx.add(cid, vec, conn=conn, content=content)
+                added += 1
+            except Exception as e:
+                print(f"[rebuild] failed for {cid}: {e}")
+                failed += 1
+        conn.close()
+    finally:
+        if idx is not None:
+            idx.close()
+
+    return {
+        "backend": backend,
+        "backend_resolved": idx.name if idx else "(dry-run)",
+        "added": added,
+        "failed": failed,
+        "dry_run": dry_run,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Rebuild mnelo search index")
+    ap.add_argument("--backend", default="auto",
+                    choices=["auto", "sqlite_vec", "usearch", "zvec"],
+                    help="目标后端 (默认 auto: zvec > usearch > sqlite_vec)")
+    ap.add_argument("--dry-run", action="store_true", help="只统计, 不真正重建")
+    ap.add_argument("--db", default=None, help="db 路径 (默认 <repo>/memory.db)")
+    args = ap.parse_args()
+
+    db_path = Path(args.db) if args.db else (ROOT / "memory.db")
+    stats = rebuild(args.backend, db_path, dry_run=args.dry_run)
+    print(stats)
+
+
+if __name__ == "__main__":
+    main()
