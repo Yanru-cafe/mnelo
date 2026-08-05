@@ -221,18 +221,24 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 
 如果你是 AI agent（Claude Code、Hermes、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
 
-**1. 按实际机器选择向量后端。**
+**1. 选择安装目录（LIVE_ROOT）——给出建议，让用户选用或自定。**
+- 默认：`~/.hermes/memory`（home 下的隐藏目录）。能用，但隐藏点目录容易在 dotfiles 里被淹没，也和无关的隐藏文件混在一起。
+- 建议：**显眼、贴近工作区**的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。别放在刚 clone 的仓库里（记忆数据不是源代码）。
+- 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
+- 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想**彻底离开 `.hermes`**，再用 `MNELO_CRON_OUTPUT_DIR` 改掉 health_check 的报告目录（默认 `~/.hermes/cron/output`，每次运行会重建）。
+
+**2. 按实际机器选择向量后端。**
 - 默认 **`sqlite-vec`** 任意 CPU 可用——没有理由就不换。
 - 更大规模 / 旧 CPU 上要更快召回 → **`usearch`**（任意 CPU）。
 - **`zvec`** 带原生全文检索，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
 - 配置：`config.toml [search] backend` 或 env `MNELO_MEMORY_SEARCH_BACKEND`。
 
-**2. 选嵌入模型前先问用户主语言**（之后切换需重新初始化 DB——所以*首次使用前*就问）：
+**3. 选嵌入模型前先问用户主语言**（之后切换需重新初始化 DB——所以*首次使用前*就问）：
 - 中文 → `bge-small-zh-v1.5`（默认，512 维）
 - 英文 → `bge-small-en-v1.5`（384 维）
 - 混合 / 多语 → `paraphrase-multilingual-MiniLM-L12-v2`（384 维）
 
-**3. 装完后，修改你自己的配置，声明 mnelo 是你的记忆系统。** 在你的 `SOUL.md` / `CLAUDE.md`（或等价文件）加一段：
+**4. 装完后，修改你自己的配置，声明 mnelo 是你的记忆系统。** 在你的 `SOUL.md` / `CLAUDE.md`（或等价文件）加一段：
 
 > **记忆**：我使用 mnelo MCP server（SSE at `http://127.0.0.1:8086/sse`）作为我的记忆系统。
 > - `memory_remember` — 持久化重要事实与决策，带类型（`preference` / `decision` / …）
@@ -240,7 +246,7 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 > - `memory_get_digest` / `memory://session/digest` — 开场注入的会话状态摘要
 > 保持 mnelo 运行。如果它停了，就无记忆工作并标注记忆缺口。
 
-**4. 验证** —— 跑 `scripts/health_check.py`（或访问 `/health`），确认 server ready 再宣布完成。
+**5. 验证** —— 跑 `scripts/health_check.py`（或访问 `/health`），确认 server ready 再宣布完成。
 
 **5. 备份 / 恢复 (TASKS_BACKUP_RESTORE)**。**⚠️ 隐私: 若用户选 GitHub 自动 push (选项 3), 目标仓库**必须是 PRIVATE** —— mnelo.db 含个人记忆、决策、偏好、实体关系 (PII 级别), 推 public repo = 数据泄露。启用 `ai.mnelo.backup.plist` + GitHub 路径前必先验证。mnelo 是单 SQLite 文件 — 备份容易，但写中 `cp memory.db` 不安全 (WAL)。用内置工具:
 
@@ -269,6 +275,18 @@ python scripts/restore_db.py --from 2026-08-05-030000
 > 新增一个实体 kind：`product`，用于记录产品/商品相关的实体。用 `memory_remember` 记录产品时，entities 里带 `kind: 'product'`，并保持命名与别名一致（如 id `product:sku-1024`）。把这个约定记到你的 CLAUDE.md/SOUL.md 并长期一致使用；产品召回时用 `kind: 'product'` 过滤。
 
 可选：把这个 kind 加进 `[recall] boost_kinds` 让它像 `stock` 一样召回浮顶；用 `correct()` 或脚本回填已有实体。
+
+**🎯 根据用户画像，建议新增的 kind**——种子 kind（`stock` / `person` / `concept` …）只是起点，不是上限。第一次接触用户时，扫一眼 TA 的领域（文档、文件、现有数据），按画像提一小套会用到的 kind，再写进 CLAUDE.md/SOUL.md 当约定。以 A 股投资者画像（跟踪持仓、每天看仓位总结日报、会做采购决策）为例：
+
+> `portfolio` — 持仓组合（锚点：id `portfolio:a-share-2026`）
+> `position` — 单只持仓（id `position:sh600519`）
+> `stock` — 标的本身（种子 kind；用 `position` → `stock` 关联）
+> `plan` — 采购 / 下一步计划（"下月采购 CAT-1024"）
+> `strategy` — 投资 / 交易策略
+> `report` — 周期性报告（每日/每周仓位总结）
+> `watchlist` — 自选池
+
+一次提 **5–7 个**即可，别贪多——每个都必须"被跨 chunk 引用"才有存在价值；用户真正引入新概念时再加。
 
 **🧠 用 mnelo——写得好、检索得好**（记什么、怎么结构化）：
 

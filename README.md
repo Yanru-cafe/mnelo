@@ -221,18 +221,24 @@ Either way, your agent opens each session already knowing the current memory sta
 
 If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for your user, follow these operational steps:
 
-**1. Choose the vector backend — based on the actual machine.**
+**1. Choose the install directory (LIVE_ROOT) — propose options, let the user pick or customize.**
+- Default: `~/.hermes/memory` (a hidden dot-dir in `$HOME`). It works, but hidden dirs are easy to lose track of and get mixed in with unrelated dotfiles.
+- Recommended: a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<your workspace>/mnelo-data`. Keep it out of the repo you just cloned — memory data isn't source code.
+- Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
+- Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To leave `.hermes` behind entirely, also redirect the health-check report dir with `MNELO_CRON_OUTPUT_DIR` (default `~/.hermes/cron/output`, recreated by `health_check.py` on every run).
+
+**2. Choose the vector backend — based on the actual machine.**
 - Default **`sqlite-vec`** works on any CPU — use it unless there's a reason not to.
 - Larger scale or faster recall on an older CPU → **`usearch`** (any CPU).
 - **`zvec`** adds native full-text, but **requires AVX2+** — do **not** install it on old CPUs (it crashes on `import` there). Detect the CPU or ask.
 - Configure via `config.toml [search] backend` or env `MNELO_MEMORY_SEARCH_BACKEND`.
 
-**2. Ask the user about their primary language before picking an embedding model** (switching later requires re-initializing the DB — so ask *before* first use):
+**3. Ask the user about their primary language before picking an embedding model** (switching later requires re-initializing the DB — so ask *before* first use):
 - Chinese → `bge-small-zh-v1.5` (default, 512d)
 - English → `bge-small-en-v1.5` (384d)
 - Mixed / multilingual → `paraphrase-multilingual-MiniLM-L12-v2` (384d)
 
-**3. After install, update your own config to adopt mnelo as your memory system.** Add a note to your `SOUL.md` / `CLAUDE.md` (or equivalent):
+**4. After install, update your own config to adopt mnelo as your memory system.** Add a note to your `SOUL.md` / `CLAUDE.md` (or equivalent):
 
 > **Memory**: I use the mnelo MCP server (SSE at `http://127.0.0.1:8086/sse`) as my memory system.
 > - `memory_remember` — persist important facts & decisions, with a type (`preference`, `decision`, …)
@@ -240,7 +246,7 @@ If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for yo
 > - `memory_get_digest` / `memory://session/digest` — the session-state summary injected at start
 > Keep mnelo running. If it's down, work without it and note the memory gap.
 
-**4. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
+**5. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
 
 **5. Backup / restore (TASKS_BACKUP_RESTORE).** **⚠️ PRIVACY: if the user picks GitHub auto-push (option 3), the destination repo MUST be private.** mnelo.db contains personal memory, decisions, preferences, entity relationships — PII-level. Pushing to a public repo = data leak. Verify before enabling `ai.mnelo.backup.plist` with a GitHub-backed `snapshot_dir`. mnelo is one SQLite file — easy to back up, but `cp memory.db` is unsafe mid-write (WAL). Use the built-in tools:
 
@@ -269,6 +275,18 @@ python scripts/restore_db.py --from 2026-08-05-030000
 > Add a new entity kind: `product`, for product-related entities. When using `memory_remember` for products, pass `kind: 'product'` and keep naming/aliases consistent (e.g. id `product:sku-1024`). Record this convention in your CLAUDE.md/SOUL.md and use it consistently; filter product recalls with `kind: 'product'`.
 
 Optionally: add the kind to `[recall] boost_kinds` to give it the same recall boost as `stock`; backfill existing entities via `correct()` or a script.
+
+**🎯 Suggesting new kinds from the user's profile** — the seed kinds (`stock`, `person`, `concept`, …) are a starting point, not a limit. When you first meet a user, skim their domain (documents, files, existing data) and propose a small kind set they'll actually use — then record it in CLAUDE.md/SOUL.md as the convention. For example, for a Chinese A-share investor who tracks holdings and reads a daily position-summary report:
+
+> `portfolio` — the overall holdings set (anchor: id `portfolio:a-share-2026`)
+> `position` — a single holding (id `position:sh600519`)
+> `stock` — the security itself (seed kind; relate `position` → `stock`)
+> `plan` — a purchase / next-step plan ("下月采购 CAT-1024")
+> `strategy` — an investment / trading strategy
+> `report` — recurring reports (daily/weekly position summaries)
+> `watchlist` — a watchlist of candidates
+
+Keep it to **5–7 kinds** — each must earn its place by being referenced across chunks. Add a new one only when the user actually introduces that concept.
 
 **🧠 Using mnelo — write & retrieve well** (what to remember, how to structure it):
 
