@@ -192,6 +192,29 @@ class Config:
         )
         self.digest_inject_on_initialize = digest_inject_str.lower() not in ("false", "0", "no", "off")
 
+        health_section = self._raw.get("health", {}) if isinstance(self._raw.get("health"), dict) else {}
+
+        def _health_threshold(env_name: str, key: str) -> int:
+            raw = os.environ.get(env_name)
+            value = raw if raw is not None and raw != "" else health_section.get(key, 100)
+            try:
+                if isinstance(value, bool) or isinstance(value, float):
+                    raise ValueError("must be an integer")
+                parsed = int(value)
+                if parsed < 1:
+                    raise ValueError("must be >= 1")
+                return parsed
+            except (TypeError, ValueError) as e:
+                print(f'[config] WARN: health.{key} "{value}" invalid ({e}); 回落 100', file=sys.stderr)
+                return 100
+
+        self.health_purge_backlog_threshold = _health_threshold(
+            "MNELO_MEMORY_HEALTH_PURGE_BACKLOG_THRESHOLD", "purge_backlog_threshold"
+        )
+        self.health_floor_chunks_threshold = _health_threshold(
+            "MNELO_MEMORY_HEALTH_FLOOR_CHUNKS_THRESHOLD", "floor_chunks_threshold"
+        )
+
     @classmethod
     def load(cls) -> "Config":
         """Get the loaded config singleton."""

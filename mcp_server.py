@@ -703,7 +703,9 @@ def _build_sse_app(auth_token: str) -> "Starlette":
             hygiene = stats.get("hygiene", {})
             backlog = int(hygiene.get("purge_backlog", 0))
             floor_count = int(hygiene.get("decay_floor_chunks", 0))
-            status = "degraded" if backlog > 100 or floor_count > 100 else "ok"
+            backlog_limit = config.health_purge_backlog_threshold
+            floor_limit = config.health_floor_chunks_threshold
+            status = "degraded" if backlog > backlog_limit or floor_count > floor_limit else "ok"
             return JSONResponse({"status": status, "hygiene": {
                 "purge_backlog": backlog,
                 "importance_below_floor": floor_count,
