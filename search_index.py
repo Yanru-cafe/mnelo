@@ -345,7 +345,16 @@ class UsearchIndex(SearchIndex):
         if vec.ndim == 1:
             vec = vec.reshape(1, -1)
         ids = np.array([row["rowid"]], dtype=np.uint64)
-        self._index.add(ids, vec)
+        # [8/5 fix] usearch add 是严格模式 — 重复 rowid 抛 "Duplicate keys not allowed",
+        # 不幂等 (update/软删后重写/rebuild 会撞)。遇重复先 remove 再 add。
+        try:
+            self._index.add(ids, vec)
+        except RuntimeError as e:
+            if "Duplicate keys" not in str(e):
+                raise
+            logger.warning(f"[usearch.add] rowid {row['rowid']} exists — remove+readd (idempotent)")
+            self._index.remove(ids)
+            self._index.add(ids, vec)
         # NOTE: usearch 索引仅在 close() 时 save() — 进程异常退出前 add 可能丢
 
     def remove(self, chunk_id: str, conn=None) -> None:

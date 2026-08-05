@@ -91,7 +91,7 @@ mnelo uses canonical `k=60` for the 4 lanes, plus a small `0.05/sqrt(rank)` boos
 ## ✨ Features
 
 ### 🧠 Knowledge-graph aware
-Every chunk can link to typed entities and the relations graph is queryable. **Entity `kind` is an open taxonomy** — you define your domain's kinds (`product`, `person`, `location`, `category`, `canonical_fact`, …; whatever fits). `memory_graph_query` returns 2-hop neighbors; `memory_reason` (planned) returns full paths.
+Every chunk can link to typed entities and the relations graph is queryable. **Entity `kind` is an open taxonomy** — the schema imposes no enum constraint. mnelo ships with a small **seed set** (`stock`, `concept`, `person`, `user`, `canonical_fact`, `identity_fact`); you add your domain's kinds freely (any string works). (`container` for explicit loci is DESIGN-planned, not yet shipped.) `memory_graph_query` returns 2-hop neighbors; `memory_reason` (planned) returns full paths.
 
 ### 🏷️ memory_type taxonomy + zero-LLM classifier
 Every chunk carries a type that governs its lifecycle (§3.0): `fact` / `preference` / `episode` / `decision` / `procedure` / `ephemeral`. A **rule classifier** (P1a, no LLM, deterministic) auto-tags new writes by strong markers — bilingual (简体/繁體 via char-map normalization / EN). Ambiguous input stays `fact` ("宁缺毋滥"). Facts can later be **promoted** to `canonical_fact` entities by the L2 layer.

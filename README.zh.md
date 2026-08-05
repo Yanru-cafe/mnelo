@@ -91,7 +91,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 ## ✨ 特色
 
 ### 🧠 知识图谱感知
-每条 chunk 可链接到类型化实体，关系图可查询。**实体 `kind` 是开放分类**——你来定义你领域的种类（`product` / `person` / `location` / `category` / `canonical_fact` / …，随你）。`memory_graph_query` 返回 2-hop 邻居。
+每条 chunk 可链接到类型化实体，关系图可查询。**实体 `kind` 是开放分类**——schema 无枚举约束。mnelo 自带一个小**种子集**（`stock` / `concept` / `person` / `user` / `canonical_fact` / `identity_fact`）；你领域的 kind 自由加（任何字符串都行）。（`container` 显式收纳是 DESIGN 规划，尚未上线。）`memory_graph_query` 返回 2-hop 邻居。
 
 ### 🏷️ memory_type 类型谱系 + 零 LLM 分类器
 每条 chunk 带一个决定其生命周期的类型（§3.0）：`fact` / `preference` / `episode` / `decision` / `procedure` / `ephemeral`。**规则分类器**（P1a，无 LLM，确定性）按强标记自动打标——**简体/繁體（字符映射归一化）/英文**三语。模糊输入保持 `fact`（宁缺毋滥）。高频事实后续可由 L2 层**晋升**为 `canonical_fact` 实体。
