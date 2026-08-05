@@ -37,7 +37,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 - **Session-state digest** — a 500–2000 char "current state" summary injected into your agent at session start (Claude Code SessionStart hook / MCP resource)
 - **Vector backends (mandatory 二选一, 8/6)** — runtime must be `usearch` (HNSW, any CPU, f16) or `zvec` (HNSW + native FTS + INT8, AVX2+); `sqlite_vec` removed as a backend
 
-**Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (product / category codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **8.5 ms** / p95 = **10 ms** on baseline 6.3k chunks), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
+**Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (product / category codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **18 ms** / p95 = **24 ms** on zvec 0.6 @ ~5k vectors, 8/6 measured), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
 
 ---
 
@@ -53,7 +53,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | **Autonomous layer** | optional L2 maintenance: decay / TTL / purge, audit_log + undo, fact-promotion |
 | **Session digest** | 500–2000 char summary injected at session start (Claude Code hook / MCP resource) |
 | **Protocol** | MCP over SSE (127.0.0.1:8086) — **14 tools**, Bearer auth |
-| **Latency (warm)** | p50 = **8.5 ms**, p95 = **10 ms** (baseline 6.3k chunks) |
+| **Latency (warm)** | p50 = **18 ms**, p95 = **24 ms** (zvec 0.6 @ 5k vectors, 4-way concurrent, 8/6) |
 | **LOC** | ~4000 lines Python (memory.py + classifier + search adapter + scripts + client) |
 | **Dependencies** | `mcp[cli]`, `usearch`, `fastembed` (+ optional `zvec` on AVX2+; `sqlite-vec` kept only for legacy vec0 table) |
 | **i18n** | English + 中文 first-class; classifier handles 简体/繁體/EN |
@@ -206,7 +206,8 @@ The agent handles venv creation, pip install, the embedding-model download, and 
 mnelo is a **generic agent memory system** — Hermes, Claude Code, Cursor, or any MCP client use it directly. The digest rides **standard MCP** (initialize + resource), so injecting it at session start needs **no per-client code**:
 
 ```toml
-# ~/.hermes/memory/config.toml — works for ANY MCP client:
+# 默认路径: 假如本机是 hermes agent, 装在 ~/.hermes/memory/config.toml — works for ANY MCP client:
+# 其他 agent (Claude Code/Cursor/...) 用 $HOME/mnelo-data/config.toml 或自定 path.
 [digest]
 inject_on_initialize = true   # digest rides the MCP initialize response
 ```
@@ -223,10 +224,10 @@ Either way, your agent opens each session already knowing the current memory sta
 If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for your user, follow these operational steps:
 
 **1. Choose the install directory (LIVE_ROOT) — propose options, let the user pick or customize.**
-- Default: `~/.hermes/memory` (a hidden dot-dir in `$HOME`). It works, but hidden dirs are easy to lose track of and get mixed in with unrelated dotfiles.
-- Recommended: a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<your workspace>/mnelo-data`. Keep it out of the repo you just cloned — memory data isn't source code.
+- If you're running as **hermes agent** (default), the conventional path is `~/.hermes/memory` (hidden dot-dir in `$HOME`). It works, but hidden dirs are easy to lose track of and get mixed in with unrelated dotfiles.
+- For **other agents** (Claude Code, Cursor, …) the **recommended** path is a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<your workspace>/mnelo-data`. Keep it out of the repo you just cloned — memory data isn't source code.
 - Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
-- Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To leave `.hermes` behind entirely, also redirect the health-check report dir with `MNELO_CRON_OUTPUT_DIR` (default `~/.hermes/cron/output`, recreated by `health_check.py` on every run).
+- Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To leave `.hermes` behind entirely, also redirect the health-check report dir with `MNELO_CRON_OUTPUT_DIR` (hermes-agent default `~/.hermes/cron/output`, recreated by `health_check.py` on every run; other agents pick a different one).
 
 **2. Choose the vector backend — based on the actual machine.**
 - **`usearch`** (f16) works on any CPU — the default fallback.
@@ -348,18 +349,20 @@ All numbers measured on a single MacBook (M-series). Current baseline (2026-08):
 
 | Metric | Value | Notes |
 |---|---|---|
-| **p50** | **8.5 ms** | warm, 6.3k chunks, 4-way concurrent |
-| **p95** | **10 ms** | same |
-| **p50 (10k seed)** | **23 ms** | `scripts/benchmark.py --chunks 10000` |
-| **p95 (10k seed)** | **29 ms** | vector search scales with chunk count |
-| **avg (24h warm)** | 34.4 ms | incl. cold-start outliers |
+| **p50** | **18 ms** | warm, zvec 0.6 @ 5k vectors, 4-way concurrent (8/6 measured) |
+| **p95** | **24 ms** | same |
+| **p99** | **25 ms** | same |
+| **p50 (15k vectors)** | **73 ms** | `scripts/benchmark.py --chunks 10000` (15422 vectors after seed) |
+| **p95 (15k vectors)** | **95 ms** | HNSW scales sub-linearly with chunk count |
+| **p99 (15k vectors)** | **161 ms** | worst-case observed |
+| **avg (24h warm)** | 10.4 ms | `recall_log` 8/6, 232 hits, incl. cold-start outliers |
 | **cold start** | ~1.1 s | MCP launch + embedder load |
 
 Reproduce: `python scripts/benchmark.py --chunks 10000 --queries 100 --json bench.json`
 
 ### Memory footprint
 
-One MCP server process, idle (macOS M-series): **~270 MB RSS** — of which the embedder (bge-small-zh weights + onnxruntime + tokenizer) is ~200 MB, constant regardless of data size; the rest (~70 MB) is Python + MCP + SQLite + sqlite-vec. The 92 MB model file inflates to ~200 MB resident (float32 load + ONNX arena + tokenizer) — **file size ≠ RAM cost**.
+One MCP server process, idle (macOS M-series): **~270 MB RSS** — of which the embedder (bge-small-zh weights + onnxruntime + tokenizer) is ~200 MB, constant regardless of data size; the rest (~70 MB) is Python + MCP + SQLite + zvec (or usearch). The 92 MB model file inflates to ~200 MB resident (float32 load + ONNX arena + tokenizer) — **file size ≠ RAM cost**. The zvec collection itself is ~30 MB on disk for 5422 512-dim vectors.
 
 Model lives in the HuggingFace Hub cache (`~/.cache/huggingface/hub/`); auto-downloaded on first use, shareable with other tools.
 
@@ -437,10 +440,11 @@ If your use case is "a product serving many users / massive vector scale / a lon
 
 ## 🔄 Repo ↔ live sync (post-commit hook)
 
-mnelo has two copies of every `.py` / `.sql` file: the repo (`~/projects/mnelo/`) and the live server dir (`~/.hermes/memory/`). The repo ships a **post-commit hook** that syncs edited files to live, backs up the old version, and runs `health_check.py` after:
+mnelo has two copies of every `.py` / `.sql` file: the repo (default `~/projects/mnelo/`, configurable to wherever you cloned) and the live server dir. For **hermes-agent** the conventional live dir is `~/.hermes/memory/`; for other agents it's wherever you set `MNELO_MEMORY_DIR`. The repo ships a **post-commit hook** that syncs edited files to live, backs up the old version, and runs `health_check.py` after:
 
 ```bash
-cd ~/projects/mnelo && git config core.hooksPath .githooks
+# For hermes-agent:    cd ~/projects/mnelo && git config core.hooksPath .githooks
+# For other agents:    cd <your-clone-dir> && git config core.hooksPath .githooks
 ```
 
 Skips `memory.db` / `config.toml` / `*.md` / `tests/` (by design). Restart the MCP server after sync: `launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp`.
@@ -457,7 +461,7 @@ Add a new locale — 1 edit in `i18n_messages.py`, no code change. Set `MNELO_ME
 
 | Limit | Workaround |
 |---|---|
-| **~500K vectors** @ 512-dim on a single MacBook (sqlite-vec brute-force) | Enable **usearch** (HNSW, any CPU) or **zvec** for real ANN |
+| **~500K vectors** @ 512-dim on a single MacBook | **zvec** (HNSW + INT8 + native FTS, AVX2+, 8/6 measured) or **usearch** (HNSW, any CPU) for real ANN |
 | Single-user (no multi-tenant) | Don't expose port 8086 to LAN |
 | No PII auto-detection | Don't store passwords / tokens / credit cards |
 | bge-small-zh is CN-tuned | Swap to `bge-small-en-v1.5` for EN-heavy workloads |
@@ -483,10 +487,10 @@ MIT. See [`LICENSE`](LICENSE).
 
 ## 🙏 Acknowledgements
 
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) — vector extension
+- [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — vector backends (8/6 default: `auto` chain zvec→usearch)
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) — legacy vec0 table kept only for migration tools; not a runtime backend
 - [fastembed](https://qdrant.github.io/fastembed) — embedder wrapper
 - [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) — CN embedding model
-- [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — optional vector backends
 - [MCP](https://modelcontextprotocol.io) — protocol spec
 - [Hermes Agent](https://nousresearch.com/hermes) — primary integration target
 
