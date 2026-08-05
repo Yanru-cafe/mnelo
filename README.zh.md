@@ -55,7 +55,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | **协议** | MCP over SSE（127.0.0.1:8086）——**14 个工具**，Bearer 认证 |
 | **延迟（热）** | p50 = **18 ms**，p95 = **24 ms**（zvec 0.6 @ 5k 向量，4 路并发，8/6 实测） |
 | **代码量** | ~4000 行 Python（memory.py + 分类器 + 检索适配器 + scripts + client） |
-| **依赖** | `mcp[cli]`、`usearch`、`fastembed`（+ 可选 `zvec` on AVX2+；`sqlite-vec` 仅 legacy vec0 表） |
+| **依赖** | 3 个核心 pip（`mcp[cli]`、`usearch`、`fastembed`）+ 1 个可选（`zvec` AVX2+）；embedding 模型（`BAAI/bge-small-zh-v1.5`，~92 MB）首次使用时由 fastembed 自动下载。`sqlite-vec` 仅 legacy。 |
 | **双语** | 中英一等公民；分类器支持简体/繁體/英文 |
 
 ---
@@ -324,12 +324,12 @@ mnelo 的向量索引后端可插拔（[DESIGN §3.6/§8.3](docs/DESIGN.md)）�
 | **usearch**（auto 链兜底） | 任意（硬件无关） | **HNSW** 真 ANN + f16 量化 | 旧 CPU（Ivy Bridge 及之前）/ zvec 跑不了的机器 |
 | **sqlite_vec**（已淘汰） | 任意（纯 SQLite 扩展） | 暴力 KNN；零依赖 | 仅作 vec0 legacy 表，迁移/修复工具用；不再做 runtime 后端 |
 
-**部署规则**（8/6 拍板 `auto` 链，工厂永不抛 fail-fast）：
+**部署规则**（8/6 design: `auto` 链，工厂永不抛 fail-fast）：
 - **`auto` 链默认**——`config.toml [search] backend = 'auto'`（不写也行）。工厂挑装了的最高优先级后端：装 zvec → 走 zvec；只装 usearch → 走 usearch；都装 + CPU 不行 → 走 usearch；都没装 → RuntimeError（向量库是必选依赖）。
 - **显式指定**：env `MNELO_MEMORY_SEARCH_BACKEND=zvec` 或 `usearch`。
 - `scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议。
 
-**自动降级链（8/5 主人拍板，8/6 改主进程 import）**：`build_search_index()` 工厂通过**主进程** `import` 检测（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，8/6 改主进程直接 import）实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
+**自动降级链（8/5 design, 8/6 implementation）**：`build_search_index()` 工厂通过**主进程** `import` 检测（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，8/6 改主进程直接 import）实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
 
 **切换后端**（zvec ↔ usearch）：必须从 chunks 全量重嵌（zvec doc id = chunks.rowid, 不同后端索引文件格式不兼容）：
 ```bash
@@ -426,7 +426,7 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 |---|---|---|---|---|---|
 | **部署** | 一个 SQLite 文件 | 托管 / 自托管 | agent 运行时（重） | 图库 + 服务 | 自托管管线 |
 | **云依赖** | **永不** | 可选 | 否 | 可选 | 否 |
-| **零依赖安装** | **3 个 pip 包** | 需向量库 | ~500MB 运行时 | 需 Neo4j 等 | 需 KG 栈 |
+| **安装体积** | 3 个核心 pip + 1 个可选 + 92 MB embedding 模型（fastembed 首次自动下） | 需向量库 | ~500MB 运行时 | 需 Neo4j 等 | 需 KG 栈 |
 | **知识图谱** | ✅ 原生 | ✅（付费档） | – | ✅（核心） | ✅（核心） |
 | **4 路 RRF 召回** | ✅ | – | – | – | – |
 | **双语（中/EN），简/繁分类器** | ✅ | – | – | – | – |
@@ -437,6 +437,19 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 **诚实的取舍**：主流框架更成熟、有托管云档、面向大规模或长驻 agent。mnelo 追求相反方向：**简单、本地优先、零运维、一个可备份的文件**，加上适合个人 agent 的知识图谱 + 双语 + 自主维护——无需跑向量库、图库或完整 agent 运行时。
 
 如果你的场景是"服务众多用户的产品 / 海量向量 / 长驻自主 agent 运行时" → Mem0/Letta/Zep 是对的。如果是"个人 agent 的记忆，本地、自托管、双语、真图谱召回 + 自维护" → 那是 mnelo 的车道。
+
+### 安装体积拆解
+
+| 组件 | 大小 | 必装？ | 备注 |
+|---|---|---|---|
+| **核心 pip 包** | ~3 MB | 必装 | `mcp[cli]`、`usearch`、`fastembed` |
+| **可选 pip**（`zvec`） | ~60 MB native | 仅 AVX2+ 机器 | 装了就跑 zvec，没装自动回退 usearch |
+| **Embedding 模型** | ~92 MB | 首次运行必装 | `BAAI/bge-small-zh-v1.5`（中文特调）——由 fastembed 自动下载到 `~/.cache/huggingface/hub/`。可换 `bge-small-en-v1.5`（英文）或 `paraphrase-multilingual-MiniLM-L12-v2`（多语）通过 `config.toml [embedder]` |
+| **Python + MCP 运行时** | ~50 MB | 必装 | Python 3.11 + MCP SDK + onnxruntime |
+| **向量索引** | 随数据增长 | 必装 | `usearch` 单文件；`zvec` 目录（5422 条 512 维向量约 30 MB） |
+| **SQLite DB** | 随数据增长 | 必装 | 一个文件（`memory.db`）；4500 chunks 约 45 MB |
+
+全新安装总磁盘：**~200 MB**（模型占大头）。之后增长完全跟数据量走。无外部服务、无守护进程、无云账号。
 
 ---
 
