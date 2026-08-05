@@ -306,28 +306,42 @@ def main():
         from config import config as _cfg
 
         want = _cfg.search_backend
-        if want == "zvec":
+        # [8/6 plan §8] 向量库必选二选一; auto 走可用性链解析 active.
+        # sqlite_vec 已出局, 不再是降级兜底 — 都不可用 → unavailable + degraded.
+        if want == "auto":
+            if zvec_available():
+                active = "zvec"
+            elif usearch_available():
+                active = "usearch"
+            else:
+                active = "unavailable"
+                degraded = True
+            report["checks"]["search_backend"] = {"configured": "auto", "active": active}
+        elif want == "zvec":
             ok = zvec_available()
             report["checks"]["search_backend"] = {
                 "configured": "zvec",
-                "active": "zvec" if ok else "sqlite_vec",
+                "active": "zvec" if ok else "unavailable",
                 "zvec_available": ok,
             }
             if not ok:
-                degraded = True  # 配置了 zvec 但不可用 → 实际跑在 sqlite_vec, 提醒
+                degraded = True  # 配置了 zvec 但不可用 → 整体不可用 (无回落)
         elif want == "usearch":
             ok = usearch_available()
             report["checks"]["search_backend"] = {
                 "configured": "usearch",
-                "active": "usearch" if ok else "sqlite_vec",
+                "active": "usearch" if ok else "unavailable",
                 "usearch_available": ok,
             }
             if not ok:
-                degraded = True  # 配置了 usearch 但未安装 → 实际跑在 sqlite_vec, 提醒
+                degraded = True
         else:
-            report["checks"]["search_backend"] = {"configured": "sqlite_vec", "active": "sqlite_vec"}
+            # 未知值 (config coerce 兜底一般不会到这里)
+            report["checks"]["search_backend"] = {"configured": want, "active": "unavailable"}
+            degraded = True
     except Exception as e:
         report["checks"]["search_backend"] = {"error": str(e)}
+        degraded = True
 
     # 4. Write report
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -339,16 +353,25 @@ def main():
         "=" * 50,
     ]
     sb = report["checks"].get("search_backend", {})
-    if sb.get("configured") == "zvec" and not sb.get("zvec_available"):
-        lines.append(f"⚠️  Search backend — configured zvec, active sqlite_vec (CPU 不支持, 已回落)")
-    elif sb.get("configured") == "zvec":
-        lines.append(f"✅ Search backend — zvec (HNSW + FTS)")
-    elif sb.get("configured") == "usearch" and not sb.get("usearch_available"):
-        lines.append(f"⚠️  Search backend — configured usearch, active sqlite_vec (未安装, 已回落)")
-    elif sb.get("configured") == "usearch":
-        lines.append(f"✅ Search backend — usearch (HNSW)")
+    configured = sb.get("configured")
+    active = sb.get("active")
+    if configured == "auto":
+        if active == "zvec":
+            lines.append(f"✅ Search backend — auto → zvec (HNSW + FTS, INT8)")
+        elif active == "usearch":
+            lines.append(f"✅ Search backend — auto → usearch (HNSW, f16)")
+        else:
+            lines.append(f"❌ Search backend — auto 但 zvec/usearch 均不可用")
+    elif configured == "zvec" and active == "zvec":
+        lines.append(f"✅ Search backend — zvec (HNSW + FTS, INT8)")
+    elif configured == "zvec" and active == "unavailable":
+        lines.append(f"❌ Search backend — configured zvec, 不可用 (CPU 不支持)")
+    elif configured == "usearch" and active == "usearch":
+        lines.append(f"✅ Search backend — usearch (HNSW, f16)")
+    elif configured == "usearch" and active == "unavailable":
+        lines.append(f"❌ Search backend — configured usearch, 未安装")
     else:
-        lines.append(f"✅ Search backend — sqlite_vec (默认)")
+        lines.append(f"❌ Search backend — configured {configured}, active {active}")
     mcp = report["checks"]["mcp_server"]
     if mcp["alive"]:
         uptime_h = mcp["uptime_sec"] / 3600 if mcp["uptime_sec"] else 0

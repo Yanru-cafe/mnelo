@@ -42,16 +42,32 @@ def _load_embedding(content: str) -> bytes:
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def rebuild(backend: str, db_path: Path, dry_run: bool = False) -> dict:
-    """重建索引: 清掉现有 → 全量 re-add. Returns stats dict."""
+def _unlink_existing_index_files(db_path: Path) -> dict:
+    """[8/6 plan §6] fresh=True 时清掉旧索引文件, 避免残留 rowid 干扰."""
+    removed = []
+    for name in ("usearch.index", "search_index.zv"):
+        p = db_path.parent / name
+        if p.exists():
+            try:
+                p.unlink()
+                removed.append(str(p))
+            except OSError as e:
+                print(f"[rebuild] failed to unlink {p}: {e}", file=sys.stderr)
+    return {"removed": removed}
+
+
+def rebuild(backend: str, db_path: Path, dry_run: bool = False, fresh: bool = False) -> dict:
+    """重建索引: 可选 fresh (清旧索引文件) → 全量 re-add. Returns stats dict."""
     if not db_path.exists():
         raise FileNotFoundError(f"db not found: {db_path}")
 
-    # 建新索引 (或 dry-run 跳过)
+    removed_files: dict = {}
+    if fresh and not dry_run:
+        removed_files = _unlink_existing_index_files(db_path)
+
     if not dry_run:
         idx = build_search_index(backend, db_path, dim=512)
     else:
-        # dry-run: 不真正建索引, 只统计
         idx = None
 
     added = 0
@@ -81,20 +97,24 @@ def rebuild(backend: str, db_path: Path, dry_run: bool = False) -> dict:
         "added": added,
         "failed": failed,
         "dry_run": dry_run,
+        "fresh": fresh,
+        "removed_files": removed_files,
     }
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Rebuild mnelo search index")
+    ap = argparse.ArgumentParser(description="Rebuild mnelo search index (后端感知 usearch/zvec)")
     ap.add_argument("--backend", default="auto",
-                    choices=["auto", "sqlite_vec", "usearch", "zvec"],
-                    help="目标后端 (默认 auto: zvec > usearch > sqlite_vec)")
+                    choices=["auto", "usearch", "zvec"],
+                    help="目标后端 (默认 auto: zvec > usearch; 都不可用 RuntimeError)")
     ap.add_argument("--dry-run", action="store_true", help="只统计, 不真正重建")
+    ap.add_argument("--fresh", action="store_true",
+                    help="先 unlink 旧索引文件 (usearch.index / search_index.zv), 全新重建")
     ap.add_argument("--db", default=None, help="db 路径 (默认从 config 解析)")
     args = ap.parse_args()
 
     db_path = Path(args.db) if args.db else Path(_config.db_path)
-    stats = rebuild(args.backend, db_path, dry_run=args.dry_run)
+    stats = rebuild(args.backend, db_path, dry_run=args.dry_run, fresh=args.fresh)
     print(stats)
 
 

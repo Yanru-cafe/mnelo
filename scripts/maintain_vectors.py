@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-maintain_vectors.py — vec0 cleanup maintenance tool.
+maintain_vectors.py — search index orphan cleanup maintenance tool.  [8/6 plan] 后端感知 (usearch/zvec); sqlite_vec 已出局.
 
-[7/19 v0.5.6] Runs Memory.cleanup_orphan_vectors() on the LIVE DB.
+[8/6 plan §3] Runs Memory.cleanup_orphan_vectors() on the LIVE DB. 后端感知:
+  - usearch: list(Index.keys) -> 查 chunks.valid_until -> remove 孤儿
+  - zvec: iter_all() -> 查 chunks.valid_until -> delete 孤儿
 Removes two categories of wasted storage:
-  1. Vectors for soft-deleted chunks (valid_until IS NOT NULL) — these
-     are filtered out by recall so they serve no purpose.
-  2. Truly orphan vectors (vec0 rowid doesn't match any chunks rowid) —
-     from crashed inserts or manual SQL.
+  1. Index entries for soft-deleted chunks (chunks.valid_until IS NOT NULL).
+  2. Truly orphan index entries (chunk row 已删).
 
 Usage:
   python scripts/maintain_vectors.py              # cleanup (with confirmation)
@@ -37,7 +37,7 @@ sys.path.insert(0, str(REPO))
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="mnelo vec0 cleanup — remove orphan vectors (soft-deleted chunks + truly orphan rowids)",
+        description="mnelo search-index cleanup — remove orphan vectors (soft-deleted chunks + truly orphan rowids). [8/6] 后端感知 (usearch/zvec).",
     )
     parser.add_argument(
         "--dry-run",
@@ -66,7 +66,7 @@ def main() -> int:
             if args.json:
                 print(json.dumps(result, indent=2))
             else:
-                print("=== vec0 cleanup DRY RUN (no changes) ===")
+                print("=== search index DRY RUN (no changes) ===")
                 print(f"  soft-deleted chunks (vectors to remove): {result['soft_deleted_cleaned']}")
                 print(f"  truly orphan vectors (to remove):       {result['truly_orphan_cleaned']}")
                 print(f"  vectors remaining:                      {result['vectors_remaining']}")
@@ -80,11 +80,11 @@ def main() -> int:
             if args.json:
                 print(json.dumps({"status": "clean", "cleaned": 0}))
             else:
-                print("✓ vec0 is clean — nothing to delete.")
+                print("✓ search index is clean — nothing to delete.")
             return 0
 
         if not args.yes:
-            print("=== vec0 cleanup plan ===")
+            print("=== search index cleanup plan ===")
             print(f"  soft-deleted chunks: {dry['soft_deleted_cleaned']} vectors")
             print(f"  truly orphan vectors: {dry['truly_orphan_cleaned']} vectors")
             print(f"  Total to delete: {dry['soft_deleted_cleaned'] + dry['truly_orphan_cleaned']}")
@@ -98,7 +98,7 @@ def main() -> int:
         if args.json:
             print(json.dumps(result, indent=2))
         else:
-            print("=== vec0 cleanup RESULT ===")
+            print("=== search index cleanup RESULT ===")
             print(f"  soft-deleted chunks cleaned: {result['soft_deleted_cleaned']}")
             print(f"  truly orphan vectors cleaned: {result['truly_orphan_cleaned']}")
             print(f"  vectors remaining:           {result['vectors_remaining']}")

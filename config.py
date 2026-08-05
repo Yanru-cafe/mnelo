@@ -26,7 +26,10 @@ mnelo config — load settings from environment variables or config file.
 
 import os
 import sys
+import logging
 from pathlib import Path
+
+logger = logging.getLogger("mnelo.config")
 from typing import Optional
 
 try:
@@ -190,14 +193,25 @@ class Config:
             "MNELO_MEMORY_BACKUP_ENABLED", backup_section.get("enabled", False)
         )
 
-        # [zvec 集成] SearchIndex 后端 (DESIGN §3.6/§8.3):
-        # env MNELO_MEMORY_SEARCH_BACKEND > config.toml [search].backend > 'sqlite_vec'.
+        # [8/6 plan §1] SearchIndex 后端 (DESIGN §3.6/§8.3): 向量库必选二选一.
+        # env MNELO_MEMORY_SEARCH_BACKEND > config.toml [search].backend > 'auto'.
+        # 合法值 {auto, usearch, zvec}; 旧值 sqlite_vec → warning + coerce auto (升级不炸).
         search_section = self._raw.get("search", {}) if isinstance(self._raw.get("search"), dict) else {}
-        self.search_backend = (
+        backend_raw = (
             os.environ.get("MNELO_MEMORY_SEARCH_BACKEND")
             or search_section.get("backend")
-            or "sqlite_vec"
+            or "auto"
         )
+        if backend_raw == "sqlite_vec":
+            logger.warning(
+                "[config] search.backend='sqlite_vec' 已淘汰 (8/6 plan) — coerce 为 'auto'. "
+                "如需禁用 sqlite-vec 包可选移除, 见 plan §schema.sql vec0 段."
+            )
+            backend_raw = "auto"
+        elif backend_raw not in ("auto", "usearch", "zvec"):
+            logger.warning(f"[config] search.backend='{backend_raw}' 未知 — coerce 为 'auto'")
+            backend_raw = "auto"
+        self.search_backend = backend_raw
 
         # [8/5 普适化] RRF 实体 boost 的 kind 清单 — 哪些 kind 的 entity 命中给 boost。
         # 默认 ['stock'] 兼容旧行为; 用户设自己领域的 kind (如 product/category) 或 [] 禁用。

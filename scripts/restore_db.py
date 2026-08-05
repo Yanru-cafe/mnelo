@@ -149,6 +149,26 @@ def _atomic_replace(src: Path, target: Path) -> None:
     os.replace(tmp, target)
 
 
+def _rebuild_index(target: Path) -> dict:
+    """[8/6 plan §7] 恢复后重建 search index (usearch.index / search_index.zv).
+
+    索引文件不在 SQLite 事务内, DB-only 备份索引天然滞后; 恢复后跑 rebuild fresh=True
+    按 SQLite 真源重建. 失败不 throw — DB 已是真源, warning 让用户手动补跑.
+    """
+    try:
+        from scripts import rebuild_index as _ri  # type: ignore
+    except ImportError:
+        try:
+            import rebuild_index as _ri  # type: ignore
+        except ImportError as e:
+            return {"error": f"rebuild_index import failed: {e}"}
+    backend = getattr(_config, "search_backend", "auto") or "auto"
+    try:
+        return _ri.rebuild(backend, target, dry_run=False, fresh=True)
+    except Exception as e:
+        return {"error": f"rebuild failed: {e}"}
+
+
 def _isolate(target: Path) -> Path:
     """Move current live db → memory.db.corrupt-<date>. Returns the corrupt path."""
     if not target.exists():
@@ -165,10 +185,13 @@ def restore(
     target: Path | None = None,
     dry_run: bool = False,
     force: bool = False,
+    rebuild: bool = True,
 ) -> dict:
     """Run one restore. Returns stats dict.
 
     force: MCP server 运行时也强制替换 live db (恢复后必须重启 server).
+    rebuild: [8/6 plan §7] 恢复后自动重建 search index (默认 True).
+             False 只换 DB, 索引保持旧 (可能错位).
     """
     target = Path(target) if target else _expand(_config.db_path)
     gz_path = _select_snapshot(snapshot_dir, ts)
@@ -242,6 +265,12 @@ def restore(
                 shutil.move(str(corrupt), str(target))
             raise
 
+        # 5. [8/6 plan §7] 重建 search index (DB 已真源; 索引文件需按新 chunks 重建)
+        if rebuild:
+            report["index_rebuilt"] = _rebuild_index(target)
+            if report["index_rebuilt"].get("error"):
+                report["index_error"] = report["index_rebuilt"]["error"]
+
         return report
     finally:
         if tmp.exists():
@@ -261,6 +290,8 @@ def main():
                     help="恢复目标路径 (默认 live db 路径)")
     ap.add_argument("--force", action="store_true",
                     help="MCP server 运行时也强制恢复 (恢复后必须重启 server)")
+    ap.add_argument("--skip-rebuild", action="store_true",
+                    help="恢复后跳过 search index 重建 (默认: 自动重建)")
     args = ap.parse_args()
 
     snap_dir = Path(args.snapshot_dir) if args.snapshot_dir else _read_backup_config()
@@ -279,7 +310,7 @@ def main():
         return 2
     ts = args.ts if args.ts else None
 
-    report = restore(snap_dir, ts, target=args.target, dry_run=args.dry_run, force=args.force)
+    report = restore(snap_dir, ts, target=args.target, dry_run=args.dry_run, force=args.force, rebuild=not args.skip_rebuild)
     print(report)
     if report.get("error"):
         return 1
