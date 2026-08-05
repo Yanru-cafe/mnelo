@@ -37,7 +37,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 - **会话状态摘要**——500–2000 字"当前状态"摘要，会话开场自动注入（Claude Code SessionStart 钩子 / MCP resource）
 - **向量后端（必选二选一，8/6）**——运行时必须 `usearch`（HNSW，任意 CPU，f16）或 `zvec`（HNSW + 原生 FTS + INT8，AVX2+）；`sqlite_vec` 已出局
 
-**为什么 4 路召回赢**：每路互补盲区——向量漏字面（商品/品类代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **8.5 ms** / p95 = **10 ms** @ 6.3k chunks），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
+**为什么 4 路召回赢**：每路互补盲区——向量漏字面（商品/品类代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **18 ms** / p95 = **24 ms** @ zvec 0.6 ~5k 向量，8/6 实测），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
 
 ---
 
@@ -53,7 +53,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | **自主层** | 可选 L2 维护：衰减 / TTL / purge + audit_log + undo + 事实晋升 |
 | **会话摘要** | 500–2000 字，开场注入（Claude Code 钩子 / MCP resource） |
 | **协议** | MCP over SSE（127.0.0.1:8086）——**14 个工具**，Bearer 认证 |
-| **延迟（热）** | p50 = **8.5 ms**，p95 = **10 ms**（6.3k chunks 基线） |
+| **延迟（热）** | p50 = **18 ms**，p95 = **24 ms**（zvec 0.6 @ 5k 向量，4 路并发，8/6 实测） |
 | **代码量** | ~4000 行 Python（memory.py + 分类器 + 检索适配器 + scripts + client） |
 | **依赖** | `mcp[cli]`、`usearch`、`fastembed`（+ 可选 `zvec` on AVX2+；`sqlite-vec` 仅 legacy vec0 表） |
 | **双语** | 中英一等公民；分类器支持简体/繁體/英文 |
@@ -206,7 +206,8 @@ agent 会处理 venv 创建、pip 安装、嵌入模型下载和健康探针。�
 mnelo 是**通用 agent 记忆系统**——Hermes、Claude Code、Cursor 或任何 MCP 客户端直接使用。摘要走**标准 MCP**（initialize + resource），会话开场注入**无需任何客户端代码**：
 
 ```toml
-# ~/.hermes/memory/config.toml —— 对任何 MCP 客户端都生效：
+# 默认路径: 假如本机是 hermes agent, 装在 ~/.hermes/memory/config.toml —— 对任何 MCP 客户端都生效:
+# 其他 agent (Claude Code/Cursor/...) 用 $HOME/mnelo-data/config.toml 或自定 path.
 [digest]
 inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 ```
@@ -223,15 +224,16 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 如果你是 AI agent（Claude Code、Hermes、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
 
 **1. 选择安装目录（LIVE_ROOT）——给出建议，让用户选用或自定。**
-- 默认：`~/.hermes/memory`（home 下的隐藏目录）。能用，但隐藏点目录容易在 dotfiles 里被淹没，也和无关的隐藏文件混在一起。
-- 建议：**显眼、贴近工作区**的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。别放在刚 clone 的仓库里（记忆数据不是源代码）。
+- 如果本机是 **hermes agent**（默认），约定路径是 `~/.hermes/memory`（home 下的隐藏目录）。能用，但隐藏点目录容易在 dotfiles 里被淹没，也和无关的隐藏文件混在一起。
+- **其他 agent**（Claude Code、Cursor…）**推荐** **显眼、贴近工作区** 的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。别放在刚 clone 的仓库里（记忆数据不是源代码）。
 - 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
-- 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想**彻底离开 `.hermes`**，再用 `MNELO_CRON_OUTPUT_DIR` 改掉 health_check 的报告目录（默认 `~/.hermes/cron/output`，每次运行会重建）。
+- 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想**彻底离开 `.hermes`**，再用 `MNELO_CRON_OUTPUT_DIR` 改掉 health_check 的报告目录（hermes-agent 默认 `~/.hermes/cron/output`，每次运行会重建；其他 agent 自选）。
 
-**2. 按实际机器选择向量后端。**
-- 默认 **`sqlite-vec`** 任意 CPU 可用——没有理由就不换。
-- 更大规模 / 旧 CPU 上要更快召回 → **`usearch`**（任意 CPU）。
-- **`zvec`** 带原生全文检索，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
+**2. 按实际机器选择向量后端（8/6 后端 = 必选二选一）。**
+- 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU） → `sqlite_vec`（已淘汰，仅 legacy vec0 表）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要。
+- **`zvec`** 跑原生全文（BM25 + jieba 中文）+ INT8 HNSW，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
+- **`usearch`** 任意 CPU，HNSW + f16 量化，老 CPU 兜底。
+- `config.toml` `[search] backend = 'auto'|'zvec'|'usearch'` 或 env `MNELO_MEMORY_SEARCH_BACKEND` 显式指定。
 - 配置：`config.toml [search] backend` 或 env `MNELO_MEMORY_SEARCH_BACKEND`。
 
 **3. 选嵌入模型前先问用户主语言**（之后切换需重新初始化 DB——所以*首次使用前*就问）：
@@ -314,23 +316,22 @@ python scripts/restore_db.py --from 2026-08-05-030000
 
 ## 🔎 向量后端部署矩阵
 
-mnelo 的向量索引后端可插拔（[DESIGN §3.6/§8.3](docs/DESIGN.md)）。**默认 `sqlite-vec` 零额外依赖、任意 CPU 可用。**
+mnelo 的向量索引后端可插拔（[DESIGN §3.6/§8.3](docs/DESIGN.md)）。**默认 `auto` 链**——`build_search_index()` 工厂自动选能跑的最高优先级后端：**zvec** (AVX2+, HNSW + INT8 + 原生 FTS) → **usearch** (任意 CPU, HNSW + f16) → **sqlite_vec**（已淘汰，仅 legacy vec0 表）。`sqlite_vec` 不再是 runtime 后端。
 
 | 后端 | CPU 要求 | 特性 | 何时用 |
 |---|---|---|---|
-| **sqlite-vec**（默认） | 任意（纯 SQLite 扩展） | 暴力 KNN；零依赖 | 一切机器，含 VPS/旧客户端 |
-| **usearch**（可选） | 任意（硬件无关） | **HNSW** 真 ANN | 旧 CPU 上要真 ANN |
-| **zvec**（可选） | **AVX2+**（M 系列 / 2020+ x86_64 / 现代 ARM） | HNSW + 原生 FTS（BM25 + jieba 中文） | 规模 + 全文检索 |
+| **zvec**（auto 链优先） | **AVX2+**（M 系列 / 2020+ x86_64 / 现代 ARM） | **HNSW + INT8** 真 ANN + 原生 FTS（BM25 + jieba 中文） | 新 CPU（M 系列、2020+ Intel/AMD、现代 ARM）；M2 实测 5k vectors p50=18ms |
+| **usearch**（auto 链兜底） | 任意（硬件无关） | **HNSW** 真 ANN + f16 量化 | 旧 CPU（Ivy Bridge 及之前）/ zvec 跑不了的机器 |
+| **sqlite_vec**（已淘汰） | 任意（纯 SQLite 扩展） | 暴力 KNN；零依赖 | 仅作 vec0 legacy 表，迁移/修复工具用；不再做 runtime 后端 |
 
-**部署规则**：
-- **不装** → 默认 `sqlite_vec`，全功能，零配置
-- **装了但 CPU 不支持**（如旧 VPS 上 `import zvec` 崩溃）→ mnelo **子进程检测**（安全，不带崩主进程）后**自动沿降级链回落**
-- **启用 usearch/zvec**：`pip install -r requirements-usearch.txt`（或 `-zvec.txt`）+ `config.toml` `[search] backend = 'usearch'|'zvec'`（或 env `MNELO_MEMORY_SEARCH_BACKEND`）
-- `scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议
+**部署规则**（8/6 拍板 `auto` 链，工厂永不抛 fail-fast）：
+- **`auto` 链默认**——`config.toml [search] backend = 'auto'`（不写也行）。工厂挑装了的最高优先级后端：装 zvec → 走 zvec；只装 usearch → 走 usearch；都装 + CPU 不行 → 走 usearch；都没装 → RuntimeError（向量库是必选依赖）。
+- **显式指定**：env `MNELO_MEMORY_SEARCH_BACKEND=zvec` 或 `usearch`。
+- `scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议。
 
-**自动降级链（8/5 主人拍板）**：`build_search_index()` 工厂通过子进程 `import` 检测实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
+**自动降级链（8/5 主人拍板，8/6 改主进程 import）**：`build_search_index()` 工厂通过**主进程** `import` 检测（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，8/6 改主进程直接 import）实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
 
-**切换后端**（sqlite_vec → usearch/zvec）：必须从 chunks 全量重嵌：
+**切换后端**（zvec ↔ usearch）：必须从 chunks 全量重嵌（zvec doc id = chunks.rowid, 不同后端索引文件格式不兼容）：
 ```bash
 python scripts/rebuild_index.py --backend usearch    # 全量重建
 python scripts/repair_index.py --backend usearch     # 清孤儿向量（chunk 删了但索引残留）
@@ -350,18 +351,20 @@ python scripts/rebuild_index.py --backend usearch --dry-run
 
 | 指标 | 值 | 说明 |
 |---|---|---|
-| **p50** | **8.5 ms** | 热路径，6.3k chunks，4 路并发 |
-| **p95** | **10 ms** | 同上 |
-| **p50（10k 种子）** | **23 ms** | `scripts/benchmark.py --chunks 10000` |
-| **p95（10k 种子）** | **29 ms** | 向量检索随 chunk 数增长 |
-| **avg（24h 热）** | 34.4 ms | 含冷启动离群 |
+| **p50** | **18 ms** | 热路径，zvec 0.6 @ 5k 向量，4 路并发（8/6 实测） |
+| **p95** | **24 ms** | 同上 |
+| **p99** | **25 ms** | 同上 |
+| **p50（15k 向量）** | **73 ms** | `scripts/benchmark.py --chunks 10000`（重建后 15422 向量） |
+| **p95（15k 向量）** | **95 ms** | HNSW 随 chunk 数亚线性增长 |
+| **p99（15k 向量）** | **161 ms** | 观察到的最坏情况 |
+| **avg（24h 热）** | 10.4 ms | `recall_log` 8/6，232 次，含冷启动离群 |
 | **冷启动** | ~1.1 s | MCP 启动 + 嵌入模型加载 |
 
 复现：`python scripts/benchmark.py --chunks 10000 --queries 100 --json bench.json`
 
 ### 内存占用
 
-单 MCP server 进程，空闲（macOS M 系列）：**~270 MB RSS**——其中嵌入器（bge-small-zh 权重 + onnxruntime + tokenizer）约 200 MB，**与数据量无关**；其余（~70 MB）是 Python + MCP + SQLite + sqlite-vec。92 MB 模型文件运行时膨胀到 ~200 MB（float32 加载 + ONNX arena + tokenizer）——**文件大小 ≠ 内存成本**。
+单 MCP server 进程，空闲（macOS M 系列）：**~270 MB RSS**——其中嵌入器（bge-small-zh 权重 + onnxruntime + tokenizer）约 200 MB，**与数据量无关**；其余（~70 MB）是 Python + MCP + SQLite + zvec（或 usearch）。92 MB 模型文件运行时膨胀到 ~200 MB（float32 加载 + ONNX arena + tokenizer）——**文件大小 ≠ 内存成本**。zvec collection 本身约 30 MB on disk（5422 个 512 维向量）。
 
 模型在 HuggingFace Hub 缓存（`~/.cache/huggingface/hub/`），首次使用自动下载，可与其它工具共享。
 
@@ -439,10 +442,11 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 
 ## 🔄 Repo ↔ live 同步（post-commit hook）
 
-mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（`~/projects/mnelo/`）和 live server 目录（`~/.hermes/memory/`）。仓库自带 **post-commit 钩子**把改动同步到 live、备份旧版、并跑 `health_check.py`：
+mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（默认 `~/projects/mnelo/`，可改到任何 clone 位置）和 live server 目录。**hermes-agent** 走约定 `~/.hermes/memory/`；**其他 agent** 走 `MNELO_MEMORY_DIR` 设的任意路径。仓库自带 **post-commit 钩子**把改动同步到 live、备份旧版、并跑 `health_check.py`：
 
 ```bash
-cd ~/projects/mnelo && git config core.hooksPath .githooks
+# hermes-agent:    cd ~/projects/mnelo && git config core.hooksPath .githooks
+# 其他 agent:      cd <你的 clone 目录> && git config core.hooksPath .githooks
 ```
 
 按设计跳过 `memory.db` / `config.toml` / `*.md` / `tests/`。同步后重启 MCP server：`launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp`。
@@ -459,7 +463,7 @@ cd ~/projects/mnelo && git config core.hooksPath .githooks
 
 | 局限 | 缓解 |
 |---|---|
-| **~50 万向量** @ 512 维单 MacBook（sqlite-vec 暴力） | 启用 **usearch**（HNSW，任意 CPU）或 **zvec** 做真 ANN |
+| **~50 万向量** @ 512 维单 MacBook | **zvec**（HNSW + INT8 + 原生 FTS，AVX2+，8/6 实测）或 **usearch**（HNSW，任意 CPU）做真 ANN |
 | 单用户（无多租户） | 别把 8086 端口暴露到局域网 |
 | 无 PII 自动检测 | 别存密码 / token / 信用卡 |
 | bge-small-zh 中文特调 | 英文为主的工作负载换 `bge-small-en-v1.5` |
@@ -485,12 +489,12 @@ MIT。见 [`LICENSE`](LICENSE)。
 
 ## 🙏 致谢
 
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) — 向量扩展
+- [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — 向量后端（8/6 默认：`auto` 链 zvec→usearch）
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) — legacy vec0 表，仅迁移/修复工具用，不再做 runtime 后端
 - [fastembed](https://qdrant.github.io/fastembed) — 嵌入器封装
 - [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) — 中文嵌入模型
-- [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — 可选向量后端
 - [MCP](https://modelcontextprotocol.io) — 协议规范
-- [Hermes Agent](https://nousresearch.com/hermes) — 首要集成目标
+- [Hermes Agent](https://nousresearch.com/hermes) — 主要集成目标
 
 ---
 
