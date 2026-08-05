@@ -80,16 +80,9 @@ def cleanup_test_facts():
                 "WHERE (source_id = ? OR target_id = ?) AND valid_until IS NULL",
                 (fid, fid),
             )
-        # 4. Cleanup test chunks (by source)
-        rows = m._conn.execute("SELECT rowid FROM chunks WHERE source = ?", (TEST_SOURCE,)).fetchall()
-        if rows:
-            rowids = [r["rowid"] for r in rows]
-            placeholders = ",".join("?" * len(rowids))
-            try:
-                m._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
-            except Exception:
-                pass
-            m._conn.execute("DELETE FROM chunks WHERE source = ?", (TEST_SOURCE,))
+        # 4. [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+        from helpers import cleanup_chunks
+        cleanup_chunks(m, source=TEST_SOURCE)
         m._conn.commit()
 
     cleanup()

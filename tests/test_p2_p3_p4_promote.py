@@ -35,14 +35,9 @@ def _make_high_recall_chunk(mem, suffix="x"):
 
 
 def _cleanup_p2(mem, cids):
-    for cid in cids:
-        row = mem._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (cid,)).fetchone()
-        if row:
-            try:
-                mem._conn.execute("DELETE FROM vectors WHERE rowid = ?", (row["rowid"],))
-            except Exception:
-                pass
-            mem._conn.execute("DELETE FROM chunks WHERE id = ?", (cid,))
+    # [8/6 plan §10] 后端感知清理
+    from helpers import cleanup_chunks
+    cleanup_chunks(mem, chunk_ids=list(set(cids)))
     mem._conn.execute(
         "DELETE FROM relations WHERE relation='canonical_evidence_of' "
         "AND source_id LIKE 'canonical:%'"

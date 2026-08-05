@@ -1,13 +1,15 @@
-"""A1+A2+A4 — usearch 后端 + auto 降级工厂 (TASKS_SEARCH_INDEX §4 A1/A2/A4).
+"""A1+A2+A4 — usearch 后端 + auto 必选二选一工厂 (TASKS_SEARCH_INDEX §4 A1/A2/A4).
 
-[8/5 主人决策] 工厂策略: 优先 zvec (AVX2+ 新 CPU), 不支持则降级 usearch, 再不行 sqlite_vec.
-无 ALLOW_FALLBACK 环境变量; 不抛 RuntimeError, 自动降级链就是 fallback.
+[8/6 plan §1] 工厂策略反转: 向量库必选二选一, sqlite_vec 出局.
+- 显式 backend 不可用 → RuntimeError (不再自动降级到 sqlite_vec)
+- auto 双不可用 → RuntimeError (向量库是必选依赖)
+- f16 精度 (plan §2): UsearchIndex 默认 dtype='f16'
 
 §4 验收:
   A1: usearch_available() 本机 True
   A2: UsearchIndex.knn/add/remove/close 全部正常工作 (knn 命中顺序正确; remove 后不命中; close/reopen 数据在)
-  A4: backend='usearch' 且装了 → name='usearch'; backend='usearch' 且未装 → 降级 sqlite_vec;
-      backend='auto' → zvec 不可用 → usearch (本机 Ivy Bridge 实测)
+  A4: backend='usearch' 且装了 → name='usearch'; backend='usearch' 且未装 → RuntimeError;
+      backend='auto' → zvec 不可用 → usearch (本机 Ivy Bridge 实测); 双不可用 → RuntimeError
 """
 import importlib.util as _ilu
 import os
@@ -165,19 +167,16 @@ def test_a4_factory_explicit_usearch_returns_usearch():
 
 
 def test_a4_factory_explicit_usearch_falls_back_when_not_installed(monkeypatch):
-    """[A4 §1.4] usearch_available=False + backend='usearch' → 降级 sqlite_vec (不抛)."""
+    """[8/6 plan §1] usearch 未装 + backend='usearch' → RuntimeError (不降级 sqlite_vec)."""
+    import pytest as _pt
+
     monkeypatch.setattr(_si, "usearch_available", lambda: False)
-    idx = _si.build_search_index("usearch", _DEFAULT_DB_PATH, dim=512)
-    try:
-        assert idx.name == "sqlite_vec", (
-            f"usearch 未装应降级 sqlite_vec, got {idx.name}"
-        )
-    finally:
-        idx.close()
+    with _pt.raises(RuntimeError):
+        _si.build_search_index("usearch", _DEFAULT_DB_PATH, dim=512)
 
 
 def test_a4_factory_auto_falls_back_from_zvec_to_usearch(monkeypatch):
-    """[A4 §1.4 8/5 主人决策] backend='auto' → zvec 不可用 → 降级 usearch."""
+    """[8/6 plan §1] backend='auto' → zvec 不可用 → usearch."""
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
     idx = _si.build_search_index("auto", _DEFAULT_DB_PATH, dim=512)
     try:
@@ -189,35 +188,33 @@ def test_a4_factory_auto_falls_back_from_zvec_to_usearch(monkeypatch):
         idx.close()
 
 
-def test_a4_factory_auto_falls_back_through_to_sqlite_vec(monkeypatch):
-    """[A4 §1.4] auto: zvec 不可用 + usearch 不可用 → sqlite_vec (最终兜底)."""
+def test_a4_factory_auto_both_unavailable_raises(monkeypatch):
+    """[8/6 plan §1] auto: zvec + usearch 均不可用 → RuntimeError (不降级 sqlite_vec)."""
+    import pytest as _pt
+
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
     monkeypatch.setattr(_si, "usearch_available", lambda: False)
-    idx = _si.build_search_index("auto", _DEFAULT_DB_PATH, dim=512)
-    try:
-        assert idx.name == "sqlite_vec", (
-            f"auto 全降级应到 sqlite_vec, got {idx.name}"
-        )
-    finally:
-        idx.close()
+    with _pt.raises(RuntimeError):
+        _si.build_search_index("auto", _DEFAULT_DB_PATH, dim=512)
 
 
-def test_a4_factory_explicit_zvec_falls_back_to_usearch_when_unavailable(monkeypatch):
-    """[A4 §1.4] backend='zvec' 显式但不可用 → 降级 usearch (不抛)."""
+def test_a4_factory_explicit_zvec_unavailable_raises(monkeypatch):
+    """[8/6 plan §1] backend='zvec' 显式但不可用 → RuntimeError (不降级 usearch)."""
+    import pytest as _pt
+
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
-    idx = _si.build_search_index("zvec", _DEFAULT_DB_PATH, dim=512)
-    try:
-        assert idx.name == "usearch", (
-            f"zvec 显式不可用应降级 usearch, got {idx.name}"
-        )
-    finally:
-        idx.close()
+    with _pt.raises(RuntimeError):
+        _si.build_search_index("zvec", _DEFAULT_DB_PATH, dim=512)
 
 
-def test_a4_factory_explicit_sqlite_vec_returns_sqlite_vec():
-    """[A4 §1.4] backend='sqlite_vec' 显式 → 直返 SQLiteVecIndex (不检测其他)."""
+def test_a4_factory_explicit_sqlite_vec_warns_and_falls_back_to_auto(monkeypatch):
+    """[8/6 plan §1] backend='sqlite_vec' 显式 (旧配置) → warning + coerce 'auto'.
+    本机 auto→usearch, 所以 name 应是 'usearch'."""
+    monkeypatch.setattr(_si, "zvec_available", lambda: False)
     idx = _si.build_search_index("sqlite_vec", _DEFAULT_DB_PATH, dim=512)
     try:
-        assert idx.name == "sqlite_vec"
+        assert idx.name == "usearch", (
+            f"sqlite_vec 显式应 coerce auto → usearch, got {idx.name}"
+        )
     finally:
         idx.close()

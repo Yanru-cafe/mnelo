@@ -6,14 +6,9 @@ from memory import Memory
 
 
 def _cleanup(mem, ids, entity_ids=()):
-    for cid in set(ids):
-        row = mem._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (cid,)).fetchone()
-        if row:
-            try:
-                mem._conn.execute("DELETE FROM vectors WHERE rowid = ?", (row["rowid"],))
-            except Exception:
-                pass
-            mem._conn.execute("DELETE FROM chunks WHERE id = ?", (cid,))
+    # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+    from helpers import cleanup_chunks
+    cleanup_chunks(mem, chunk_ids=list(set(ids)))
     for eid in entity_ids:
         mem._conn.execute("DELETE FROM entities WHERE id = ?", (eid,))
     mem._conn.execute("DELETE FROM meta WHERE key IN ('digest_chunk_id', 'digest_dirty')")

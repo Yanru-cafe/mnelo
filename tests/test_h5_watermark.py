@@ -27,14 +27,11 @@ def _new_mem():
 
 
 def _cleanup(mem, ids, source="h5_test"):
-    for cid in set(ids):
-        row = mem._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (cid,)).fetchone()
-        if row:
-            try:
-                mem._conn.execute("DELETE FROM vectors WHERE rowid = ?", (row["rowid"],))
-            except Exception:
-                pass
-            mem._conn.execute("DELETE FROM chunks WHERE id = ?", (cid,))
+    # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+    from helpers import cleanup_chunks
+    cleanup_chunks(mem, chunk_ids=list(set(ids)))
+    # 顺手清掉 source 全量的孤儿 (跨测试类积累)
+    cleanup_chunks(mem, source=source)
     mem._conn.execute(
         "DELETE FROM audit_log WHERE after_json LIKE ?",
         (f'%"{source}-%',),
@@ -43,7 +40,6 @@ def _cleanup(mem, ids, source="h5_test"):
         "DELETE FROM purged_queue WHERE target_id IN (SELECT id FROM chunks WHERE source = ?)",
         (source,),
     )
-    mem._conn.execute("DELETE FROM chunks WHERE source = ?", (source,))
     mem._conn.commit()
 
 

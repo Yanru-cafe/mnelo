@@ -27,19 +27,9 @@ class TestRememberClassification(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # 清理本类写入
-        rows = cls.mem._conn.execute(
-            "SELECT rowid FROM chunks WHERE source = ?", (cls.src,)
-        ).fetchall()
-        if rows:
-            ids = [r[0] for r in rows]
-            cls.mem._conn.execute(
-                "DELETE FROM vectors WHERE rowid IN (%s)" % ",".join("?" * len(ids)),
-                ids,
-            )
-            cls.mem._conn.execute(
-                "DELETE FROM chunks WHERE source = ?", (cls.src,)
-            )
+        # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+        from helpers import cleanup_chunks
+        cleanup_chunks(cls.mem, source=cls.src)
         cls.mem._conn.commit()
         cls.mem.close()
 

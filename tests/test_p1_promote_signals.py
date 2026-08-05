@@ -82,14 +82,9 @@ def _make_long_high_imp_chunk(mem, source="p1_test", suffix="c"):
 
 
 def _cleanup_p1(mem, cids):
-    for cid in cids:
-        row = mem._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (cid,)).fetchone()
-        if row:
-            try:
-                mem._conn.execute("DELETE FROM vectors WHERE rowid = ?", (row["rowid"],))
-            except Exception:
-                pass
-            mem._conn.execute("DELETE FROM chunks WHERE id = ?", (cid,))
+    # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+    from helpers import cleanup_chunks
+    cleanup_chunks(mem, chunk_ids=list(set(cids)))
     mem._conn.execute(
         "DELETE FROM relations WHERE id LIKE 'rel_c_%' OR id LIKE 'rel_b_%' OR id LIKE 'rel_a_%'"
     )

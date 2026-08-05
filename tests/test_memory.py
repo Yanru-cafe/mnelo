@@ -188,24 +188,16 @@ class TestMemoryCRUD(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # 清理测试数据
-        # [7/19 fix] 必须先删 vectors 再删 chunks — vec0 表的 rowid = chunks.rowid,
-        # 没有 ON DELETE 触发器级联, chunks 删除后 vectors 留下 → 下次 INSERT 撞 UNIQUE
+        # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
+        from helpers import cleanup_chunks
         with cls.mem._conn:
-            # 1. 删 test_crud 的 chunks (通过 JOIN 拿 rowid 再删 vectors)
-            rows = cls.mem._conn.execute("SELECT rowid FROM chunks WHERE source = 'test_crud'").fetchall()
-            if rows:
-                rowids = [r["rowid"] for r in rows]
-                placeholders = ",".join("?" * len(rowids))
-                cls.mem._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
-                cls.mem._conn.execute("DELETE FROM chunks WHERE source = 'test_crud'")
-            # 2. entities + relations (按 prefix 清)
+            cleanup_chunks(cls.mem, source='test_crud')
+            # entities + relations (按 prefix 清, 不在索引)
             cls.mem._conn.execute("DELETE FROM entities WHERE id LIKE ?", (f"{cls.test_id_prefix}%",))
             cls.mem._conn.execute(
                 "DELETE FROM relations WHERE source_id LIKE ? OR target_id LIKE ?",
                 (f"{cls.test_id_prefix}%", f"{cls.test_id_prefix}%"),
             )
-            cls.mem._conn.commit()
         cls.mem.close()
 
 
@@ -387,18 +379,12 @@ class TestP0BoundsCheck(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        # [7/19 fix] TestP0BoundsCheck 用 source='test', 必须在 tearDown 清物理数据
-        # (老代码只 cls.mem.close() → forget() 留下的 vectors 污染下个 class)
+        # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
         try:
-            rows = cls.mem._conn.execute("SELECT rowid FROM chunks WHERE source = 'test'").fetchall()
-            if rows:
-                rowids = [r["rowid"] for r in rows]
-                placeholders = ",".join("?" * len(rowids))
-                cls.mem._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
-                cls.mem._conn.execute("DELETE FROM chunks WHERE source = 'test'")
+            from helpers import cleanup_chunks
+            cleanup_chunks(cls.mem, source='test')
             cls.mem._conn.execute("DELETE FROM entities WHERE id LIKE 'test_%' AND source = 'test'")
             cls.mem._conn.execute("DELETE FROM relations WHERE relation = 'clamp_test'")
-            cls.mem._conn.commit()
         finally:
             cls.mem.close()
 

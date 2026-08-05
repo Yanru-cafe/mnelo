@@ -216,13 +216,9 @@ def mem_repo():
     m = Memory()
 
     def cleanup():
-        """Delete metrics_round15 chunks AND their vectors (rowid-matched)."""
-        rows = m._conn.execute("SELECT rowid FROM chunks WHERE source LIKE 'metrics_round15:%'").fetchall()
-        if rows:
-            rowids = [r["rowid"] for r in rows]
-            placeholders = ",".join("?" * len(rowids))
-            m._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
-        m._conn.execute("DELETE FROM chunks WHERE source LIKE 'metrics_round15:%'")
+        """[8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)."""
+        from helpers import cleanup_chunks
+        cleanup_chunks(m, source_pattern='metrics_round15:%')
         m._conn.commit()
 
     cleanup()
