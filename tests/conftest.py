@@ -10,6 +10,27 @@ conftest.py — pytest 共享 fixture.
 """
 import sys
 from pathlib import Path
+import warnings
+
+# [G7] mcp SDK v1.26 still uses deprecated `content_item.content` access on
+# TextResourceContents (field is `text`); str-returning read_resource is the
+# only non-crashing path until upstream is fixed. Register at conftest
+# module-import time AND inside every pytest_runtest_setup so the filter
+# survives pytest's per-test warnings.filters reset.
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="Returning str or bytes from read_resource is deprecated.*",
+)
+
+
+def pytest_runtest_setup(item):
+    warnings.filterwarnings(
+        "ignore",
+        category=DeprecationWarning,
+        message="Returning str or bytes from read_resource is deprecated.*",
+    )
+
 
 # [7/19 patch] 强制从 repo 本地代码 import (与 tests/test_edge_cases.py 同策略)
 import importlib.util as _ilu

@@ -46,7 +46,15 @@ try:
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
     from mcp.server.stdio import stdio_server
-    from mcp.types import TextContent, Tool
+    from mcp.types import (
+        AnyUrl,
+        ListResourcesRequest,
+        ReadResourceRequest,
+        ReadResourceRequestParams,
+        Resource,
+        TextContent,
+        Tool,
+    )
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
 
@@ -502,6 +510,51 @@ if _MCP_AVAILABLE:
     @server.list_tools()
     async def list_tools() -> List[Tool]:
         return [Tool(**t) for t in TOOLS]
+
+    _DIGEST_URI = "memory://session/digest"
+
+    @server.list_resources()
+    async def list_resources() -> List[Resource]:
+        if not config.digest_inject_on_initialize:
+            return []
+        return [Resource(
+            uri=AnyUrl(_DIGEST_URI),
+            name="Session digest",
+            description="Currently cached 常驻摘要 (memory_get_digest, ref=None).",
+            mimeType="text/plain",
+        )]
+
+    @server.read_resource()
+    async def read_resource(uri: AnyUrl) -> str:
+        if str(uri) != _DIGEST_URI:
+            raise ValueError(f"unknown resource uri: {uri}")
+        if not config.digest_inject_on_initialize:
+            raise ValueError(f"resource disabled: {uri}")
+        try:
+            target = _get_mem()
+            digest = target.get_digest()
+        except Exception:
+            logger.exception("digest resource read failed")
+            return ""
+        if not digest.get("enabled"):
+            return ""
+        return digest.get("content", "") or ""
+
+    # [mcp v1.26 SDK bug] server.read_resource() decorator expects either
+    # str/bytes (deprecated) or Iterable[ReadResourceContents]. The SDK then
+    # reads `content_item.content`, which the public TextResourceContents class
+    # does not expose (its field is `text`). Returning a list of MCP types
+    # would hit this gap; we fall back to the deprecated str form, which still
+    # works and is what mcp currently tolerates. The accompanying
+    # DeprecationWarning is suppressed at test time via
+    # `tests/conftest.py::pytest_configure`.
+
+    def _list_resources():
+        return server.request_handlers[ListResourcesRequest](ListResourcesRequest())
+
+    def _read_resource(uri):
+        req = ReadResourceRequest(params=ReadResourceRequestParams(uri=AnyUrl(uri)))
+        return server.request_handlers[ReadResourceRequest](req)
 
     def _build_echo(name: str, args: Dict, result_json: str) -> str:
         """Render a one-line 🌳 summary from tool name + args + result.
