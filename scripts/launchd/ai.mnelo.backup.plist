@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.mnelo.backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_PY__</string>
+        <string>__LIVE_ROOT__/scripts/backup_db.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MNELO_HOME</key>
+        <string>__MNELO_HOME__</string>
+        <key>PYTHONPATH</key>
+        <string>__LIVE_ROOT__</string>
+    </dict>
+    <!-- [TASKS_BACKUP_RESTORE A3] 周三 03:00 + 周日 03:00 全备 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>3</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>0</integer>
+            <key>Hour</key>
+            <integer>3</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>__MNELO_HOME__/logs/mnelo.backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>__MNELO_HOME__/logs/mnelo.backup.error.log</string>
+    <key>WorkingDirectory</key>
+    <string>__LIVE_ROOT__</string>
+</dict>
+</plist>

@@ -155,6 +155,23 @@ class Config:
         self.db_dir = Path(env_dir or storage_section.get("dir") or DEFAULT_LIVE_ROOT)
         self.db_path = Path(env_db or (self.db_dir / "memory.db"))
 
+        # [8/5 TASKS_BACKUP_RESTORE] backup config (env > config.toml [backup] > None).
+        # Snapshot dir / retention. 缺省由 backup_db._default_snapshot_dir() 推导.
+        backup_section = self._raw.get("backup", {}) if isinstance(self._raw.get("backup"), dict) else {}
+        self.backup_snapshot_dir = (
+            os.environ.get("MNELO_MEMORY_BACKUP_SNAPSHOT_DIR")
+            or backup_section.get("snapshot_dir")
+        )
+        self.backup_retention = int(
+            os.environ.get("MNELO_MEMORY_BACKUP_RETENTION")
+            or backup_section.get("retention", 30) or 30
+        )
+        self.backup_enabled = bool(
+            os.environ.get("MNELO_MEMORY_BACKUP_ENABLED")
+            or backup_section.get("enabled", False)
+            or False
+        )
+
         # [zvec 集成] SearchIndex 后端 (DESIGN §3.6/§8.3):
         # env MNELO_MEMORY_SEARCH_BACKEND > config.toml [search].backend > 'sqlite_vec'.
         search_section = self._raw.get("search", {}) if isinstance(self._raw.get("search"), dict) else {}

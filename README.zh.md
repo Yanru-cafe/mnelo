@@ -242,6 +242,28 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 
 **4. 验证** —— 跑 `scripts/health_check.py`（或访问 `/health`），确认 server ready 再宣布完成。
 
+**5. 备份 / 恢复 (TASKS_BACKUP_RESTORE)**。**⚠️ 隐私: 若用户选 GitHub 自动 push (选项 3), 目标仓库**必须是 PRIVATE** —— mnelo.db 含个人记忆、决策、偏好、实体关系 (PII 级别), 推 public repo = 数据泄露。启用 `ai.mnelo.backup.plist` + GitHub 路径前必先验证。mnelo 是单 SQLite 文件 — 备份容易，但写中 `cp memory.db` 不安全 (WAL)。用内置工具:
+
+```bash
+# 5a. 手动备份 (写到 config [backup] snapshot_dir + sha256 校验)
+python scripts/backup_db.py
+python scripts/backup_db.py --dry-run   # 只预览
+
+# 5b. 列快照 + 验 sha256
+python scripts/restore_db.py --list
+
+# 5c. 校验快照 (dry-run, 不动 live)
+python scripts/restore_db.py --latest --dry-run
+
+# 5d. 实际恢复 (隔离当前 db → memory.db.corrupt-<date>, 原子替换)
+python scripts/restore_db.py --from 2026-08-05-030000
+# 或: python scripts/restore_db.py --latest
+```
+
+**agent 的调度职责**: install.sh 步骤 12 询问用户备份位置 (1: 本地默认, 2: NAS via dr-backup.sh, 3: GitHub repo via dr-backup.sh, 4: 自定义) 和保留份数 (默认 30 ≈ 4 周)。`ai.mnelo.backup.plist` 之后通过 launchd 在周三+周日 03:00 跑。如果用户已配 dr-backup.sh，快照自动 rsync → NAS → GitHub 推送。
+
+**演练 (每月跑)**: `scripts/restore_db.py --latest --dry-run` 验证最新快照是否健康。失败 → 该快照损坏，DESIGN §3.11.2 顺延到上一份。全部失败 → 备份链不可信，查 `logs/mnelo.backup.error.log` 手动跑 `backup_db.py` 复测。
+
 **📌 新增实体 kind**（开放分类——无需注册）：实体 `kind` 是自由文本；"加一个 kind" 本质上就是**开始用它**。用户引入新 kind 时，把它记为约定并一致使用：
 
 > 新增一个实体 kind：`product`，用于记录产品/商品相关的实体。用 `memory_remember` 记录产品时，entities 里带 `kind: 'product'`，并保持命名与别名一致（如 id `product:sku-1024`）。把这个约定记到你的 CLAUDE.md/SOUL.md 并长期一致使用；产品召回时用 `kind: 'product'` 过滤。

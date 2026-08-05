@@ -149,6 +149,80 @@ fi
 log "跑 health_check.py 验证..."
 "$VENV_PY" "$LIVE_ROOT/scripts/health_check.py" || warn "health_check 失败, 但 install 已完成"
 
+# ---- 12. backup 配置 (TASKS_BACKUP_RESTORE A4) ----
+if [ -t 0 ] && [ "${MNELO_MEMORY_BACKUP_SKIP_PROMPT:-0}" != "1" ]; then
+    log "配置自动备份..."
+    read -r -p "启用定期备份? [Y/n] " enable_backup
+    case "$enable_backup" in
+        [Nn]*)
+            ok "跳过备份配置"
+            ;;
+        *)
+            echo "  快照位置:"
+            echo "    1) ~/.hermes/memory/snapshots/                       (本地, 不出机器)"
+            echo "    2) ~/macbot-memory/work/mnelo-snapshots/             (dr-backup 自动 rsync → NAS, 不推 GitHub)"
+            echo "    3) ~/macbot-memory/work/mnelo-snapshots/             (dr-backup 自动 rsync + git push → GitHub)"
+            echo "       ⚠️  GitHub 仓库 **必须是 PRIVATE** — mnelo.db 含 PII, 推 public = 泄露"
+            echo "    注: 选项 2 / 3 写到同一路径, 差异在 dr-backup.sh 配没配 git push"
+            if ! gh repo view chinesewebman/macbot-memory --json visibility 2>/dev/null | grep -q PRIVATE; then
+                warn "无法确认 macbot-memory 仓库是 private. 主人请手动验证后再启选 3."
+            fi
+            echo "    4) /path/to/custom/                                  (自定义)"
+            read -r -p "  Choose [1/2/3/4]: " loc_choice
+            case "$loc_choice" in
+                1) SNAP_DIR="$HOME/.hermes/memory/snapshots" ;;
+                2|"") SNAP_DIR="$HOME/macbot-memory/work/mnelo-snapshots" ;;
+                3) SNAP_DIR="$HOME/macbot-memory/work/mnelo-snapshots" ;;
+                *) SNAP_DIR="$loc_choice" ;;
+            esac
+
+            read -r -p "保留最近多少份全备? (老的自动删) [30]: " ret_count
+            RETENTION="${ret_count:-30}"
+            if ! [[ "$RETENTION" =~ ^[0-9]+$ ]] || [ "$RETENTION" -lt 1 ]; then
+                RETENTION=30
+            fi
+
+            # 写 config.toml [backup]
+            CONFIG_TOML="$LIVE_ROOT/config.toml"
+            [ -f "$CONFIG_TOML" ] || cp "$REPO_ROOT/config.toml.example" "$CONFIG_TOML"
+            chmod 600 "$CONFIG_TOML"
+            # 删旧 [backup] section (idempotent)
+            sed -i.bak '/^\[backup\]/,/^retention = /d' "$CONFIG_TOML" 2>/dev/null || true
+            cat >> "$CONFIG_TOML" <<TOML
+
+[backup]
+enabled = true
+snapshot_dir = "$SNAP_DIR"
+schedule = "wed+sun"
+retention = $RETENTION
+TOML
+            chmod 600 "$CONFIG_TOML"
+            ok "backup config 已写: snapshot_dir=$SNAP_DIR retention=$RETENTION"
+
+            # 装 backup plist (macOS)
+            if [ "$(uname -s)" = "Darwin" ]; then
+                BACKUP_PLIST_SRC="$REPO_ROOT/scripts/launchd/ai.mnelo.backup.plist"
+                BACKUP_PLIST_DST="$HOME/Library/LaunchAgents/ai.mnelo.backup.plist"
+                if [ -f "$BACKUP_PLIST_SRC" ]; then
+                    sed -e "s|__LIVE_ROOT__|$LIVE_ROOT|g" \
+                        -e "s|__VENV_PY__|$VENV_PY|g" \
+                        -e "s|__MNELO_HOME__|$MNELO_HOME|g" \
+                        "$BACKUP_PLIST_SRC" > "$BACKUP_PLIST_DST"
+                    chmod 644 "$BACKUP_PLIST_DST"
+                    launchctl unload "$BACKUP_PLIST_DST" 2>/dev/null || true
+                    launchctl load "$BACKUP_PLIST_DST"
+                    ok "backup plist 已装 (周三+周日 03:00 自动跑)"
+                    log "备份日志: tail -f $MNELO_HOME/logs/mnelo.backup.log"
+                else
+                    warn "backup plist 模板不存在: $BACKUP_PLIST_SRC (跳过)"
+                fi
+            fi
+            ;;
+    esac
+else
+    log "非交互模式 / 跳过备份询问 (设 MNELO_MEMORY_BACKUP_SKIP_PROMPT=0 强制 prompt)"
+fi
+
 ok "✅ install 完成"
 log "测试:"
 log "  echo '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}},\"id\":1}' | $VENV_PY $LIVE_ROOT/mcp_server.py --transport stdio"
