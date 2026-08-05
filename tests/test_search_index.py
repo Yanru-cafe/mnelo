@@ -24,9 +24,16 @@ class _FakeCollection:
         self.created_indexes = []
 
     def create(self, schema):
+        """[8/6 fix] declarative API: schema 含 fields + vectors; 自动建 HNSW 索引."""
         self.schema = schema
+        # 自动跟踪 index (跟真 zvec schema 行为对齐: schema 有 index_param → 建索引)
+        if hasattr(schema, "vectors"):
+            for v in schema.vectors:
+                if v.index_param is not None:
+                    self.created_indexes.append((v.name, "HNSW"))
 
     def create_index(self, field_name, index_type):
+        # [8/6 back-compat] 旧 method-style API 仍可用
         self.created_indexes.append((field_name, index_type))
 
     def upsert(self, doc):
@@ -37,6 +44,16 @@ class _FakeCollection:
         for i in ids:
             self.docs.pop(i, None)
         return []
+
+    def fetch(self, ids):
+        """[8/6 fix] ZvecIndex.contains 调 fetch; 返 list of found docs (跟真 zvec API 对齐)."""
+        from types import SimpleNamespace
+        result = []
+        for i in ids:
+            if i in self.docs:
+                vec, fields = self.docs[i]
+                result.append(SimpleNamespace(id=i, vectors={"embedding": vec}, fields=fields))
+        return result
 
     def iter_all(self):
         """[8/6 plan §12] ZvecIndex.cleanup_orphans/contains 调 iter_all."""
@@ -71,8 +88,20 @@ class _FakeZvec:
     def CollectionOption(self):
         return {}
 
+    def HnswIndexParam(self):
+        return {}
+
+    def FtsIndexParam(self, tokenizer_name="standard"):
+        return {"tokenizer_name": tokenizer_name}
+
     def HnswQueryParam(self, ef=100):
         return {"ef": ef}
+
+    def FtsQueryParam(self, default_operator="OR"):
+        return {"default_operator": default_operator}
+
+    def Fts(self, match_string=""):
+        return {"match_string": match_string}
 
     def Query(self, field_name=None, id=None, vector=None, param=None, fts=None):
         return {"field_name": field_name, "id": id, "vector": vector, "param": param, "fts": fts}
@@ -82,32 +111,63 @@ class _FakeZvec:
 
         return SimpleNamespace(id=id, score=score, vectors=vectors or {}, fields=fields or {})
 
-    class CollectionSchema:
-        def __init__(self):
-            self.fields = []
+    class FieldSchema:
+        """[8/6 fix] zvec 0.6 declarative API: FieldSchema(name, data_type, ...)."""
 
+        def __init__(self, name, data_type, nullable=False, index_param=None):
+            self.name = name
+            self.data_type = data_type
+            self.nullable = nullable
+            self.index_param = index_param
+
+    class VectorSchema:
+        """[8/6 fix] zvec 0.6 declarative API: VectorSchema(name, data_type, dimension, index_param)."""
+
+        def __init__(self, name, data_type, dimension=0, index_param=None):
+            self.name = name
+            self.data_type = data_type
+            self.dimension = dimension
+            self.index_param = index_param
+
+    class CollectionSchema:
+        """[8/6 fix] declarative API: CollectionSchema(name, fields=[...], vectors=[...])."""
+
+        def __init__(self, name="", fields=None, vectors=None):
+            self.name = name
+            self.fields = list(fields) if fields else []
+            self.vectors = list(vectors) if vectors else []
+
+        # [8/6 back-compat] 旧 method-style API 在 fake 保留 stub, 防止 owner 加新方法用
         def add_dense_vector_field(self, name, dim, data_type=None):
-            # [8/6 plan §2] ZvecIndex 传 data_type=DataType.VECTOR_INT8
-            self.fields.append(("dense", name, dim, data_type))
+            self.vectors.append(_FakeZvec.VectorSchema(name, data_type or "VECTOR_FP32", dim))
 
         def add_text_field(self, name):
-            self.fields.append(("text", name))
+            self.fields.append(_FakeZvec.FieldSchema(name, "STRING"))
 
-    def create_and_open(self, path, option):
+    def create_and_open(self, path, schema=None, option=None):
         col = _FakeCollection(path)
+        col.schema = schema
+        # [8/6 fix] declarative API: schema 包含 index_param, 自动触发 HNSW 索引
+        if schema is not None and hasattr(col, "create"):
+            col.create(schema)
         self.collections[path] = col
         self.last_collection = col
         return col
 
-    def open(self, path, option):
+    def open(self, path, option=None):
         col = self.collections.get(path) or _FakeCollection(path)
         self.collections[path] = col
         self.last_collection = col
         return col
 
     class DataType:
-        """[8/6 plan §2] ZvecIndex 期望 DataType.VECTOR_INT8."""
+        """[8/6 fix] zvec 0.6 全部 data_type, 实战用 VECTOR_FP32 + STRING."""
+        VECTOR_FP16 = "VECTOR_FP16"
+        VECTOR_FP32 = "VECTOR_FP32"
+        VECTOR_FP64 = "VECTOR_FP64"
         VECTOR_INT8 = "VECTOR_INT8"
+        STRING = "STRING"
+        INT64 = "INT64"
 
 
 def _install_fake_zvec():
