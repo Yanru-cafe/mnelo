@@ -706,18 +706,40 @@ def _build_sse_app(auth_token: str) -> "Starlette":
             backlog_limit = config.health_purge_backlog_threshold
             floor_limit = config.health_floor_chunks_threshold
             status = "degraded" if backlog > backlog_limit or floor_count > floor_limit else "ok"
+            recommendations = []
+            if status == "degraded":
+                reasons = []
+                if backlog > backlog_limit:
+                    reasons.append(f"purge backlog {backlog} > {backlog_limit}")
+                if floor_count > floor_limit:
+                    reasons.append(f"floor chunks {floor_count} > {floor_limit}")
+                recommendations = [{
+                    "tool": "memory_maintenance",
+                    "safe": True,
+                    "reason": "; ".join(reasons),
+                    "args": {
+                        "passes": ["hygiene"],
+                        "dry_run": True,
+                        "confirm_destructive": False,
+                    },
+                }, {
+                    "tool": "memory_audit_list",
+                    "safe": True,
+                    "reason": "review recent hygiene proposals before destructive runs",
+                    "args": {"pass_name": "hygiene", "limit": 20},
+                }]
             return JSONResponse({"status": status, "hygiene": {
                 "purge_backlog": backlog,
                 "importance_below_floor": floor_count,
                 "freshness": hygiene.get("freshness"),
-            }})
+            }, "recommendations": recommendations})
         except Exception:
             logger.exception("health check failed")
             return JSONResponse({"status": "degraded", "hygiene": {
                 "purge_backlog": None,
                 "importance_below_floor": None,
                 "freshness": None,
-            }}, status_code=503)
+            }, "recommendations": []}, status_code=503)
 
     async def handle_metrics(request):
         """[7/19 v0.5.3] /metrics endpoint (Prometheus text format).

@@ -31,6 +31,49 @@ def test_health_endpoint_returns_json():
     assert "freshness" in body["hygiene"]
 
 
+def test_health_recommends_maintenance_when_degraded(monkeypatch):
+    from starlette.testclient import TestClient
+
+    class FakeMemory:
+        values = {"purge_backlog": 200, "decay_floor_chunks": 150, "freshness": 0.5}
+        def stats(self):
+            return {"hygiene": self.values}
+
+    fake = FakeMemory()
+    monkeypatch.setattr(mcp_server, "_mem_instance", fake)
+    monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 100)
+    monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 100)
+    body = TestClient(mcp_server._build_sse_app("test-token")).get("/health").json()
+    assert body["status"] == "degraded"
+    assert "recommendations" in body
+    by_tool = {r["tool"]: r for r in body["recommendations"]}
+    assert by_tool["memory_maintenance"]["safe"] is True
+    assert by_tool["memory_maintenance"]["args"] == {
+        "passes": ["hygiene"],
+        "dry_run": True,
+        "confirm_destructive": False,
+    }
+    assert by_tool["memory_audit_list"]["safe"] is True
+    assert by_tool["memory_audit_list"]["args"] == {"pass_name": "hygiene", "limit": 20}
+    assert "purge backlog" in by_tool["memory_maintenance"]["reason"]
+
+
+def test_health_recommendation_payload_contract(monkeypatch):
+    from starlette.testclient import TestClient
+
+    class FakeMemory:
+        def stats(self):
+            return {"hygiene": {"purge_backlog": 0, "decay_floor_chunks": 0, "freshness": 1.0}}
+
+    monkeypatch.setattr(mcp_server, "_mem_instance", FakeMemory())
+    monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 100)
+    monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 100)
+    body = TestClient(mcp_server._build_sse_app("test-token")).get("/health").json()
+    assert body["status"] == "ok"
+    assert "recommendations" in body
+    assert body["recommendations"] == []
+
+
 def test_health_threshold_boundary_is_configurable(monkeypatch):
     from starlette.testclient import TestClient
 
@@ -64,7 +107,7 @@ def test_health_endpoint_error_schema_is_stable(monkeypatch):
         "purge_backlog": None,
         "importance_below_floor": None,
         "freshness": None,
-    }}
+    }, "recommendations": []}
 
 
 def test_health_endpoint_reuses_singleton(monkeypatch):
