@@ -149,7 +149,7 @@ Vector library is **mandatory**: runtime backend must be `usearch` or `zvec`. In
 2. **Single file.** SQLite. `cp memory.db` = full backup.
 3. **Standard MCP, no lock-in.** 14 tools over SSE; works with any MCP client.
 4. **Generic-first.** Features default to protocol-generic (any MCP client); client-specific glue (e.g. the Claude Code hook) is a thin, documented adapter — never a new mechanism.
-5. **Amoral by design.** mnelo doesn't judge content (legal/secrecy/offense) — it faithfully stores/retrieves. It guards the *mechanism* (injection, identity, integrity), not the *content*.
+5. **Content-neutral by design.** mnelo doesn't judge content — it faithfully stores and retrieves whatever the calling agent supplies. It guards the *mechanism* (injection, identity, integrity), not the *content*.
 6. **Single source of truth.** Derived views (digest, canonical facts) never carry information the source chunks don't have.
 7. **Boring & predictable.** No magic. Fail-fast over silent degradation. Explicit opt-in over defaults-that-surprise.
 8. **Measured.** All numbers in the Benchmark section are reproducible.

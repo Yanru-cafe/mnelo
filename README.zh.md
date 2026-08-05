@@ -149,7 +149,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 2. **单文件**。SQLite。`cp memory.db` = 完整备份。
 3. **标准 MCP，无锁定**。14 个工具走 SSE，任何 MCP 客户端可用。
 4. **通用优先**。功能默认协议通用（任何 MCP 客户端）；客户端专属胶水（如 Claude Code 钩子）是薄的、有文档的适配器——绝不新造机制。
-5. **无道德立场（amoral by design）**。mnelo 不评判内容（合法/涉密/冒犯）——只忠实存取。它守护的是**机制**（注入/身份/完整性），不是**内容**。
+5. **内容中立（content-neutral by design）**。mnelo 不评判内容——只忠实存取调用方提供的任何数据。它守护的是**机制**（注入/身份/完整性），不是**内容**。
 6. **信息单源**。派生视图（摘要、canonical facts）绝不携带源 chunk 没有的信息。
 7. **boring & predictable**。无魔法。向量后端必选二选一（8/6）：zvec/usearch 都不可用时 fail-fast（RuntimeError）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
 8. **measured（实测）**。测评节所有数字可复现。
