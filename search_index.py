@@ -405,12 +405,16 @@ class UsearchIndex(SearchIndex):
 
     # -------- [8/6 plan §2] 新方法 --------
     def contains(self, chunk_id: str, conn=None) -> bool:
-        """查 chunks 表拿 rowid → Index.keys 包含则 True."""
+        """查 chunks 表拿 rowid → Index.keys 包含则 True.
+
+        [8/6 fix] 用 set(keys) 而非 `in keys`: usearch IndexedKeys.__contains__
+        偶发 SIGSEGV (同 add() 的规避, 见下), 统一走 set 成员判断.
+        """
         c = conn or self._conn
         row = c.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
         if not row:
             return False
-        return int(row["rowid"]) in self._index.keys
+        return int(row["rowid"]) in {int(k) for k in self._index.keys}
 
     def cleanup_orphans(self, conn=None, dry_run: bool = False) -> Dict:
         """遍历 Index.keys (rowid) → 查 chunks 行:

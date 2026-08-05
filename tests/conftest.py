@@ -187,38 +187,3 @@ def _clean_test_data_session():
     finally:
         mem.close()
     yield
-
-    # [8/6 plan §C3] session 末删 usearch.index — 防下次 Memory() load 旧 f16 后
-    # first add 触发 _add_to_compiled SIGSEGV (usearch 2.x 兼容性问题, plan §风险 7).
-    from pathlib import Path as _P_session
-    _idx_session = _P_session("/Users/apple/.hermes/memory/usearch.index")
-    if _idx_session.exists():
-        try:
-            _idx_session.unlink(missing_ok=True)
-            import logging as _lg
-            _lg.getLogger(__name__).info("[C3] session 末删 usearch.index")
-        except Exception:
-            pass
-
-
-@pytest.fixture(autouse=True)
-def _delete_usearch_index_per_test():
-    """[8/6 plan §C3] 每个测试 setup 前 + teardown 后删 usearch.index —
-    避免 HNSW graph 多次 add 后 rebalance 触发 _add_to_compiled SIGSEGV.
-
-    性能代价: 每个测试后 ~10ms 重建, 彻底消除 SIGSEGV.
-    与 plan §风险 7 取舍: 接受 rebuild 延迟换稳定性.
-    """
-    from pathlib import Path as _P_test
-    _idx_test = _P_test("/Users/apple/.hermes/memory/usearch.index")
-    # setup 前: 让 Memory() 加载时 f16 file 不存在, fresh Index empty
-    try:
-        _idx_test.unlink(missing_ok=True)
-    except Exception:
-        pass
-    yield
-    # teardown 后: 同上, 防下个测试 setUp load 残留
-    try:
-        _idx_test.unlink(missing_ok=True)
-    except Exception:
-        pass
