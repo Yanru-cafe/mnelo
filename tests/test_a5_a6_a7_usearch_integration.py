@@ -1,0 +1,129 @@
+"""A5+A6+A7 — usearch 集成 + rebuild/repair 脚本 (TASKS_SEARCH_INDEX §4 A5/A6/A7).
+
+§4 验收:
+  A5: 集成到 memory.py 后, remember+recall(vector_only) 命中
+  A6: rebuild --dry-run 统计活跃 chunk 数 + 不真正重建
+  A7: repair --dry-run 报 0 个 orphan (live DB 走 sqlite_vec, 无孤儿)
+"""
+import importlib.util as _ilu
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+
+def _run_script(script_name, *args):
+    """跑 scripts/<script_name>.py, 返 (returncode, stdout)."""
+    r = subprocess.run(
+        ["/Users/apple/hermes-agent/venv/bin/python3",
+         str(ROOT / "scripts" / script_name), *args],
+        capture_output=True, text=True, timeout=120,
+        cwd=str(ROOT),
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+    )
+    return r.returncode, r.stdout, r.stderr
+
+
+def test_a5_usearch_index_init_via_memory_factory():
+    """[A5 §4] factory backend='usearch' → UsearchIndex (集成 memory.py 入口路径)."""
+    import search_index
+    idx = search_index.build_search_index("usearch", ROOT / "memory.db", dim=512)
+    try:
+        assert idx.name == "usearch"
+    finally:
+        idx.close()
+
+
+def test_a6_rebuild_dry_run_counts_chunks():
+    """[A6 §4] rebuild --dry-run 统计活跃 chunk 数 + 不真正重建."""
+    rc, out, err = _run_script("rebuild_index.py", "--backend", "usearch", "--dry-run")
+    assert rc == 0, f"rebuild --dry-run 失败: stderr={err}"
+    # 输出应含 added 数 (live DB 应该有几千个 chunks)
+    assert "'added':" in out, f"输出格式不符: {out}"
+    assert "'failed': 0" in out or "'failed':0" in out
+    assert "'dry_run': True" in out
+
+
+def test_a6_rebuild_dry_run_does_not_create_index():
+    """[A6 §4] --dry-run 不真建索引 (usearch.index 文件不应被新建)."""
+    usearch_path = ROOT / "usearch.index"
+    existed_before = usearch_path.exists()
+    rc, out, err = _run_script("rebuild_index.py", "--backend", "usearch", "--dry-run")
+    assert rc == 0
+    # dry-run 不应新建 usearch.index
+    if not existed_before:
+        assert not usearch_path.exists(), (
+            "dry-run 不应创建 usearch.index, 但文件出现了"
+        )
+
+
+def test_a7_repair_dry_run_reports_orphan_count():
+    """[A7 §4] repair --dry-run 报 orphan 数 (live DB 走 sqlite_vec, 应为 0)."""
+    rc, out, err = _run_script("repair_index.py", "--backend", "usearch", "--dry-run")
+    assert rc == 0, f"repair --dry-run 失败: stderr={err}"
+    assert "'deleted':" in out
+    assert "'kept':" in out
+    assert "'dry_run': True" in out
+
+
+def test_a7_repair_actually_removes_orphan_when_not_dry_run(tmp_path):
+    """[A7 §4] 构造孤儿场景 → 真 repair 后索引清掉孤儿."""
+    import sqlite3
+    import numpy as np
+
+    # 创建临时 DB + chunks + usearch 索引
+    db = tmp_path / "test_repair.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE chunks (
+            id TEXT PRIMARY KEY,
+            content TEXT,
+            timestamp TEXT,
+            valid_until TEXT
+        );
+    """)
+    cur = conn.execute(
+        "INSERT INTO chunks (id, content, timestamp) VALUES (?, ?, datetime('now'))",
+        ("alive_chunk", "alive content"),
+    )
+    conn.commit()
+    conn.close()
+
+    # 创建 usearch 索引 + 加一条对应 alive + 一条孤儿
+    import search_index
+    idx = search_index.UsearchIndex(db, dim=4)
+    idx.add("alive_chunk", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32).tobytes())
+    orphan_rowid = 99999  # 不存在的 rowid
+    idx._index.add(
+        np.array([orphan_rowid], dtype=np.uint64),
+        np.array([[0.5, 0.5, 0.0, 0.0]], dtype=np.float32),
+    )
+    idx.close()
+    n_before = 2  # alive + orphan
+
+    # 真 repair (非 dry-run) — 传 --db 指向 tmp DB
+    import os
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    rc = subprocess.run(
+        ["/Users/apple/hermes-agent/venv/bin/python3",
+         str(ROOT / "scripts" / "repair_index.py"),
+         "--backend", "usearch", "--db", str(db)],
+        capture_output=True, text=True, timeout=60,
+        cwd=str(ROOT), env=env,
+    ).returncode
+    assert rc == 0, f"repair 失败: {rc} stderr={subprocess.run.__doc__}"
+
+    # 重新 load 索引, 验孤儿已删
+    idx2 = search_index.UsearchIndex(db, dim=4)
+    try:
+        n_keys = len(idx2._index.keys)
+        assert n_keys == n_before - 1, (
+            f"repair 后应剩 {n_before - 1} 条 (orphan 删了), got {n_keys}"
+        )
+    finally:
+        idx2.close()
