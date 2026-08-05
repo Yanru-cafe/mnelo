@@ -315,9 +315,13 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
         """[A-1] init_db.py fresh install 出来的 schema 跟 _migrate_schema 存量迁移后一致"""
         # === Phase 1: 模拟 fresh install (init_db.py 读 schema.sql 建库) ===
         # [A-1 fix] vec0 虚拟表需要 sqlite_vec 模块 + enable_load_extension
+        # [8/5 fix] schema.sql 路径不再硬编码 — 走 repo 相对路径 (本机早期 setup 留陈旧副本)
+        from pathlib import Path as _P
+        repo_root = _P(__file__).resolve().parent.parent
+        repo_schema = repo_root / "schema.sql"
         with tempfile.TemporaryDirectory() as tmpdir:
             fresh_db = os.path.join(tmpdir, "fresh.db")
-            shutil.copy("/Users/apple/.hermes/memory/schema.sql",
+            shutil.copy(str(repo_schema),
                         os.path.join(tmpdir, "schema.sql"))
 
             import sqlite_vec
