@@ -28,13 +28,23 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "api"))
 
 
+_BOOTSTRAP_MARKER = "MNELO_HOOK_BOOTSTRAPPED"
+
+
 def _bootstrap_venv() -> bool:
     """若当前解释器缺 mcp 依赖 (如系统 python3), 用仓库 venv 重新执行自身.
 
     SessionStart 钩子命令常用 `python3` (PATH 解析), 但 mnelo 的 mcp/starlette
     依赖装在 venv 里 — 直接 import mnelo_client 会静默失败。这里自举:
-    mcp 不可导入 → os.execv 仓库 .venv/bin/python 重跑本脚本。
+    mcp 不可导入 → exec 仓库 .venv/bin/python 重跑本脚本。
+
+    [audit fix] 防无限 re-exec 用 **env 标记**而非 realpath 比较 — venv python
+    常是系统 python 的符号链接 (realpath 相同), realpath 守卫会误判"已在 venv"
+    而跳过本该有用的 re-exec (venv 的 sys.path 含 mcp site-packages)。正确做法:
+    自举前设 _BOOTSTRAP_MARKER, 子进程见标记即不再自举, 杜绝循环。
     """
+    if os.environ.get(_BOOTSTRAP_MARKER):
+        return False  # 已自举过一次 → 不循环
     try:
         import mcp  # noqa: F401  # 门禁依赖; mnelo_client 需要它
 
@@ -42,8 +52,11 @@ def _bootstrap_venv() -> bool:
     except ImportError:
         pass
     for vp in (_REPO_ROOT / ".venv" / "bin" / "python", _REPO_ROOT / "venv" / "bin" / "python"):
-        if vp.exists():
-            os.execv(str(vp), [str(vp), str(Path(__file__).resolve())] + sys.argv[1:])
+        if not vp.exists():
+            continue
+        env = os.environ.copy()
+        env[_BOOTSTRAP_MARKER] = "1"
+        os.execve(str(vp), [str(vp), str(Path(__file__).resolve())] + sys.argv[1:], env)
     return False  # 无 venv → 走主流程, 由调用方容错
 
 # 摘要开关: MNELO_MEMORY_DIGEST_ENABLED=false 时静默 (与 config [digest] 一致)
