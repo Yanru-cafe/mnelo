@@ -388,7 +388,7 @@ mnelo/
 ├── memory.py            ← core Memory class (~1600 LOC): CRUD + 4-way recall + RRF
 │                           + L2 (run_maintenance / audit / digest / promote)
 ├── classify.py          ← P1a rule classifier: memory_type auto-tag (简体/繁體/EN)
-├── search_index.py      ← SearchIndex adapter: sqlite-vec / usearch / zvec backends
+├── search_index.py      ← SearchIndex adapter: usearch / zvec backends (2 runtime)
 ├── mcp_server.py        ← MCP server (SSE), 14 tools, Bearer auth, /health
 ├── config.py            ← env > TOML > defaults (incl. [search], [digest], [l2])
 ├── schema.sql           ← 12 tables incl. audit_log + memory_type/user_confirmed/processed_at
@@ -413,6 +413,30 @@ mnelo/
     ├── TASKS_*.md           ← 6 implementation handbooks (H/E/G/A/S/P series)
     ├── ARCHITECTURE.md / SCHEMA.md / RUNBOOK.md
 ```
+
+---
+
+mnelo has 2 supported runtime vector backends ([DESIGN §3.6/§8.3](docs/DESIGN.md)):
+
+| Backend | CPU | Quantization | Features | When |
+|---|---|---|---|---|
+| **zvec** | AVX2+ (M-series / 2020+ x86_64 / modern ARM) | INT8 | HNSW + native FTS (BM25 + jieba) | First choice on modern hardware; M2 measured 5k vectors p50=18ms |
+| **usearch** | any | f16 | HNSW | Fallback when zvec is unavailable |
+
+The `build_search_index()` factory detects via **main-process import** (macOS 26 launchd forks hit BlockingIOError running zvec native mmap, so we import in-process): zvec installed → zvec; otherwise usearch. If neither is installed → `RuntimeError` (a vector library is a mandatory dependency). **Default `auto` chain** — `config.toml [search] backend = 'auto'`; override via env `MNELO_MEMORY_SEARCH_BACKEND=zvec|usearch`.
+
+`scripts/health_check.py` reports the active backend; `/health` advises when it downgrades.
+
+**Switching backends** (zvec ↔ usearch; index formats are not interchangeable) requires a full re-embed from chunks:
+
+```bash
+python scripts/rebuild_index.py --backend zvec      # full re-embed
+python scripts/repair_index.py --backend zvec       # cleanup orphan vectors
+# or dry-run first:
+python scripts/rebuild_index.py --backend zvec --dry-run
+```
+
+`sqlite-vec` is still listed in `requirements.txt`, but only because `migrate` / `repair` / `init_db` scripts touch the legacy `vec0` virtual table — it is not a runtime backend and is not part of the factory chain.
 
 ---
 
@@ -475,7 +499,6 @@ Add a new locale — 1 edit in `i18n_messages.py`, no code change. Set `MNELO_ME
 
 | Limit | Workaround |
 |---|---|
-| **~500K vectors** @ 512-dim on a single MacBook | **zvec** (HNSW + INT8 + native FTS, AVX2+, 8/6 measured) or **usearch** (HNSW, any CPU) for real ANN |
 | Single-user (no multi-tenant) | Don't expose port 8086 to LAN |
 | No PII auto-detection | Don't store passwords / tokens / credit cards |
 | bge-small-zh is CN-tuned | Swap to `bge-small-en-v1.5` for EN-heavy workloads |

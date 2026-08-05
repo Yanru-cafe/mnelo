@@ -314,32 +314,29 @@ python scripts/restore_db.py --from 2026-08-05-030000
 
 ---
 
-## 🔎 向量后端部署矩阵
+## 🔎 向量后端
 
-mnelo 的向量索引后端可插拔（[DESIGN §3.6/§8.3](docs/DESIGN.md)）。**默认 `auto` 链**——`build_search_index()` 工厂自动选能跑的最高优先级后端：**zvec** (AVX2+, HNSW + INT8 + 原生 FTS) → **usearch** (任意 CPU, HNSW + f16) → **sqlite_vec**（已淘汰，仅 legacy vec0 表）。`sqlite_vec` 不再是 runtime 后端。
+mnelo 有 2 个支持的 runtime 向量后端（[DESIGN §3.6/§8.3](docs/DESIGN.md)）：
 
-| 后端 | CPU 要求 | 特性 | 何时用 |
-|---|---|---|---|
-| **zvec**（auto 链优先） | **AVX2+**（M 系列 / 2020+ x86_64 / 现代 ARM） | **HNSW + INT8** 真 ANN + 原生 FTS（BM25 + jieba 中文） | 新 CPU（M 系列、2020+ Intel/AMD、现代 ARM）；M2 实测 5k vectors p50=18ms |
-| **usearch**（auto 链兜底） | 任意（硬件无关） | **HNSW** 真 ANN + f16 量化 | 旧 CPU（Ivy Bridge 及之前）/ zvec 跑不了的机器 |
-| **sqlite_vec**（已淘汰） | 任意（纯 SQLite 扩展） | 暴力 KNN；零依赖 | 仅作 vec0 legacy 表，迁移/修复工具用；不再做 runtime 后端 |
+| 后端 | CPU | 量化 | 特性 | 何时用 |
+|---|---|---|---|---|
+| **zvec** | AVX2+（M 系列 / 2020+ x86_64 / 现代 ARM） | INT8 | HNSW + 原生 FTS（BM25 + jieba） | M2 实测 5k vectors p50=18ms；大首选 |
+| **usearch** | 任意 | f16 | HNSW | zvec 跑不了时的兜底 |
 
-**部署规则**（8/6 design: `auto` 链，工厂永不抛 fail-fast）：
-- **`auto` 链默认**——`config.toml [search] backend = 'auto'`（不写也行）。工厂挑装了的最高优先级后端：装 zvec → 走 zvec；只装 usearch → 走 usearch；都装 + CPU 不行 → 走 usearch；都没装 → RuntimeError（向量库是必选依赖）。
-- **显式指定**：env `MNELO_MEMORY_SEARCH_BACKEND=zvec` 或 `usearch`。
-- `scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议。
+`build_search_index()` 工厂**主进程 import 检测**（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，所以走主进程）：装 zvec 就走 zvec，否则走 usearch。两者都不可用 → `RuntimeError`（向量库是必选依赖）。**默认 `auto` 链，`config.toml [search] backend = 'auto'`；显式可用 env `MNELO_MEMORY_SEARCH_BACKEND=zvec|usearch`。**
 
-**自动降级链（8/5 design, 8/6 implementation）**：`build_search_index()` 工厂通过**主进程** `import` 检测（macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError，8/6 改主进程直接 import）实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
+`scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议。
 
-**切换后端**（zvec ↔ usearch）：必须从 chunks 全量重嵌（zvec doc id = chunks.rowid, 不同后端索引文件格式不兼容）：
+**切换后端**（zvec ↔ usearch；不同后端索引格式不兼容）：必须从 chunks 全量重嵌。
+
 ```bash
-python scripts/rebuild_index.py --backend usearch    # 全量重建
-python scripts/repair_index.py --backend usearch     # 清孤儿向量（chunk 删了但索引残留）
+python scripts/rebuild_index.py --backend zvec      # 全量重建
+python scripts/repair_index.py --backend zvec       # 清孤儿向量（chunk 删了但索引残留）
 # 或先 dry-run:
-python scripts/rebuild_index.py --backend usearch --dry-run
+python scripts/rebuild_index.py --backend zvec --dry-run
 ```
 
-> ⚠️ zvec 0.6 在 Ivy Bridge 之前的旧 x86_64 上 `import` 即崩——这些机器别装 zvec。工厂会自动跳过它，但装一个跑不了的包是浪费磁盘。
+`sqlite-vec` 仍装在 `requirements.txt` 里——但只给 `migrate` / `repair` / `init_db` 工具留 vec0 虚拟表用，不再做 runtime 后端，不进工厂兜底链。
 
 ---
 
@@ -477,7 +474,6 @@ mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（默认 `~/projects/mne
 
 | 局限 | 缓解 |
 |---|---|
-| **~50 万向量** @ 512 维单 MacBook | **zvec**（HNSW + INT8 + 原生 FTS，AVX2+，8/6 实测）或 **usearch**（HNSW，任意 CPU）做真 ANN |
 | 单用户（无多租户） | 别把 8086 端口暴露到局域网 |
 | 无 PII 自动检测 | 别存密码 / token / 信用卡 |
 | bge-small-zh 中文特调 | 英文为主的工作负载换 `bge-small-en-v1.5` |
