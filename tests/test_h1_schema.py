@@ -336,7 +336,9 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
             fresh_schema = self._extract_schema(fresh_db)
 
         # === Phase 2: 存量迁移后 schema (复用 setUpClass 跑过的 _migrate_schema) ===
-        live_db = "/Users/apple/.hermes/memory/memory.db"
+        # [8/5 fix] DB 路径不再硬编码 — 从 config 解析
+        from config import config as _cfg
+        live_db = str(_cfg.db_path)
         migrated_schema = self._extract_schema(live_db)
 
         # === Phase 3: 比对 4 表 schema ===

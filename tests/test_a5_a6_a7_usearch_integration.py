@@ -16,6 +16,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# [8/5 fix] DB 路径不再硬编码 — 用 config 解析
+from config import config as _config_mod  # noqa: E402
+_DEFAULT_DB_PATH = _config_mod.db_path
+
 
 def _run_script(script_name, *args):
     """跑 scripts/<script_name>.py, 返 (returncode, stdout)."""
@@ -32,7 +36,7 @@ def _run_script(script_name, *args):
 def test_a5_usearch_index_init_via_memory_factory():
     """[A5 §4] factory backend='usearch' → UsearchIndex (集成 memory.py 入口路径)."""
     import search_index
-    idx = search_index.build_search_index("usearch", ROOT / "memory.db", dim=512)
+    idx = search_index.build_search_index("usearch", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "usearch"
     finally:
