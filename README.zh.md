@@ -172,18 +172,20 @@ print(c.get_digest()['content'][:100])                     # 会话摘要
 "
 ```
 
-### 🤖 Claude Code 集成（SessionStart 钩子）
+### 🤖 会话状态注入——通用，任何 MCP 客户端
 
-mnelo 自带一个 **SessionStart 钩子**，每次新会话自动注入摘要——Agent 开场即带当前记忆状态，无需召回：
+mnelo 是**通用 agent 记忆系统**——Hermes、Claude Code、Cursor 或任何 MCP 客户端直接使用。摘要走**标准 MCP**（initialize + resource），会话开场注入**无需任何客户端代码**：
 
-```bash
-# 在 .claude/settings.json（mnelo 仓库内有示例）：
-#   SessionStart → python3 $CLAUDE_PROJECT_DIR/scripts/session_start_digest.py
+```toml
+# ~/.hermes/memory/config.toml —— 对任何 MCP 客户端都生效：
+[digest]
+inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 ```
 
-- **容错**：mnelo MCP 未跑时静默退出（绝不阻断会话启动）
-- **自举**：`python3` 解析到 venv 外也能跑（自动 re-exec 到仓库 venv）
-- 摘要以 `[mnelo-digest]` 围栏块出现（数据而非指令，DESIGN §12）
+- **Hermes / Cursor / 任何 MCP 客户端**：只改这一个配置——摘要经 MCP initialize + `memory://session/digest` resource 送达，零集成代码
+- **Claude Code（可选适配器）**：不读 initialize resource 的 agent 可用自带的 **SessionStart 钩子**（`scripts/session_start_digest.py`，接在 `.claude/settings.json`）。它是同一通用机制的薄适配器——**容错**（mnelo 未跑 → 静默 exit 0）、**自举**（`python3` 解析到 venv 外会自动 re-exec）、输出 `[mnelo-digest]` 围栏块（数据而非指令，DESIGN §12）
+
+无论哪种方式，你的 agent 每个会话开场即知当前记忆状态——无需召回。
 
 ---
 
@@ -280,20 +282,25 @@ mnelo/
 
 ---
 
-## 🆚 为什么选 mnelo？
+## 🆚 为什么选 mnelo？（对照主流 agent 记忆生态）
 
-MCP-for-memory 生态（2026-07/08 调研）。mnelo 是唯一同时具备**全部**这些的：4 路 RRF 召回 · 知识图谱 · 记忆类型谱系 + 自动分类器 · **带审计/撤销的自主维护** · 会话摘要 · 可插拔向量后端 · 单文件 SQLite · 双语。
+mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep / Cognee** 面向*产品级规模*——托管服务或自托管服务器，往往需要外部向量/图数据库或完整 agent 运行时。**mnelo 是本地优先、单文件、零云的选项**：一个 SQLite 文件、标准 MCP、任何 agent 可用、开箱双语、带可选自主维护层。
 
-| | mnelo | vestige | mnemo | graphmind | memory-vault |
+| | **mnelo** | **Mem0** | **Letta (MemGPT)** | **Zep/Graphiti** | **Cognee** |
 |---|---|---|---|---|---|
-| 4 路 RRF 召回 | ✅ | – | – | – | – |
-| 知识图谱 | ✅ | – | ✅ | ✅ | ✅ |
-| 记忆类型 + 分类器 | ✅ | – | – | – | – |
-| L2 维护 + 审计/撤销 | ✅ | – | – | – | – |
-| 会话摘要 | ✅ | – | – | – | – |
-| 可插拔向量后端 | ✅ | – | – | – | – |
-| 单文件本地 | ✅ | ✅ | – | ✅ | ✅ |
-| 双语（中/EN） | ✅ | – | – | – | – |
+| **部署** | 一个 SQLite 文件 | 托管 / 自托管 | agent 运行时（重） | 图库 + 服务 | 自托管管线 |
+| **云依赖** | **永不** | 可选 | 否 | 可选 | 否 |
+| **零依赖安装** | **3 个 pip 包** | 需向量库 | ~500MB 运行时 | 需 Neo4j 等 | 需 KG 栈 |
+| **知识图谱** | ✅ 原生 | ✅（付费档） | – | ✅（核心） | ✅（核心） |
+| **4 路 RRF 召回** | ✅ | – | – | – | – |
+| **双语（中/EN），简/繁分类器** | ✅ | – | – | – | – |
+| **自主维护** | ✅（L2，审计/撤销） | ✅（LLM 抽取） | ✅（自我编辑） | – | – |
+| **时态模型** | ✅（`valid_until` + `asof`） | – | – | ✅（双时态） | – |
+| **会话摘要注入** | ✅（任何 MCP 客户端） | – | ✅（核心记忆） | – | – |
+
+**诚实的取舍**：主流框架更成熟、有托管云档、面向大规模或长驻 agent。mnelo 追求相反方向：**简单、本地优先、零运维、一个可备份的文件**，加上适合个人 agent 的知识图谱 + 双语 + 自主维护——无需跑向量库、图库或完整 agent 运行时。
+
+如果你的场景是"服务众多用户的产品 / 海量向量 / 长驻自主 agent 运行时" → Mem0/Letta/Zep 是对的。如果是"个人 agent 的记忆，本地、自托管、双语、真图谱召回 + 自维护" → 那是 mnelo 的车道。
 
 ---
 
