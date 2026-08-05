@@ -35,7 +35,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 - **memory_type taxonomy** — every memory auto-classified (fact / preference / episode / decision / procedure / ephemeral) by a zero-LLM rule classifier, bilingual (简体/繁體/EN)
 - **L2 autonomous maintenance layer** — optional hygiene pass (importance decay, per-type TTL, purge candidates) with a full **audit_log + undo** trail; fact-promotion that graduates high-value memories to canonical facts
 - **Session-state digest** — a 500–2000 char "current state" summary injected into your agent at session start (Claude Code SessionStart hook / MCP resource)
-- **Vector backends (mandatory 二选一, 8/6)** — runtime must be `usearch` (HNSW, any CPU, f16) or `zvec` (HNSW + native FTS + INT8, AVX2+); `sqlite_vec` removed as a backend
+- **Vector backends** — runtime must be `usearch` (HNSW, any CPU, f16) or `zvec` (HNSW + native FTS + INT8, AVX2+)
 
 **Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (product / category codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **18 ms** / p95 = **24 ms** on zvec 0.6 @ ~5k vectors, 8/6 measured), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
 
@@ -55,7 +55,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | **Protocol** | MCP over SSE (127.0.0.1:8086) — **14 tools**, Bearer auth |
 | **Latency (warm)** | p50 = **18 ms**, p95 = **24 ms** (zvec 0.6 @ 5k vectors, 4-way concurrent, 8/6) |
 | **LOC** | ~4000 lines Python (memory.py + classifier + search adapter + scripts + client) |
-| **Dependencies** | 3 core pip (`mcp[cli]`, `usearch`, `fastembed`) + 1 legacy pip (`sqlite-vec`, vec0 table only) + 1 optional pip (`zvec` on AVX2+); embedding model (`BAAI/bge-small-zh-v1.5`, ~92 MB) auto-downloaded via fastembed on first use |
+| **Dependencies** | 3 core pip (`mcp[cli]`, `usearch`, `fastembed`) + 1 tool-helper pip (`sqlite-vec`, vec0 table) + 1 optional pip (`zvec` on AVX2+); embedding model (`BAAI/bge-small-zh-v1.5`, ~92 MB) auto-downloaded via fastembed on first use |
 | **i18n** | English + 中文 first-class; classifier handles 简体/繁體/EN |
 
 ---
@@ -132,7 +132,7 @@ A **500–2000 char digest** (identity facts + recent key decisions + in-progres
 
 ### 🔎 Vector backends (mandatory 二选一, 8/6)
 
-Vector library is **mandatory**: runtime backend must be `usearch` or `zvec` — `sqlite_vec` is removed as a backend (its `vectors` table stays only as legacy for migration tools).
+Vector library is **mandatory**: runtime backend must be `usearch` or `zvec`. Install one (`pip install 'usearch>=2.26'` or `zvec`) before first use.
 
 | Backend | CPU | Precision | Features | When |
 |---|---|---|---|---|
@@ -315,7 +315,7 @@ Write: `memory_remember(content, ..., memory_type='decision')` when you know it;
 
 ## 🔎 Search backend (deployment matrix)
 
-Vector index backend is **mandatory 二选一** (8/6 decision): must be `usearch` or `zvec`. `sqlite_vec` is removed as a backend; its `vectors` table stays only as legacy for migration tools.
+Vector index backend must be `usearch` or `zvec`. Pick based on the actual machine (see [Vector backends](#-vector-backends)).
 
 | Backend | CPU requirement | Precision | Features | When to use |
 |---|---|---|---|---|
@@ -478,8 +478,6 @@ python scripts/repair_index.py --backend zvec       # cleanup orphan vectors
 python scripts/rebuild_index.py --backend zvec --dry-run
 ```
 
-`sqlite-vec` is still listed in `requirements.txt`, but only because `migrate` / `repair` / `init_db` scripts touch the legacy `vec0` virtual table — it is not a runtime backend and is not part of the factory chain.
-
 ---
 
 ## 🆚 Why mnelo? (vs the mainstream agent-memory landscape)
@@ -507,7 +505,7 @@ If your use case is "a product serving many users / massive vector scale / a lon
 | Component | Size | Required | Notes |
 |---|---|---|---|
 | **Core pip packages** | ~3 MB on disk | mandatory | `mcp[cli]` (MCP server + SSE transport), `usearch` (vector library fallback), `fastembed` (embedding loader) |
-| **Legacy pip** (`sqlite-vec`) | ~1 MB | needed for tools only | `vec0` virtual table for `migrate` / `repair` / `init_db` scripts — not a runtime backend |
+| **Tool-helper pip** (`sqlite-vec`) | ~1 MB | needed for tools only | `vec0` virtual table for `migrate` / `repair` / `init_db` scripts — not a runtime backend |
 | **Optional pip** (`zvec`) | ~60 MB native lib | only if CPU has AVX2+ | HNSW + native FTS + INT8; falls back to `usearch` automatically when absent |
 | **Embedding model** | ~92 MB | mandatory for first run | `BAAI/bge-small-zh-v1.5` (CN-tuned) — auto-downloaded by fastembed into `~/.cache/huggingface/hub/`. Swap to `bge-small-en-v1.5` or `paraphrase-multilingual-MiniLM-L12-v2` via `config.toml [embedder]` |
 | **Python MCP runtime** | ~50 MB | mandatory | Python 3.11 + MCP SDK + onnxruntime |
@@ -566,7 +564,7 @@ MIT. See [`LICENSE`](LICENSE).
 ## 🙏 Acknowledgements
 
 - [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — vector backends (8/6 default: `auto` chain zvec→usearch)
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) — legacy vec0 table kept only for migration tools; not a runtime backend
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) — vec0 virtual table used by `migrate` / `repair` / `init_db` scripts
 - [fastembed](https://qdrant.github.io/fastembed) — embedder wrapper
 - [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) — CN embedding model
 - [MCP](https://modelcontextprotocol.io) — protocol spec
