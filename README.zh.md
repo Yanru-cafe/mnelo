@@ -206,8 +206,8 @@ agent 会处理 venv 创建、pip 安装、嵌入模型下载和健康探针。�
 mnelo 是**通用 agent 记忆系统**——Hermes、Claude Code、Cursor 或任何 MCP 客户端直接使用。摘要走**标准 MCP**（initialize + resource），会话开场注入**无需任何客户端代码**：
 
 ```toml
-# 默认路径: 假如本机是 hermes agent, 装在 ~/.hermes/memory/config.toml —— 对任何 MCP 客户端都生效:
-# 其他 agent (Claude Code/Cursor/...) 用 $HOME/mnelo-data/config.toml 或自定 path.
+# 建议安装位置: 任何显眼、贴近工作区的目录 (如 $HOME/mnelo-data)。
+# 通过 MNELO_MEMORY_DIR 改路径; 对任何 MCP 客户端都生效：
 [digest]
 inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 ```
@@ -221,13 +221,13 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 
 ## 🤖 给 AI agent 的操作指令（把 mnelo 设为你的记忆系统）
 
-如果你是 AI agent（Claude Code、Hermes、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
+如果你是 AI agent（Claude Code、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
 
 **1. 选择安装目录（LIVE_ROOT）——给出建议，让用户选用或自定。**
-- 如果本机是 **hermes agent**（默认），约定路径是 `~/.hermes/memory`（home 下的隐藏目录）。能用，但隐藏点目录容易在 dotfiles 里被淹没，也和无关的隐藏文件混在一起。
-- **其他 agent**（Claude Code、Cursor…）**推荐** **显眼、贴近工作区** 的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。别放在刚 clone 的仓库里（记忆数据不是源代码）。
+- **推荐** **显眼、贴近工作区** 的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。`$HOME` 下的隐藏点目录（如 `~/.hermes/memory`）也能用，但容易在 dotfiles 里被淹没。
+- 别放在刚 clone 的仓库里（记忆数据不是源代码）。
 - 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
-- 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想**彻底离开 `.hermes`**，再用 `MNELO_CRON_OUTPUT_DIR` 改掉 health_check 的报告目录（hermes-agent 默认 `~/.hermes/cron/output`，每次运行会重建；其他 agent 自选）。
+- 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想改 health_check 的报告目录，用 `MNELO_CRON_OUTPUT_DIR`（默认 `$MNELO_MEMORY_DIR/cron/output`，每次运行会重建）。
 
 **2. 按实际机器选择向量后端（8/6 后端 = 必选二选一）。**
 - 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU） → `sqlite_vec`（已淘汰，仅 legacy vec0 表）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要。
@@ -453,11 +453,10 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 
 ## 🔄 Repo ↔ live 同步（post-commit hook）
 
-mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（默认 `~/projects/mnelo/`，可改到任何 clone 位置）和 live server 目录。**hermes-agent** 走约定 `~/.hermes/memory/`；**其他 agent** 走 `MNELO_MEMORY_DIR` 设的任意路径。仓库自带 **post-commit 钩子**把改动同步到 live、备份旧版、并跑 `health_check.py`：
+mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（clone 到的任意目录）和 live server 目录（通过 `MNELO_MEMORY_DIR` 设置；默认 `~/mnelo-data`）。仓库自带 **post-commit 钩子**把改动同步到 live、备份旧版、并跑 `health_check.py`：
 
 ```bash
-# hermes-agent:    cd ~/projects/mnelo && git config core.hooksPath .githooks
-# 其他 agent:      cd <你的 clone 目录> && git config core.hooksPath .githooks
+cd <你的 clone 目录> && git config core.hooksPath .githooks
 ```
 
 按设计跳过 `memory.db` / `config.toml` / `*.md` / `tests/`。同步后重启 MCP server：`launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp`。
