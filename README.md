@@ -21,7 +21,7 @@ A memory layer for AI agents. Remembers across **4 dimensions** — vector seman
 - **Session-state digest** — a 500–2000 char "current state" summary injected into your agent at session start (Claude Code SessionStart hook / MCP resource)
 - **Pluggable vector backends** — `sqlite-vec` default (any CPU), `usearch` (HNSW, any CPU), `zvec` (HNSW + native FTS, AVX2+)
 
-**Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (stock codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **8.5 ms** / p95 = **10 ms** on baseline 6.3k chunks), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
+**Why 4-way recall wins**: each lane catches what the others miss — vector misses literal terms (product / category codes), meta misses semantic paraphrases, graph misses orphaned chunks, entity misses long-form prose. Four lanes run in parallel (WAL-mode concurrent reads, p50 = **8.5 ms** / p95 = **10 ms** on baseline 6.3k chunks), and RRF fuses their ranks without any score normalization. See [🔀 What is RRF?](#-what-is-rrf) for the math.
 
 ---
 
@@ -68,14 +68,14 @@ Final score = Σ_lanes 1 / (60 + rank_in_lane)
 | New lane added? | Just add it | Re-tune all weights |
 | Implementation cost | ~5 lines | Score calibration + weight grid search |
 
-mnelo uses canonical `k=60` for the 4 lanes, plus a small `0.05/sqrt(rank)` boost when a stock-code entity matches.
+mnelo uses canonical `k=60` for the 4 lanes, plus a small `0.05/sqrt(rank)` boost when a known **category-code** entity matches (e.g. a product SKU) — configurable, defaults to a curated list of entity kinds.
 
 ---
 
 ## ✨ Features
 
 ### 🧠 Knowledge-graph aware
-Every chunk can link to typed entities (`stock`, `concept`, `person`, `canonical_fact`) and the relations graph is queryable. `memory_graph_query` returns 2-hop neighbors; `memory_reason` (planned) returns full paths.
+Every chunk can link to typed entities and the relations graph is queryable. **Entity `kind` is an open taxonomy** — you define your domain's kinds (`product`, `person`, `location`, `category`, `canonical_fact`, …; whatever fits). `memory_graph_query` returns 2-hop neighbors; `memory_reason` (planned) returns full paths.
 
 ### 🏷️ memory_type taxonomy + zero-LLM classifier
 Every chunk carries a type that governs its lifecycle (§3.0): `fact` / `preference` / `episode` / `decision` / `procedure` / `ephemeral`. A **rule classifier** (P1a, no LLM, deterministic) auto-tags new writes by strong markers — bilingual (简体/繁體 via char-map normalization / EN). Ambiguous input stays `fact` ("宁缺毋滥"). Facts can later be **promoted** to `canonical_fact` entities by the L2 layer.

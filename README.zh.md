@@ -21,7 +21,7 @@ AI Agent 的记忆层。通过 **4 个维度**记忆——向量语义、知识�
 - **会话状态摘要**——500–2000 字"当前状态"摘要，会话开场自动注入（Claude Code SessionStart 钩子 / MCP resource）
 - **可插拔向量后端**——`sqlite-vec` 默认（任意 CPU）、`usearch`（HNSW，任意 CPU）、`zvec`（HNSW + 原生 FTS，AVX2+）
 
-**为什么 4 路召回赢**：每路互补盲区——向量漏字面（股票代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **8.5 ms** / p95 = **10 ms** @ 6.3k chunks），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
+**为什么 4 路召回赢**：每路互补盲区——向量漏字面（商品/品类代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **8.5 ms** / p95 = **10 ms** @ 6.3k chunks），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
 
 ---
 
@@ -68,14 +68,14 @@ Lane C (meta):     doc5=1, doc1=3, doc9=2
 | 新增一路？ | 直接加 | 重新调所有权重 |
 | 实现成本 | ~5 行 | 分数校准 + 权重网格搜索 |
 
-mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给股票代码实体命中。
+mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知**品类代码**实体命中（如商品 SKU）——可配置，默认一个精选实体种类清单。
 
 ---
 
 ## ✨ 特色
 
 ### 🧠 知识图谱感知
-每条 chunk 可链接到类型化实体（`stock` / `concept` / `person` / `canonical_fact`），关系图可查询。`memory_graph_query` 返回 2-hop 邻居。
+每条 chunk 可链接到类型化实体，关系图可查询。**实体 `kind` 是开放分类**——你来定义你领域的种类（`product` / `person` / `location` / `category` / `canonical_fact` / …，随你）。`memory_graph_query` 返回 2-hop 邻居。
 
 ### 🏷️ memory_type 类型谱系 + 零 LLM 分类器
 每条 chunk 带一个决定其生命周期的类型（§3.0）：`fact` / `preference` / `episode` / `decision` / `procedure` / `ephemeral`。**规则分类器**（P1a，无 LLM，确定性）按强标记自动打标——**简体/繁體（字符映射归一化）/英文**三语。模糊输入保持 `fact`（宁缺毋滥）。高频事实后续可由 L2 层**晋升**为 `canonical_fact` 实体。

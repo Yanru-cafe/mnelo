@@ -164,6 +164,22 @@ class Config:
             or "sqlite_vec"
         )
 
+        # [8/5 普适化] RRF 实体 boost 的 kind 清单 — 哪些 kind 的 entity 命中给 boost。
+        # 默认 ['stock'] 兼容旧行为; 用户设自己领域的 kind (如 product/category) 或 [] 禁用。
+        # env MNELO_MEMORY_RECALL_BOOST_KINDS='product,location' > config.toml [recall].boost_kinds > ['stock'].
+        recall_section = self._raw.get("recall", {}) if isinstance(self._raw.get("recall"), dict) else {}
+        boost_kinds_raw = (
+            os.environ.get("MNELO_MEMORY_RECALL_BOOST_KINDS")
+            or recall_section.get("boost_kinds")
+        )
+        if boost_kinds_raw:
+            if isinstance(boost_kinds_raw, list):
+                self.recall_boost_kinds = [str(k).strip() for k in boost_kinds_raw if str(k).strip()]
+            else:
+                self.recall_boost_kinds = [k.strip() for k in str(boost_kinds_raw).split(",") if k.strip()]
+        else:
+            self.recall_boost_kinds = ["stock"]  # 默认兼容旧行为
+
         # [G1 8/4] TASKS_L2_DIGEST §1.4 — [digest] config block
         digest_section = self._raw.get("digest", {}) if isinstance(self._raw.get("digest"), dict) else {}
         digest_enabled_str = (
