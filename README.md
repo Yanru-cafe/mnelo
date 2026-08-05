@@ -188,6 +188,18 @@ print(c.get_digest()['content'][:100])                     # session digest
 "
 ```
 
+### 🤖 One-line agent install
+
+Non-technical? Skip all the steps above — hand this to any AI coding agent (Claude Code, Hermes, Cursor, …). **It installs and adopts in one go:**
+
+> **Install and adopt mnelo from https://github.com/chinesewebman/mnelo as my memory system:**
+> 1. Clone, set up the venv, `pip install -r requirements.txt`, run `scripts/init_db.py`, launch the MCP server on port 8086, and verify with `scripts/health_check.py` (report back when `MCP server ready`).
+> 2. **Ask me my primary language first** (中文 / English / mixed), then set the matching embedding model in `config.toml [embedder]` *before* first use (switching later requires re-initializing the DB).
+> 3. Choose the vector backend for this machine: default `sqlite-vec` unless there's a reason to upgrade; `usearch` for any CPU; **`zvec` only if this CPU supports AVX2+** (never on old CPUs).
+> 4. After it's running, **update your own SOUL.md / CLAUDE.md** to declare: "I use the mnelo MCP server (`http://127.0.0.1:8086/sse`) as my memory system — `memory_remember` to persist, `memory_recall` to retrieve, `memory_get_digest` for the session digest."
+
+The agent handles venv creation, pip install, the embedding-model download, and the health probe. Typical install ~90s (the 92 MB model download is the slow part).
+
 ### 🤖 Session-state injection — generic, any MCP client
 
 mnelo is a **generic agent memory system** — Hermes, Claude Code, Cursor, or any MCP client use it directly. The digest rides **standard MCP** (initialize + resource), so injecting it at session start needs **no per-client code**:

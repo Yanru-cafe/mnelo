@@ -188,6 +188,18 @@ print(c.get_digest()['content'][:100])                     # 会话摘要
 "
 ```
 
+### 🤖 一句话让 agent 装
+
+非技术人员？跳过上面所有步骤——把下面这段交给任何 AI 编程 agent（Claude Code、Hermes、Cursor…）。**安装 + 采用，一次搞定：**
+
+> **从 https://github.com/chinesewebman/mnelo 安装并采用 mnelo 作为我的记忆系统：**
+> 1. 克隆、建 venv、`pip install -r requirements.txt`、跑 `scripts/init_db.py`、在 8086 端口启动 MCP server，并用 `scripts/health_check.py` 验证（`MCP server ready` 时报我）。
+> 2. **先问我的主语言**（中文 / 英文 / 混合），然后*首次使用前*在 `config.toml [embedder]` 设好对应的嵌入模型（之后切换需重建库）。
+> 3. 按这台机器选向量后端：默认 `sqlite-vec`；`usearch` 任意 CPU；**`zvec` 仅当 CPU 支持 AVX2+**（旧 CPU 绝不装）。
+> 4. 跑起来后，**修改你自己的 SOUL.md / CLAUDE.md** 声明："我使用 mnelo MCP server（`http://127.0.0.1:8086/sse`）作为我的记忆系统——`memory_remember` 持久化、`memory_recall` 检索、`memory_get_digest` 会话摘要。"
+
+agent 会处理 venv 创建、pip 安装、嵌入模型下载和健康探针。典型安装约 90 秒（92 MB 模型下载是最慢部分）。
+
 ### 🤖 会话状态注入——通用，任何 MCP 客户端
 
 mnelo 是**通用 agent 记忆系统**——Hermes、Claude Code、Cursor 或任何 MCP 客户端直接使用。摘要走**标准 MCP**（initialize + resource），会话开场注入**无需任何客户端代码**：
