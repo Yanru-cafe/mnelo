@@ -1405,7 +1405,12 @@ class Memory:
             total = self._conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
             active = self._conn.execute(f"SELECT count(*) FROM {t} WHERE valid_until IS NULL").fetchone()[0]
             stats[t] = {"total": total, "active": active, "deleted": total - active}
-        stats["vectors"] = self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
+        # [8/5] vectors 按实际 search 后端计数 (usearch/zvec 下 sqlite_vec 的 vectors 表恒 0)
+        try:
+            stats["vectors"] = self._index.size()
+        except Exception as e:
+            logger.warning(f"[stats] search index size failed: {e}")
+            stats["vectors"] = 0
         stats["recall_log"] = self._conn.execute("SELECT count(*) FROM recall_log").fetchone()[0]
         return stats
 
@@ -3072,7 +3077,12 @@ class Memory:
             total = self._conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
             active = self._conn.execute(f"SELECT count(*) FROM {t} WHERE valid_until IS NULL").fetchone()[0]
             stats[t] = {"total": total, "active": active, "deleted": total - active}
-        stats["vectors"] = self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
+        # [8/5] vectors 按实际 search 后端计数 (usearch/zvec 下 sqlite_vec 的 vectors 表恒 0)
+        try:
+            stats["vectors"] = self._index.size()
+        except Exception as e:
+            logger.warning(f"[stats] search index size failed: {e}")
+            stats["vectors"] = 0
         stats["recall_log"] = self._conn.execute("SELECT count(*) FROM recall_log").fetchone()[0]
 
         # [H-1 §6.5] hygiene 子键 (§1.1 v0.12 + TASK v0.2): 不新加 memory_hygiene_stats

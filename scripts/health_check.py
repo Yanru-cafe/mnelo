@@ -140,16 +140,18 @@ def db_stats(db_path):
                 out[f"{table}_active"] = None
                 out[f"{table}_total"] = None
 
-        # vec0 virtual table — load sqlite-vec, count via vectors_rowids()
+        # vectors 数按实际 search 后端计数 — usearch/zvec 下 sqlite_vec 的
+        # vectors_rowids 恒 0, 只数 vec0 是显示假象 (8/5).
+        # 注意: 不调 si.close() — usearch 的 close() 会 save() 写盘, 可能覆盖
+        # 运行中 server 内存里未落盘的 add; 本进程是短命 CLI, 退出即释放.
         try:
-            import sqlite_vec
+            from search_index import build_search_index as _bi
+            from config import config as _cfg
 
-            con.enable_load_extension(True)
-            sqlite_vec.load(con)
-            con.enable_load_extension(False)
-            row = con.execute("SELECT COUNT(*) FROM vectors_rowids").fetchone()
-            out["vectors_total"] = row[0]
-            out["vectors_active"] = row[0]
+            si = _bi(_cfg.search_backend, db_path, _cfg.embedder_dim)
+            v = si.size()
+            out["vectors_total"] = v
+            out["vectors_active"] = v
         except Exception as e:
             out["vectors_total"] = None
             out["vectors_active"] = None
@@ -299,7 +301,7 @@ def main():
 
     # 3.5 Search backend (DESIGN §3.6/§8.3)
     try:
-        from search_index import zvec_available
+        from search_index import usearch_available, zvec_available
 
         from config import config as _cfg
 
@@ -313,6 +315,15 @@ def main():
             }
             if not ok:
                 degraded = True  # 配置了 zvec 但不可用 → 实际跑在 sqlite_vec, 提醒
+        elif want == "usearch":
+            ok = usearch_available()
+            report["checks"]["search_backend"] = {
+                "configured": "usearch",
+                "active": "usearch" if ok else "sqlite_vec",
+                "usearch_available": ok,
+            }
+            if not ok:
+                degraded = True  # 配置了 usearch 但未安装 → 实际跑在 sqlite_vec, 提醒
         else:
             report["checks"]["search_backend"] = {"configured": "sqlite_vec", "active": "sqlite_vec"}
     except Exception as e:
@@ -332,6 +343,10 @@ def main():
         lines.append(f"⚠️  Search backend — configured zvec, active sqlite_vec (CPU 不支持, 已回落)")
     elif sb.get("configured") == "zvec":
         lines.append(f"✅ Search backend — zvec (HNSW + FTS)")
+    elif sb.get("configured") == "usearch" and not sb.get("usearch_available"):
+        lines.append(f"⚠️  Search backend — configured usearch, active sqlite_vec (未安装, 已回落)")
+    elif sb.get("configured") == "usearch":
+        lines.append(f"✅ Search backend — usearch (HNSW)")
     else:
         lines.append(f"✅ Search backend — sqlite_vec (默认)")
     mcp = report["checks"]["mcp_server"]

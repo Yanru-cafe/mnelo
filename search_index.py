@@ -54,7 +54,7 @@ class SearchIndex(ABC):
     @property
     @abstractmethod
     def name(self) -> str:
-        """后端名: 'sqlite_vec' | 'zvec'."""
+        """后端名: 'sqlite_vec' | 'usearch' | 'zvec'."""
 
     @abstractmethod
     def knn(self, query_bytes: bytes, top_k: int, conn=None) -> List[KNNHit]:
@@ -79,6 +79,14 @@ class SearchIndex(ABC):
     @abstractmethod
     def remove(self, chunk_id: str, conn=None) -> None:
         """删除一条 chunk 的向量索引. 幂等 (不存在也 OK). conn 语义同 add."""
+
+    @abstractmethod
+    def size(self) -> int:
+        """索引中当前向量条数 — stats 的 vectors 字段按实际后端计数 (8/5).
+
+        各后端各自计数: sqlite_vec 数 vec0 表, usearch 数 HNSW 索引,
+        zvec 数 collection. 避免在非 sqlite_vec 后端下显示恒 0 的假象.
+        """
 
     @abstractmethod
     def close(self) -> None:
@@ -174,6 +182,13 @@ class SQLiteVecIndex(SearchIndex):
             except sqlite3.OperationalError as e:
                 logger.warning(f"[sqlite_vec.remove] failed for {chunk_id}: {e}")
 
+    def size(self) -> int:
+        """vec0 表行数."""
+        try:
+            return self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+
     def close(self) -> None:
         self._conn.close()
 
@@ -249,6 +264,16 @@ class ZvecIndex(SearchIndex):
 
     def remove(self, chunk_id: str, conn=None) -> None:
         self._col.delete([chunk_id])
+
+    def size(self) -> int:
+        """zvec collection 文档数. 本机未实测 (CPU 不支持 zvec), 防御性 fallback."""
+        if self._col is None:
+            return 0
+        try:
+            return int(self._col.count())
+        except Exception as e:
+            logger.warning(f"[zvec.size] failed: {e}")
+            return 0
 
     def fts(self, query: str, top_k: int, conn=None) -> List[str]:
         """[B2 §4] zvec 原生 FTS BM25 → top-k chunk_id (仅排序). 过滤在 memory.py SQLite 侧."""
@@ -363,6 +388,11 @@ class UsearchIndex(SearchIndex):
         row = c.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
         if row:
             self._index.remove(np.array([row["rowid"]], dtype=np.uint64))
+
+    def size(self) -> int:
+        """usearch HNSW 索引向量数. 注意: 本版本 usearch 的 Index.size 是 int 属性,
+        不是方法 (method-call 会 TypeError 'int' object is not callable, 已踩坑)."""
+        return int(self._index.size)
 
     def close(self) -> None:
         self._index.save(self._index_path)  # 持久化
