@@ -138,7 +138,7 @@ A **500–2000 char digest** (identity facts + recent key decisions + in-progres
 | **usearch** | any | HNSW (real ANN) | larger scale / faster recall on old CPUs |
 | **zvec** | **AVX2+** | HNSW + native FTS (BM25 + jieba 中文) | scale + full-text search |
 
-Auto-detected; `[search] backend` switches; **fail-fast** if configured backend is unavailable (opt-out via `MNELO_MEMORY_ALLOW_FALLBACK=1`). See the [deployment matrix](#-search-backend-deployment-matrix).
+Auto-detected; `[search] backend` switches; if the configured backend is unavailable, the factory **auto-falls back** along the `zvec → usearch → sqlite_vec` chain via subprocess `import`-check. See the [deployment matrix](#-search-backend-deployment-matrix).
 
 ---
 
@@ -256,11 +256,21 @@ mnelo's vector index backend is pluggable ([DESIGN §3.6/§8.3](docs/DESIGN.md))
 
 **Deployment rules**:
 - **Not installed** → default `sqlite_vec`, fully functional, no config.
-- **Installed but CPU unsupported** (e.g. `import zvec` crashes on an old VPS) → mnelo detects in a **subprocess**, and **fails fast** by default (opt-out: `MNELO_MEMORY_ALLOW_FALLBACK=1` for graceful degradation).
+- **Installed but CPU unsupported** (e.g. `import zvec` crashes on an old VPS) → mnelo detects in a **subprocess** (safe — doesn't crash the host process) and **auto-falls back** along the chain below.
 - **Enable usearch/zvec**: `pip install -r requirements-usearch.txt` (or `-zvec.txt`) + `config.toml` `[search] backend = 'usearch'|'zvec'` (or env `MNELO_MEMORY_SEARCH_BACKEND`).
 - `scripts/health_check.py` reports the active backend; `/health` surfaces maintenance recommendations when degraded.
 
-> ⚠️ zvec 0.6 on pre-Ivy-Bridge x86_64 crashes on `import` — don't install it there.
+**Auto-fallback chain (8/5 主人 decision)**: `build_search_index()` factory implements a **zvec → usearch → sqlite_vec** cascade via subprocess `import`-check — install one, run; the factory picks the highest-priority backend that imports cleanly. No fail-fast: even on a CPU that can't run zvec, the system stays usable (usearch if installed, else sqlite_vec). The factory always returns a working index.
+
+**Switching backends** (sqlite_vec → usearch/zvec): requires full re-embed of all chunks:
+```bash
+python scripts/rebuild_index.py --backend usearch    # full re-embed from chunks
+python scripts/repair_index.py --backend usearch     # remove orphan vectors (chunk gone but index not)
+# Or dry-run first:
+python scripts/rebuild_index.py --backend usearch --dry-run
+```
+
+> ⚠️ zvec 0.6 on pre-Ivy-Bridge x86_64 crashes on `import` — don't install it there. The factory will skip it automatically, but installing a package you can't run wastes disk.
 
 ---
 
