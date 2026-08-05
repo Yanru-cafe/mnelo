@@ -62,6 +62,18 @@ def norm_memory_type(t) -> str:
     return t
 
 
+def _kind_from_source(source: str) -> Optional[str]:
+    """[8/5 普适化] 从 source 前缀提取 entity kind: 'entity:stock' → 'stock'.
+
+    泛化自原硬编码的 `source.startswith('entity:stock')` — 现在任何
+    `entity:<kind>` 前缀都能推导出 kind, 供 RRF boost 按可配置清单匹配。
+    """
+    if not source or not source.startswith("entity:"):
+        return None
+    kind = source[len("entity:"):].strip()
+    return kind or None
+
+
 def now(tz: str = None) -> str:
     """Return current time as ISO 8601 string with seconds precision (e.g. '2026-07-18T15:48:00').
 
@@ -1121,7 +1133,13 @@ class Memory:
         rrf_score: Dict[str, float] = {}
         rrf_hits: Dict[str, Dict] = {}
         k = 60
-        STOCK_BOOST = 0.05  #  P2+ #4
+        # [8/5 普适化] RRF 实体 boost — 可配置 kind 清单 (config [recall].boost_kinds / env
+        # MNELO_MEMORY_RECALL_BOOST_KINDS)。默认 ['stock'] 兼容旧行为; 设自己领域的
+        # kind (product/category/...) 或 [] 禁用。机制通用: 已知品类代码实体命中浮顶。
+        from config import config as _cfg
+
+        boost_kinds = getattr(_cfg, "recall_boost_kinds", ["stock"])
+        ENTITY_BOOST = 0.05
         for hits in hit_lists:
             for rank, h in enumerate(hits):
                 # [ 7/18] 主键区分实体 vs chunk — 用 chunk_id 字段统一
@@ -1130,15 +1148,11 @@ class Memory:
                 # 同 ID 合并(实体 hit 和 chunk hit 可能是同一事实在不同层的表达)
                 cid = h["chunk_id"]
                 rank_score = 1.0 / (k + rank + 1)
-                # [P2+ #4] stock entity boost — 让 kind=stock entity (如 'sh600089') 优先
-                kind = h.get("entity_kind") or (
-                    "stock"
-                    if h.get("source", "").startswith("entity:stock") or "stock" in str(h.get("source", ""))
-                    else None
-                )
-                if kind == "stock" and h.get("method") == "entity":
-                    # : stock entity 0.05 / rank^0.5 boost — 浮顶但不让压倒 RRF 排序
-                    boost = STOCK_BOOST / math.sqrt(rank + 1)
+                # [P2+ #4 泛化] 实体 boost — 从 entity_kind 或 source 前缀 'entity:<kind>' 推导 kind
+                kind = h.get("entity_kind") or _kind_from_source(h.get("source", ""))
+                if kind and kind in boost_kinds and h.get("method") == "entity":
+                    # 0.05 / rank^0.5 boost — 浮顶但不压倒 RRF 排序
+                    boost = ENTITY_BOOST / math.sqrt(rank + 1)
                     rank_score += boost
                 rrf_score[cid] = rrf_score.get(cid, 0) + rank_score
                 rrf_hits[cid] = h

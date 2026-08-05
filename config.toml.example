@@ -57,3 +57,9 @@ max_chars = 2000             # §4.5.1 体积护栏
 recent_window_days = 30      # 块2 时间窗
 importance_threshold = 0.8   # 块2 高 importance 门槛
 inject_on_initialize = false # 默认显式调用 (避免每次连接拉摘要 token 开销)
+
+[recall]
+# [8/5 普适化] RRF 实体 boost 的 kind 清单 — 哪些 kind 的 entity 命中给 RRF boost。
+# 默认 ['stock'] 兼容旧行为; 设你领域的 kind (如 ['product','category']) 或 [] 禁用。
+# 环境变量覆盖: MNELO_MEMORY_RECALL_BOOST_KINDS='product,location'
+# boost_kinds = ['stock']
