@@ -242,6 +242,28 @@ If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for yo
 
 **4. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
 
+**5. Backup / restore (TASKS_BACKUP_RESTORE).** **⚠️ PRIVACY: if the user picks GitHub auto-push (option 3), the destination repo MUST be private.** mnelo.db contains personal memory, decisions, preferences, entity relationships — PII-level. Pushing to a public repo = data leak. Verify before enabling `ai.mnelo.backup.plist` with a GitHub-backed `snapshot_dir`. mnelo is one SQLite file — easy to back up, but `cp memory.db` is unsafe mid-write (WAL). Use the built-in tools:
+
+```bash
+# 5a. Manual backup (writes to config [backup] snapshot_dir + sha256 sidebar)
+python scripts/backup_db.py
+python scripts/backup_db.py --dry-run   # preview only
+
+# 5b. List snapshots + verify sha256
+python scripts/restore_db.py --list
+
+# 5c. Verify a snapshot (dry-run, never touches live)
+python scripts/restore_db.py --latest --dry-run
+
+# 5d. Actual restore (isolates current db → memory.db.corrupt-<date>, atomic replace)
+python scripts/restore_db.py --from 2026-08-05-030000
+# or: python scripts/restore_db.py --latest
+```
+
+**Schedule role for the agent**: install.sh step 12 asks the user where to store backups (1: local default, 2: NAS via dr-backup.sh, 3: GitHub repo via dr-backup.sh, 4: custom) and how many to keep (default 30 ≈ 4 weeks). The ai.mnelo.backup.plist then runs `wed+sun 03:00` via launchd. If the user has `dr-backup.sh` already wired, the snapshots end up rsync'd → NAS → GitHub automatically.
+
+**Recovery drill (run monthly)**: `scripts/restore_db.py --latest --dry-run` confirms the most recent snapshot is healthy. If this fails, the snapshot is corrupt — DESIGN §3.11.2 says fall back to the previous one. If all snapshots fail, the backup chain is untrustworthy; investigate `logs/mnelo.backup.error.log` and re-test by manually running `backup_db.py`.
+
 **📌 Adding a new entity kind** (open taxonomy — no registration needed): entity `kind` is free-form; "adding a kind" simply means *starting to use it*. When the user introduces a new kind, record it as a convention and use it consistently:
 
 > Add a new entity kind: `product`, for product-related entities. When using `memory_remember` for products, pass `kind: 'product'` and keep naming/aliases consistent (e.g. id `product:sku-1024`). Record this convention in your CLAUDE.md/SOUL.md and use it consistently; filter product recalls with `kind: 'product'`.

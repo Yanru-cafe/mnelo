@@ -1,0 +1,248 @@
+"""test_backup_restore.py — mnelo 备份/恢复链路测试 (TASKS_BACKUP_RESTORE A6).
+
+覆盖:
+- backup 创建快照 + gzip + sha256
+- backup 日内去重
+- backup retention 自动 prune
+- backup dry-run 不写
+- restore --list 列出全部 + sha256 状态
+- restore dry-run 校验不落盘
+- restore 实际恢复 → 当前 db 内容等效
+- restore 损坏 sha256 失败提示降级
+- restore 错 timestamp 报错清晰
+"""
+import gzip
+import os
+import shutil
+import sqlite3
+import sys
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from config import config as _config  # noqa: E402
+from scripts import backup_db, restore_db  # noqa: E402
+
+
+class BackupRestoreBase(unittest.TestCase):
+    """共用: 临时 snapshots 目录 + 内容填个小 db."""
+
+    def setUp(self):
+        # 临时目录
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="mnelo_br_")
+        self.snap_dir = Path(self.tmp) / "snapshots"
+        # 小 db: create + 2 chunks + 1 entity
+        self.db_path = Path(self.tmp) / "test.db"
+        con = sqlite3.connect(str(self.db_path))
+        try:
+            con.executescript("""
+                CREATE TABLE chunks (
+                    id TEXT PRIMARY KEY,
+                    content TEXT,
+                    timestamp TEXT,
+                    valid_until TEXT
+                );
+                CREATE TABLE entities (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    kind TEXT,
+                    source TEXT,
+                    timestamp TEXT
+                );
+                CREATE TABLE relations (
+                    id TEXT PRIMARY KEY,
+                    source_id TEXT,
+                    target_id TEXT,
+                    kind TEXT,
+                    source TEXT,
+                    timestamp TEXT
+                );
+                CREATE TABLE audit_log (
+                    id INTEGER PRIMARY KEY,
+                    run_id TEXT,
+                    pass_name TEXT,
+                    action_type TEXT,
+                    ref_id TEXT,
+                    status TEXT,
+                    timestamp TEXT,
+                    created_at TEXT,
+                    detail_json TEXT
+                );
+                CREATE TABLE vec0 (
+                    id INTEGER PRIMARY KEY,
+                    embedding BLOB
+                );
+            """)
+            con.execute(
+                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)",
+                ("c1", "hello world"),
+            )
+            con.execute(
+                "INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)",
+                ("c2", "another chunk"),
+            )
+            con.execute(
+                "INSERT INTO entities VALUES (?, ?, 'test', 'manual', datetime('now'))",
+                ("e1", "Alice"),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class TestBackup(BackupRestoreBase):
+
+    def test_01_backup_creates_snapshot_file(self):
+        result = backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        self.assertIn("path", result)
+        self.assertTrue(Path(result["path"]).exists())
+        self.assertGreater(result["size_mb"], 0)
+        # gzip magic \x1f\x8b
+        with open(result["path"], "rb") as f:
+            self.assertEqual(f.read(2), b"\x1f\x8b")
+        # sha256 sidebar
+        sha = Path(result["path"]).parent / (Path(result["path"]).name + ".sha256")
+        self.assertTrue(sha.exists(), "sha256 sidebar missing")
+        self.assertIn(result["sha256"], sha.read_text())
+
+    def test_02_backup_dry_run_creates_nothing(self):
+        before = set(self.snap_dir.glob("*")) if self.snap_dir.exists() else set()
+        result = backup_db.backup(self.snap_dir, retention=5, dry_run=True)
+        self.assertTrue(result.get("dry_run"))
+        after = set(self.snap_dir.glob("*")) if self.snap_dir.exists() else set()
+        self.assertEqual(before, after, "dry-run 不应写任何文件")
+
+    def test_03_backup_daily_dedup(self):
+        # 第一次: 写
+        r1 = backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        self.assertIn("path", r1)
+        # 第二次同日: skip
+        r2 = backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        self.assertTrue(r2.get("skipped"))
+        self.assertIn("今已有", r2["reason"])
+        # force: 允许
+        r3 = backup_db.backup(self.snap_dir, retention=5, dry_run=False, force=True, db_path=self.db_path)
+        self.assertIn("path", r3)
+        # 总共 2 份
+        gzs = list(self.snap_dir.glob("*.db.gz"))
+        self.assertEqual(len(gzs), 2)
+
+    def test_04_backup_retention_prunes_old(self):
+        # 造 5 份, 手动改 mtime 让 retention=3 删 2 份
+        self.snap_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(5):
+            ts = f"2026-08-0{i+1}-030000"
+            p = self.snap_dir / f"{ts}.db.gz"
+            sha = p.parent / (p.name + ".sha256")
+            p.write_bytes(b"x")
+            sha.write_text("fake")
+            os.utime(p, (1700000000 + i * 86400, 1700000000 + i * 86400))
+        pruned = backup_db._prune_old(self.snap_dir, retention=3)
+        self.assertEqual(pruned, 2)
+        kept = list(self.snap_dir.glob("*.db.gz"))
+        self.assertEqual(len(kept), 3)
+
+
+class TestRestore(BackupRestoreBase):
+
+    def test_01_list_snapshots(self):
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, force=True, db_path=self.db_path)
+        snaps = restore_db._list_snapshots(self.snap_dir)
+        self.assertEqual(len(snaps), 2)
+        for s in snaps:
+            self.assertTrue(s["sha256_ok"])
+
+    def test_02_dry_run_validates_only(self):
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        # 假冒 target (live db) — dry-run 不应动它
+        target = self.db_path
+        target_sha_before = target.read_bytes()[:8]
+        report = restore_db.restore(
+            self.snap_dir, ts=None, target=target, dry_run=True
+        )
+        self.assertTrue(report["sha256_ok"])
+        self.assertEqual(report["integrity_check"]["integrity_check"], "ok")
+        self.assertEqual(report["integrity_check"]["foreign_key_check"], "ok")
+        self.assertNotIn("restored", report)
+        self.assertTrue(report["dry_run"])
+        # 目标文件未动
+        self.assertEqual(target.read_bytes()[:8], target_sha_before)
+
+    def test_03_atomic_replace_restore(self):
+        # 先做个快照
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        # 改 live db 内容
+        con = sqlite3.connect(str(self.db_path))
+        con.execute("INSERT INTO chunks VALUES (?, ?, datetime('now'), NULL)", ("c3", "new"))
+        con.commit()
+        # 改前 checksum
+        pre = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        con.close()
+        self.assertEqual(pre, 3)
+        # 恢复
+        report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path)
+        self.assertTrue(report["sha256_ok"])
+        self.assertEqual(report["integrity_check"]["integrity_check"], "ok")
+        self.assertIn("restored", report)
+        # c3 没了
+        con = sqlite3.connect(str(self.db_path))
+        post = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        con.close()
+        self.assertEqual(post, 2, "恢复后应回到 2 chunks")
+        # isolated 应该存在
+        self.assertIsNotNone(report.get("isolated_to"))
+
+    def test_04_corrupt_sha256_fails_safely(self):
+        backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        # 改 sha256
+        sha = next(self.snap_dir.glob("*.db.gz.sha256"))
+        sha.write_text("0" * 64 + "  " + sha.read_text().split()[-1])
+        report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path)
+        self.assertFalse(report["sha256_ok"])
+        self.assertIn("error", report)
+        self.assertIn("sha256", report["error"])
+
+    def test_05_missing_snapshot_errors_cleanly(self):
+        # snap_dir 需存在才能进 "无快照" 分支
+        self.snap_dir.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(FileNotFoundError) as ctx:
+            restore_db._select_snapshot(self.snap_dir, "2099-01-01-000000")
+        self.assertIn("无快照", str(ctx.exception))
+
+
+class TestEndToEnd(BackupRestoreBase):
+
+    def test_round_trip_real_db(self):
+        """端到端: 拷 live db → backup → restore → 校验完整性 (不依赖 snapshot->source 一致).
+
+        Note: 不能断言 source == snapshot (live db 在 MCP 跑时会变).
+        只验证 snapshot 内部 integrity + restore 后可读 + 行数合理.
+        """
+        real_db = _config.db_path
+        if not Path(real_db).exists():
+            self.skipTest(f"live db 不存在: {real_db}")
+        live_copy = Path(self.tmp) / "live_copy.db"
+        shutil.copy2(str(real_db), str(live_copy))
+        tmp_snap = Path(self.tmp) / "snaps"
+        # backup
+        result = backup_db.backup(tmp_snap, retention=5, dry_run=False, db_path=live_copy)
+        self.assertIn("path", result)
+        # restore → 另一个空 db
+        restore_target = Path(self.tmp) / "restored.db"
+        report = restore_db.restore(tmp_snap, ts=None, target=restore_target, dry_run=False)
+        self.assertTrue(report["sha256_ok"])
+        self.assertEqual(report["integrity_check"]["integrity_check"], "ok")
+        self.assertEqual(report["integrity_check"]["foreign_key_check"], "ok")
+        # 行数 > 0 (live db 至少有几条)
+        self.assertGreater(report["integrity_check"]["row_counts"]["chunks"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
