@@ -14,6 +14,22 @@
 
 AI Agent 的记忆层。通过 **4 个维度**记忆——向量语义、知识图谱、全文元数据、实体身份——让每个决策都能回溯到产生它的条件。一个本地 SQLite 文件，供所有本地 MCP 客户端共享。**零云、零锁定。**
 
+## 🧭 这是什么？（大白话，给非技术人员）
+
+mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的笔记本，从一次对话带到下一次。
+
+- **它记得你**——你是谁、你的偏好、重要的事实。
+- **它记得正在发生什么**——近期的决策、进行中的工作。
+- **它自动归档记忆**——无需手动整理。
+- **它会随时间自我整理**（可选）——陈旧的东西淡出、过期的东西被清理，且每一步都可撤销。
+- **它每次开场问候你的 AI**——一份"现在进展到哪"的简短摘要，让你的助手每次对话开始就带着上下文。
+
+它**完全运行在你自己的电脑上**（一个本地文件）。不上云、无账号、无订阅。
+
+**如果你不是技术人员**：你不需要读本页其余部分。安装设计成——把本页交给任何 AI 编程 agent（Claude Code、Cursor…），它会帮你装好 mnelo。见 [🤖 一句话让 agent 装](#-一句话让-agent-装)。之后你的 AI 会自动使用 mnelo。
+
+---
+
 **内部构成（2026-08）**：
 - **4 路召回 + RRF**——vector / graph / meta / entity 四路融合，无需分数归一化
 - **memory_type 类型谱系**——每条记忆自动分类（fact / preference / episode / decision / procedure / ephemeral），**零 LLM 规则分类器**，支持简体/繁體/英文
@@ -186,6 +202,33 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 - **Claude Code（可选适配器）**：不读 initialize resource 的 agent 可用自带的 **SessionStart 钩子**（`scripts/session_start_digest.py`，接在 `.claude/settings.json`）。它是同一通用机制的薄适配器——**容错**（mnelo 未跑 → 静默 exit 0）、**自举**（`python3` 解析到 venv 外会自动 re-exec）、输出 `[mnelo-digest]` 围栏块（数据而非指令，DESIGN §12）
 
 无论哪种方式，你的 agent 每个会话开场即知当前记忆状态——无需召回。
+
+---
+
+## 🤖 给 AI agent 的操作指令（把 mnelo 设为你的记忆系统）
+
+如果你是 AI agent（Claude Code、Hermes、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
+
+**1. 按实际机器选择向量后端。**
+- 默认 **`sqlite-vec`** 任意 CPU 可用——没有理由就不换。
+- 更大规模 / 旧 CPU 上要更快召回 → **`usearch`**（任意 CPU）。
+- **`zvec`** 带原生全文检索，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
+- 配置：`config.toml [search] backend` 或 env `MNELO_MEMORY_SEARCH_BACKEND`。
+
+**2. 选嵌入模型前先问用户主语言**（之后切换需重新初始化 DB——所以*首次使用前*就问）：
+- 中文 → `bge-small-zh-v1.5`（默认，512 维）
+- 英文 → `bge-small-en-v1.5`（384 维）
+- 混合 / 多语 → `paraphrase-multilingual-MiniLM-L12-v2`（384 维）
+
+**3. 装完后，修改你自己的配置，声明 mnelo 是你的记忆系统。** 在你的 `SOUL.md` / `CLAUDE.md`（或等价文件）加一段：
+
+> **记忆**：我使用 mnelo MCP server（SSE at `http://127.0.0.1:8086/sse`）作为我的记忆系统。
+> - `memory_remember` — 持久化重要事实与决策，带类型（`preference` / `decision` / …）
+> - `memory_recall` — 回答任何可能不在上下文里的问题前先检索
+> - `memory_get_digest` / `memory://session/digest` — 开场注入的会话状态摘要
+> 保持 mnelo 运行。如果它停了，就无记忆工作并标注记忆缺口。
+
+**4. 验证** —— 跑 `scripts/health_check.py`（或访问 `/health`），确认 server ready 再宣布完成。
 
 ---
 
