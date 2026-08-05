@@ -213,6 +213,20 @@ class MneloClient:
         """: 统计."""
         return self._call('memory_stats', {})
 
+    def get_digest(self, ref: Optional[str] = None) -> Dict:
+        """[S2 8/5] TASKS_L2_SESSION_STATE §1.3A — 常驻摘要双模式.
+
+        ref=None (缺省) → 摘要压缩视图 (content + line_refs + chunk_id + truncated + built_at).
+        ref=<行号> → 展开该行源 chunk (source_chunks) 或 {error: ...}.
+
+        Returns:
+            dict — 与 MCP 工具 memory_get_digest 返回一致.
+        """
+        args: Dict[str, Any] = {}
+        if ref is not None:
+            args['ref'] = ref
+        return self._call('memory_get_digest', args)
+
 
 # === 便捷 singleton ===
 _client_instance: Optional[MneloClient] = None
