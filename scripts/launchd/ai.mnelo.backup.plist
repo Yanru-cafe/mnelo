@@ -8,6 +8,7 @@
     <array>
         <string>__VENV_PY__</string>
         <string>__LIVE_ROOT__/scripts/backup_db.py</string>
+        <string>--scheduled</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

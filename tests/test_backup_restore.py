@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import sys
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -133,6 +134,19 @@ class TestBackup(BackupRestoreBase):
         gzs = list(self.snap_dir.glob("*.db.gz"))
         self.assertEqual(len(gzs), 2)
 
+    def test_05_scheduled_disabled_skips(self):
+        """[8/5 fix] --scheduled 且 [backup] enabled=false → 跳过, 不写快照."""
+        with mock.patch.object(backup_db._config, 'backup_enabled', False):
+            old_argv = sys.argv
+            sys.argv = ['backup_db.py', '--scheduled', '--dry-run',
+                        '--snapshot-dir', str(self.snap_dir)]
+            try:
+                rc = backup_db.main()
+            finally:
+                sys.argv = old_argv
+        self.assertEqual(rc, 0)
+        self.assertFalse(list(self.snap_dir.glob('*.db.gz')) if self.snap_dir.exists() else [])
+
     def test_04_backup_retention_prunes_old(self):
         # 造 5 份, 手动改 mtime 让 retention=3 删 2 份
         self.snap_dir.mkdir(parents=True, exist_ok=True)
@@ -215,6 +229,28 @@ class TestRestore(BackupRestoreBase):
         with self.assertRaises(FileNotFoundError) as ctx:
             restore_db._select_snapshot(self.snap_dir, "2099-01-01-000000")
         self.assertIn("无快照", str(ctx.exception))
+
+    def test_06_restore_refuses_when_server_running(self):
+        """[8/5 fix] MCP server 运行时恢复 live db → 拒绝, 且不碰现有 db."""
+        result = backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        self.assertIn("path", result)
+        orig = self.db_path.read_bytes()
+        with mock.patch.object(restore_db, "_server_running", return_value=True), \
+             mock.patch.object(restore_db._config, "db_path", self.db_path):
+            report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path)
+        self.assertIn("error", report)
+        self.assertIn("server", report["error"].lower())
+        self.assertEqual(self.db_path.read_bytes(), orig)  # 未被替换
+
+    def test_07_restore_force_overrides_server_running(self):
+        """[8/5 fix] --force 时放行, 带 warning."""
+        result = backup_db.backup(self.snap_dir, retention=5, dry_run=False, db_path=self.db_path)
+        self.assertIn("path", result)
+        with mock.patch.object(restore_db, "_server_running", return_value=True), \
+             mock.patch.object(restore_db._config, "db_path", self.db_path):
+            report = restore_db.restore(self.snap_dir, ts=None, target=self.db_path, force=True)
+        self.assertIn("warning", report)
+        self.assertIn("restored", report)
 
 
 class TestEndToEnd(BackupRestoreBase):

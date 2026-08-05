@@ -147,3 +147,22 @@ class TestDescribe:
         d = cfg.describe()
         # 应该有 server 信息 — 但当前 describe 只 embedder, 验证向后兼容
         assert 'embedder=' in d
+
+
+class TestEnvBool:
+    """[8/5 fix] 布尔 env 解析 — 'false'/'0' 必须为 False (不能 bool(str))"""
+
+    def test_true_variants(self, monkeypatch):
+        for v in ('1', 'true', 'TRUE', 'Yes', 'on'):
+            monkeypatch.setenv('MNELO_TEST_BOOL', v)
+            assert config_mod._env_bool('MNELO_TEST_BOOL') is True
+
+    def test_false_variants(self, monkeypatch):
+        for v in ('0', 'false', 'FALSE', 'no', '', 'banana'):
+            monkeypatch.setenv('MNELO_TEST_BOOL', v)
+            assert config_mod._env_bool('MNELO_TEST_BOOL') is False
+
+    def test_missing_env_uses_default(self, monkeypatch):
+        monkeypatch.delenv('MNELO_TEST_BOOL', raising=False)
+        assert config_mod._env_bool('MNELO_TEST_BOOL') is False
+        assert config_mod._env_bool('MNELO_TEST_BOOL', default=True) is True
