@@ -514,7 +514,7 @@ cd <你的 clone 目录> && git config core.hooksPath .githooks
 | 局限 | 缓解 |
 |---|---|
 | 单用户（无多租户） | 别把 8086 端口暴露到局域网 |
-| 无 PII 自动检测 | 别存密码 / token / 信用卡 |
+| **PII 仅提醒**——mnelo 不主动 redact 或拒写；调用方自决存什么 | 按内容中立设计；命中仅写 `audit_log (pass_name='pii_audit')`；`/health` 暴露 `pii_warnings_last_24h` + 推荐用 `memory_audit_list` 回看 |
 | bge-small-zh 中文特调 | 英文为主的工作负载换 `bge-small-en-v1.5` |
 | L2 自主维护层**默认关**（opt-in） | DESIGN §5.7 设计如此——默认关闭；`UPDATE meta SET value='1' WHERE key='l2.enabled'` 一行启用 |
 

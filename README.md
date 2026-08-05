@@ -539,7 +539,7 @@ Add a new locale — 1 edit in `i18n_messages.py`, no code change. Set `MNELO_ME
 | Limit | Workaround |
 |---|---|
 | Single-user (no multi-tenant) | Don't expose port 8086 to LAN |
-| No PII auto-detection | Don't store passwords / tokens / credit cards |
+| **PII advisory only** — mnelo doesn't auto-redact or refuse; callers decide what to store | Stance per Content-neutral design; advisory hits are logged to `audit_log (pass_name='pii_audit')`; `/health` exposes `pii_warnings_last_24h` + recommended `memory_audit_list` review |
 | bge-small-zh is CN-tuned | Swap to `bge-small-en-v1.5` for EN-heavy workloads |
 | L2 maintenance layer is **opt-in** (default `l2.enabled=0`) | Ship-default off per DESIGN §5.7; flip one `UPDATE meta SET value='1' WHERE key='l2.enabled'` to enable |
 
