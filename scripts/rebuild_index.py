@@ -23,6 +23,9 @@ sys.path.insert(0, str(ROOT))
 from embedder import embed  # noqa: E402
 from search_index import build_search_index  # noqa: E402
 
+# [8/5 fix] 默认 DB 路径从 config 解析 (env > config.toml > ~/.hermes/memory/memory.db)
+from config import config as _config  # noqa: E402
+
 
 def _iter_chunks(conn):
     """遍历所有 valid chunks (valid_until IS NULL), yield (chunk_id, content)."""
@@ -87,10 +90,10 @@ def main():
                     choices=["auto", "sqlite_vec", "usearch", "zvec"],
                     help="目标后端 (默认 auto: zvec > usearch > sqlite_vec)")
     ap.add_argument("--dry-run", action="store_true", help="只统计, 不真正重建")
-    ap.add_argument("--db", default=None, help="db 路径 (默认 <repo>/memory.db)")
+    ap.add_argument("--db", default=None, help="db 路径 (默认从 config 解析)")
     args = ap.parse_args()
 
-    db_path = Path(args.db) if args.db else (ROOT / "memory.db")
+    db_path = Path(args.db) if args.db else Path(_config.db_path)
     stats = rebuild(args.backend, db_path, dry_run=args.dry_run)
     print(stats)
 

@@ -20,6 +20,14 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SI_PATH = ROOT / "search_index.py"
 
+# [8/5 fix] DB 路径不再硬编码 — 用 config 解析 (与 config.py 一致)
+sys.path.insert(0, str(ROOT))
+from config import config as _config_mod  # noqa: E402
+
+# Global DB path used by tests; tests that need isolation should monkeypatch
+# config.config.db_path or pass db_path= explicitly to build_search_index.
+_DEFAULT_DB_PATH = _config_mod.db_path
+
 
 def _load_search_index():
     if "search_index" in sys.modules:
@@ -72,8 +80,7 @@ def test_a1_usearch_available():
 
 def test_a2_usearch_index_basic_init():
     """[A2] UsearchIndex() 初始化不抛 + name/supports_fts 正确."""
-    db = ROOT / "memory.db"  # 复用 live DB chunk 表
-    idx = _si.UsearchIndex(db, dim=512)
+    idx = _si.UsearchIndex(_DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "usearch"
         assert idx.supports_fts is False
@@ -150,8 +157,7 @@ def test_a2_usearch_index_persistence(tmp_path):
 
 def test_a4_factory_explicit_usearch_returns_usearch():
     """[A4 §1.4] backend='usearch' 且装了 → factory 返 UsearchIndex."""
-    db = ROOT / "memory.db"
-    idx = _si.build_search_index("usearch", db, dim=512)
+    idx = _si.build_search_index("usearch", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "usearch", f"应返 UsearchIndex, got {idx.name}"
     finally:
@@ -161,7 +167,7 @@ def test_a4_factory_explicit_usearch_returns_usearch():
 def test_a4_factory_explicit_usearch_falls_back_when_not_installed(monkeypatch):
     """[A4 §1.4] usearch_available=False + backend='usearch' → 降级 sqlite_vec (不抛)."""
     monkeypatch.setattr(_si, "usearch_available", lambda: False)
-    idx = _si.build_search_index("usearch", ROOT / "memory.db", dim=512)
+    idx = _si.build_search_index("usearch", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "sqlite_vec", (
             f"usearch 未装应降级 sqlite_vec, got {idx.name}"
@@ -173,7 +179,7 @@ def test_a4_factory_explicit_usearch_falls_back_when_not_installed(monkeypatch):
 def test_a4_factory_auto_falls_back_from_zvec_to_usearch(monkeypatch):
     """[A4 §1.4 8/5 主人决策] backend='auto' → zvec 不可用 → 降级 usearch."""
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
-    idx = _si.build_search_index("auto", ROOT / "memory.db", dim=512)
+    idx = _si.build_search_index("auto", _DEFAULT_DB_PATH, dim=512)
     try:
         # 本机 Ivy Bridge zvec 不可用, usearch 已装 → 应选 usearch
         assert idx.name == "usearch", (
@@ -187,7 +193,7 @@ def test_a4_factory_auto_falls_back_through_to_sqlite_vec(monkeypatch):
     """[A4 §1.4] auto: zvec 不可用 + usearch 不可用 → sqlite_vec (最终兜底)."""
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
     monkeypatch.setattr(_si, "usearch_available", lambda: False)
-    idx = _si.build_search_index("auto", ROOT / "memory.db", dim=512)
+    idx = _si.build_search_index("auto", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "sqlite_vec", (
             f"auto 全降级应到 sqlite_vec, got {idx.name}"
@@ -199,7 +205,7 @@ def test_a4_factory_auto_falls_back_through_to_sqlite_vec(monkeypatch):
 def test_a4_factory_explicit_zvec_falls_back_to_usearch_when_unavailable(monkeypatch):
     """[A4 §1.4] backend='zvec' 显式但不可用 → 降级 usearch (不抛)."""
     monkeypatch.setattr(_si, "zvec_available", lambda: False)
-    idx = _si.build_search_index("zvec", ROOT / "memory.db", dim=512)
+    idx = _si.build_search_index("zvec", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "usearch", (
             f"zvec 显式不可用应降级 usearch, got {idx.name}"
@@ -210,7 +216,7 @@ def test_a4_factory_explicit_zvec_falls_back_to_usearch_when_unavailable(monkeyp
 
 def test_a4_factory_explicit_sqlite_vec_returns_sqlite_vec():
     """[A4 §1.4] backend='sqlite_vec' 显式 → 直返 SQLiteVecIndex (不检测其他)."""
-    idx = _si.build_search_index("sqlite_vec", ROOT / "memory.db", dim=512)
+    idx = _si.build_search_index("sqlite_vec", _DEFAULT_DB_PATH, dim=512)
     try:
         assert idx.name == "sqlite_vec"
     finally:
