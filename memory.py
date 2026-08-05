@@ -1861,6 +1861,23 @@ class Memory:
                     results["failed"] += res.get("failed", 0)
                     if res.get("watermark_updated"):
                         results["watermark_updated"].append("hygiene")
+                elif pname == "promote":
+                    # [P1-P4 8/5] TASKS_L2_SESSION_STATE Part 2: 事实晋升机制
+                    actual_dry_run = bool(dry_run) if dry_run is not None else True
+                    res = self._run_promote_pass(
+                        run_id=run_id,
+                        dry_run=actual_dry_run,
+                        confirm_destructive=confirm_destructive,
+                    )
+                    results["passes_run"].append("promote")
+                    results["proposals"]["promote"] = res["proposals"]
+                    # promote pass 暴露 candidates 给上层 (admin UI / API 报告)
+                    results.setdefault("promote_candidates", []).extend(res["candidates"])
+                    results["applied"] += res["applied"]
+                    results["skipped"] += res["skipped"]
+                    results["failed"] += res.get("failed", 0)
+                    if res.get("watermark_updated"):
+                        results["watermark_updated"].append("promote")
                 else:
                     results.setdefault("warnings", []).append(
                         f"unknown pass '{pname}', skipped")
@@ -2322,6 +2339,403 @@ class Memory:
         except sqlite3.IntegrityError:
             # UNIQUE 撞, 已写过一个 skipped 同 run_id + ref_id — OK
             pass
+
+    # [P2/P3 P0-fix] 常量
+    _PROMOTE_RECALL_THRESHOLD = 20
+    _PROMOTE_REF_DEGREE_THRESHOLD = 10
+    _PROMOTE_LONG_IMP_THRESHOLD = 0.8
+    _PROMOTE_LONG_DAYS = 90
+    _PROMOTE_DEMOTE_DAYS = 90
+    _PROMOTE_DEMOTE_REF_THRESHOLD = 3
+    _PROMOTE_MAX_CANONICAL = 50
+
+    def _run_promote_pass(
+        self,
+        run_id: str,
+        dry_run: bool = True,
+        confirm_destructive: bool = False,
+    ) -> Dict[str, Any]:
+        """[P1-P3 8/5] TASKS_L2_SESSION_STATE §2.3.
+
+        Part 2 事实晋升机制 — 把高频验证的 fact chunk 晋升为 canonical_fact 实体,
+        久未召回的 canonical_fact 降级, 总量上限强制淘汰.
+
+        Args:
+            run_id: audit_log 关联 run id.
+            dry_run: True 只生成 proposals 不写; False 真应用 (P2 promote / P3 demote).
+            confirm_destructive: demote / 上限淘汰需要此显式确认 (跟 hygiene confirm_destructive 一致).
+
+        Returns:
+            {
+              "candidates": [{chunk_id, signals, action: "promote"}],  # P1 扫描结果
+              "demote_candidates": [{entity_id, reason}],  # P3 降级候选
+              "proposals": [audit_log proposal dicts],
+              "applied": int,
+              "skipped": int,
+              "failed": int,
+              "promoted_entity_ids": [新晋升的 canonical_fact entity_id],
+              "demoted_entity_ids": [降级的 entity_id],
+            }
+        """
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+        # ===== P1: 扫描候选 =====
+        # 三信号: recall_count ≥ 20, ref_degree ≥ 10, 长期 importance ≥ 0.8
+        # 信号强度: recall + ref_degree*2 + long_imp_bonus (供排序)
+        rows = self._conn.execute(
+            """
+            SELECT c.id, c.content, c.importance, c.recall_count,
+                   (SELECT COUNT(*) FROM relations r
+                    WHERE r.evidence_chunk_id = c.id AND r.valid_until IS NULL) AS ref_degree,
+                   c.timestamp
+            FROM chunks c
+            WHERE c.valid_until IS NULL
+              AND c.memory_type = 'fact'
+            """
+        ).fetchall()
+
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            signals: Dict[str, Any] = {}
+            score = 0
+            if row["recall_count"] >= self._PROMOTE_RECALL_THRESHOLD:
+                signals["recall_count"] = row["recall_count"]
+                score += row["recall_count"]
+            if row["ref_degree"] >= self._PROMOTE_REF_DEGREE_THRESHOLD:
+                signals["ref_degree"] = row["ref_degree"]
+                score += row["ref_degree"] * 2
+            # 长期 importance ≥ 0.8 (timestamp < now - 90d)
+            try:
+                chunk_age_days = (_dt.now() - _dt.fromisoformat(row["timestamp"])).days
+            except (ValueError, TypeError):
+                chunk_age_days = 0
+            if (
+                row["importance"] >= self._PROMOTE_LONG_IMP_THRESHOLD
+                and chunk_age_days >= self._PROMOTE_LONG_DAYS
+            ):
+                signals["long_high_imp"] = {
+                    "importance": row["importance"],
+                    "age_days": chunk_age_days,
+                }
+                score += 50  # 长期高重要给固定权重
+            if signals:
+                candidates.append({
+                    "chunk_id": row["id"],
+                    "signals": signals,
+                    "score": score,
+                    "action": "promote",
+                })
+        # 按 score 降序
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+
+        # ===== P3 上限检查: canonical_fact 总数 =====
+        canonical_count_row = self._conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE kind='canonical_fact' AND valid_until IS NULL"
+        ).fetchone()
+        canonical_count = canonical_count_row[0]
+        need_evict = max(0, canonical_count + len(candidates) - self._PROMOTE_MAX_CANONICAL)
+
+        # ===== P3 降级候选: canonical_fact 90 天未召回 + ref_degree < 3 =====
+        demote_candidates: List[Dict[str, Any]] = []
+        demote_rows = self._conn.execute(
+            """
+            SELECT e.id, e.importance, e.last_recalled,
+                   (SELECT COUNT(*) FROM relations r
+                    WHERE (r.source_id = e.id OR r.target_id = e.id)
+                      AND r.valid_until IS NULL) AS ref_degree
+            FROM entities e
+            WHERE e.kind = 'canonical_fact' AND e.valid_until IS NULL
+            """
+        ).fetchall()
+        for ent in demote_rows:
+            last_recalled = ent["last_recalled"]
+            if last_recalled is None:
+                # 从未召回 — 当作"老召回"算
+                age_days = 9999
+            else:
+                try:
+                    age_days = (_dt.now() - _dt.fromisoformat(last_recalled)).days
+                except (ValueError, TypeError):
+                    age_days = 0
+            if age_days >= self._PROMOTE_DEMOTE_DAYS and ent["ref_degree"] < self._PROMOTE_DEMOTE_REF_THRESHOLD:
+                demote_candidates.append({
+                    "entity_id": ent["id"],
+                    "reason": f"90d未召回(ref_degree={ent['ref_degree']})",
+                    "importance": ent["importance"],
+                })
+
+        # ===== 上限腾位: 按 importance asc 补 demote 候选 =====
+        if need_evict > 0:
+            evict_rows = self._conn.execute(
+                """
+                SELECT e.id, e.importance
+                FROM entities e
+                WHERE e.kind = 'canonical_fact' AND e.valid_until IS NULL
+                ORDER BY e.importance ASC
+                LIMIT ?
+                """,
+                (need_evict,),
+            ).fetchall()
+            for ent in evict_rows:
+                # 避免重复添加
+                if any(d["entity_id"] == ent["id"] for d in demote_candidates):
+                    continue
+                demote_candidates.append({
+                    "entity_id": ent["id"],
+                    "reason": f"canonical_fact 上限{self._PROMOTE_MAX_CANONICAL}触发腾位",
+                    "importance": ent["importance"],
+                })
+
+        # ===== P4 audit 接入: proposals =====
+        proposals: List[Dict[str, Any]] = []
+        # promote proposals
+        for cand in candidates:
+            proposals.append({
+                "action_type": "promote_to_canonical",
+                "ref_type": "chunk",
+                "ref_id": cand["chunk_id"],
+                "signals": cand["signals"],
+                "score": cand["score"],
+            })
+        # demote proposals
+        for d in demote_candidates:
+            proposals.append({
+                "action_type": "demote_canonical",
+                "ref_type": "entity",
+                "ref_id": d["entity_id"],
+                "reason": d["reason"],
+            })
+
+        result = {
+            "candidates": candidates,
+            "demote_candidates": demote_candidates,
+            "proposals": proposals,
+            "applied": 0,
+            "skipped": 0,
+            "failed": 0,
+            "promoted_entity_ids": [],
+            "demoted_entity_ids": [],
+            "watermark_updated": False,
+        }
+
+        if dry_run:
+            return result
+
+        # ===== 真应用 (P2 promote + P3 demote) =====
+        # demote 是 destructive — 需 confirm_destructive
+        apply_demotes = confirm_destructive
+
+        # 1. demote (先降级腾位, 给 promote 留位)
+        if apply_demotes:
+            for d in demote_candidates:
+                ok = self._apply_demote_canonical(
+                    run_id=run_id,
+                    entity_id=d["entity_id"],
+                    reason=d["reason"],
+                    ts=ts,
+                )
+                if ok:
+                    result["applied"] += 1
+                    result["demoted_entity_ids"].append(d["entity_id"])
+                else:
+                    result["failed"] += 1
+
+        # 2. promote (限上限 — 已 demote 后计数)
+        demoted_set = set(result["demoted_entity_ids"])
+        effective_canonical = canonical_count - len(demoted_set)
+        if effective_canonical + len(candidates) > self._PROMOTE_MAX_CANONICAL:
+            slots = max(0, self._PROMOTE_MAX_CANONICAL - effective_canonical)
+        else:
+            slots = len(candidates)
+
+        for cand in candidates[:slots]:
+            ok = self._apply_promote_to_canonical(
+                run_id=run_id,
+                chunk_id=cand["chunk_id"],
+                signals=cand["signals"],
+                ts=ts,
+            )
+            if ok:
+                result["applied"] += 1
+                result["promoted_entity_ids"].append(cand["chunk_id"])
+            else:
+                result["failed"] += 1
+
+        # [P4] watermark 推进
+        if result["failed"] == 0:
+            self._l2_set("l2.last_run.promote", ts)
+            result["watermark_updated"] = True
+
+        return result
+
+    def _apply_promote_to_canonical(
+        self,
+        run_id: str,
+        chunk_id: str,
+        signals: Dict[str, Any],
+        ts: str,
+    ) -> bool:
+        """[P2 8/5] chunk → canonical_fact entity + evidence 关系.
+
+        §2.3 P2:
+          - 抽核心事实 (内容截断 ≤200 字 + 首句)
+          - id = "canonical:<slug(content 前 40 字)>"
+          - 建 evidence_chunk_id → 源 chunk 关系 (existing relation.evidence_chunk_id 字段)
+        """
+        try:
+            # 1. 取 chunk content
+            row = self._conn.execute(
+                "SELECT content, importance FROM chunks WHERE id = ? AND valid_until IS NULL",
+                (chunk_id,),
+            ).fetchone()
+            if not row:
+                raise RuntimeError(f"chunk {chunk_id} not found or soft-deleted")
+
+            content = row["content"]
+            # 核心事实: 内容截断 ≤200 字 + 首句 (第一句 80 字内)
+            first_sentence = content.split("。")[0].split(".")[0].strip()
+            if len(first_sentence) > 80:
+                first_sentence = first_sentence[:80]
+            core_fact = first_sentence[:200] if len(first_sentence) > 200 else first_sentence
+
+            # 2. slug id (取核心前 40 字, alphanumeric + underscore)
+            # [Part 2 review MEDIUM fix] 追加 chunk_id 短 hash 后缀, 防不同 chunk 共享
+            # 首 40 字导致 slug 撞 → silent overwrite canonical_fact summary.
+            import re as _re
+            slug = _re.sub(r"[^a-zA-Z0-9_]", "_", core_fact[:40]).strip("_")
+            if not slug:
+                # fallback: 用 chunk_id[:16] (原行为)
+                slug = chunk_id[:16]
+                entity_id = f"canonical:{slug}"
+            else:
+                # 6-char hash suffix (16M 空间足够) — 防 slug collision
+                import hashlib as _hl_slug
+                _hash_suffix = _hl_slug.md5(chunk_id.encode()).hexdigest()[:6]
+                entity_id = f"canonical:{slug}_{_hash_suffix}"
+
+            # 3. upsert canonical_fact entity (重要性沿用 chunk)
+            self._conn.execute(
+                """
+                INSERT INTO entities (id, kind, name, summary, importance, last_recalled)
+                VALUES (?, 'canonical_fact', ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    summary = excluded.summary,
+                    importance = MAX(importance, excluded.importance)
+                """,
+                (entity_id, core_fact, core_fact, row["importance"], ts),
+            )
+
+            # 4. 建 evidence 关系: entity ← chunk (relation.source_id=entity_id, target_id=entity_id, evidence_chunk_id=chunk_id)
+            # 用一个特殊 relation kind 'canonical_evidence_of' 避免冲突
+            # 注意: relations.id 是 INTEGER AUTOINCREMENT, 不能用 TEXT id — 用 chunk_id hash
+            # [Part 2 review LOW fix] 防 silent drop: hash collision 时改用 max+1, 且事后 verify INSERT 生效
+            import hashlib as _hl
+            rel_id_hash = int.from_bytes(
+                _hl.md5(f"{chunk_id}|{entity_id}".encode()).digest()[:4], "big", signed=False
+            )
+            max_row = self._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM relations"
+            ).fetchone()
+            base_id = rel_id_hash % (2**31) or (max_row[0] + 1)
+            # 试探 INSERT; 如因 id collision 失败, 退到 MAX+1
+            rel_id = base_id
+            for attempt in range(3):
+                try:
+                    self._conn.execute(
+                        """
+                        INSERT INTO relations
+                            (id, source_id, target_id, relation, weight, valid_from, evidence_chunk_id)
+                        VALUES (?, ?, ?, 'canonical_evidence_of', 1.0, ?, ?)
+                        """,
+                        (rel_id, entity_id, entity_id, ts, chunk_id),
+                    )
+                    break
+                except sqlite3.IntegrityError:
+                    rel_id = max_row[0] + 1 + attempt + 1
+            else:
+                raise RuntimeError(
+                    f"evidence relation insert failed after 3 attempts for {chunk_id}|{entity_id}"
+                )
+
+            # 5. audit_log applied
+            self._conn.execute(
+                """
+                INSERT INTO audit_log
+                    (run_id, pass_name, action_type, ref_type, ref_id,
+                     before_json, after_json, confidence, llm_used, status,
+                     created_at, revert_sql)
+                VALUES (?, 'promote', 'promote_to_canonical', 'chunk', ?,
+                        NULL, ?, 1.0, 0, 'applied', ?, ?)
+                """,
+                (
+                    run_id, chunk_id,
+                    json.dumps({
+                        "entity_id": entity_id,
+                        "core_fact": core_fact,
+                        "signals": signals,
+                    }, ensure_ascii=False),
+                    ts,
+                    f"DELETE FROM relations WHERE id='{rel_id}'; "
+                    f"UPDATE entities SET valid_until='{ts}' WHERE id='{entity_id}' AND valid_until IS NULL;",
+                ),
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            self._conn.rollback()
+            return False
+
+    def _apply_demote_canonical(
+        self,
+        run_id: str,
+        entity_id: str,
+        reason: str,
+        ts: str,
+    ) -> bool:
+        """[P3 8/5] canonical_fact 降级 → concept (kind 变更走版本链).
+
+        §2.3 P3: supersede 为普通 concept; 历史保留.
+        简化实现: kind 变更 (canonical_fact → concept) — valid_until IS NULL 保留可逆.
+        """
+        try:
+            # 取旧 kind
+            row = self._conn.execute(
+                "SELECT kind FROM entities WHERE id = ? AND valid_until IS NULL",
+                (entity_id,),
+            ).fetchone()
+            if not row:
+                raise RuntimeError(f"canonical_fact entity {entity_id} not found")
+            old_kind = row["kind"]
+
+            # 更新 kind (P3 §2.3 简化实现: 不拆 entity, 只改 kind 标签)
+            self._conn.execute(
+                "UPDATE entities SET kind = 'concept' WHERE id = ?",
+                (entity_id,),
+            )
+
+            self._conn.execute(
+                """
+                INSERT INTO audit_log
+                    (run_id, pass_name, action_type, ref_type, ref_id,
+                     before_json, after_json, confidence, llm_used, status,
+                     created_at, revert_sql)
+                VALUES (?, 'promote', 'demote_canonical', 'entity', ?,
+                        ?, ?, 1.0, 0, 'applied', ?, ?)
+                """,
+                (
+                    run_id, entity_id,
+                    json.dumps({"kind": old_kind}, ensure_ascii=False),
+                    json.dumps({"kind": "concept", "reason": reason}, ensure_ascii=False),
+                    ts,
+                    f"UPDATE entities SET kind='{old_kind}' WHERE id='{entity_id}';",
+                ),
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            self._conn.rollback()
+            return False
 
     # audit_log GC 默认 retention (8/4 review §3 L2 hygiene GC)
     _AUDIT_GC_APPLIED_DAYS = 90

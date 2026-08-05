@@ -274,7 +274,7 @@ TOOLS = [
             "properties": {
                 "passes": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["hygiene"]},
+                    "items": {"type": "string", "enum": ["hygiene", "promote"]},
                     "default": ["hygiene"],
                 },
                 "dry_run": {"type": "boolean", "default": True},
