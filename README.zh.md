@@ -35,7 +35,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 - **memory_type 类型谱系**——每条记忆自动分类（fact / preference / episode / decision / procedure / ephemeral），**零 LLM 规则分类器**，支持简体/繁體/英文
 - **L2 自主维护层（可选）**——卫生 pass（importance 衰减、按类型 TTL、purge 候选）+ 完整 **audit_log + undo** 审计链；事实晋升（高频记忆升为 canonical_fact）
 - **会话状态摘要**——500–2000 字"当前状态"摘要，会话开场自动注入（Claude Code SessionStart 钩子 / MCP resource）
-- **向量后端（必选二选一，8/6）**——运行时必须 `usearch`（HNSW，任意 CPU，f16）或 `zvec`（HNSW + 原生 FTS + INT8，AVX2+）；`sqlite_vec` 已出局
+- **向量后端**——运行时必须 `usearch`（HNSW，任意 CPU，f16）或 `zvec`（HNSW + 原生 FTS + INT8，AVX2+）
 
 **为什么 4 路召回赢**：每路互补盲区——向量漏字面（商品/品类代码）、meta 漏语义改写、graph 漏无实体链接的孤儿 chunk、entity 漏长文。四路并行（WAL 并发读，p50 = **18 ms** / p95 = **24 ms** @ zvec 0.6 ~5k 向量，8/6 实测），RRF 无需分数归一化融合。见 [🔀 什么是 RRF？](#-什么是-rrf)。
 
@@ -55,7 +55,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | **协议** | MCP over SSE（127.0.0.1:8086）——**14 个工具**，Bearer 认证 |
 | **延迟（热）** | p50 = **18 ms**，p95 = **24 ms**（zvec 0.6 @ 5k 向量，4 路并发，8/6 实测） |
 | **代码量** | ~4000 行 Python（memory.py + 分类器 + 检索适配器 + scripts + client） |
-| **依赖** | 3 个核心 pip（`mcp[cli]`、`usearch`、`fastembed`）+ 1 个 legacy pip（`sqlite-vec`，仅 vec0 表）+ 1 个可选 pip（`zvec` AVX2+）；embedding 模型（`BAAI/bge-small-zh-v1.5`，~92 MB）首次使用时由 fastembed 自动下载 |
+| **依赖** | 3 个核心 pip（`mcp[cli]`、`usearch`、`fastembed`）+ 1 个工具辅助 pip（`sqlite-vec`，vec0 表）+ 1 个可选 pip（`zvec` AVX2+）；embedding 模型（`BAAI/bge-small-zh-v1.5`，~92 MB）首次使用时由 fastembed 自动下载 |
 | **双语** | 中英一等公民；分类器支持简体/繁體/英文 |
 
 ---
@@ -139,7 +139,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 | **usearch** | 任意 | HNSW（真 ANN） | 更大规模 / 旧 CPU 上更快 |
 | **zvec** | **AVX2+** | HNSW + 原生 FTS（BM25 + jieba 中文） | 规模 + 全文检索 |
 
-`[search] backend = 'auto'`（默认）→ zvec（CPU 支持时）> usearch；两者都不可用 → RuntimeError（向量库必选）。sqlite_vec 已出局。见 [部署矩阵](#-向量后端部署矩阵)。
+`[search] backend = 'auto'`（默认）→ zvec（CPU 支持时）> usearch；两者都不可用 → RuntimeError（向量库必选）。见 [向量后端](#-向量后端)。
 
 ---
 
@@ -230,7 +230,7 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 - 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想改 health_check 的报告目录，用 `MNELO_CRON_OUTPUT_DIR`（默认 `$MNELO_MEMORY_DIR/cron/output`，每次运行会重建）。
 
 **2. 按实际机器选择向量后端（8/6 后端 = 必选二选一）。**
-- 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU） → `sqlite_vec`（已淘汰，仅 legacy vec0 表）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要。
+- 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要；两者都不可用 → `RuntimeError`。
 - **`zvec`** 跑原生全文（BM25 + jieba 中文）+ INT8 HNSW，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
 - **`usearch`** 任意 CPU，HNSW + f16 量化，老 CPU 兜底。
 - `config.toml` `[search] backend = 'auto'|'zvec'|'usearch'` 或 env `MNELO_MEMORY_SEARCH_BACKEND` 显式指定。
@@ -336,8 +336,6 @@ python scripts/repair_index.py --backend zvec       # 清孤儿向量（chunk �
 python scripts/rebuild_index.py --backend zvec --dry-run
 ```
 
-`sqlite-vec` 仍装在 `requirements.txt` 里——但只给 `migrate` / `repair` / `init_db` 工具留 vec0 虚拟表用，不再做 runtime 后端，不进工厂兜底链。
-
 ---
 
 ## 📊 测评结果
@@ -429,7 +427,7 @@ mnelo/
 ├── memory.py            ← 核心 Memory 类（~1600 行）：CRUD + 4 路召回 + RRF
 │                           + L2（run_maintenance / audit / digest / promote）
 ├── classify.py          ← P1a 规则分类器：memory_type 自动打标（简体/繁體/EN）
-├── search_index.py      ← SearchIndex 适配器：sqlite-vec / usearch / zvec 后端
+├── search_index.py      ← SearchIndex 适配器：usearch / zvec 后端（2 个 runtime）
 ├── mcp_server.py        ← MCP server（SSE），14 工具，Bearer 认证，/health
 ├── config.py            ← env > TOML > 默认（含 [search]、[digest]、[l2]）
 ├── schema.sql           ← 12 表，含 audit_log + memory_type/user_confirmed/processed_at
@@ -482,7 +480,7 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 | 组件 | 大小 | 必装？ | 备注 |
 |---|---|---|---|
 | **核心 pip 包** | ~3 MB | 必装 | `mcp[cli]`（MCP server + SSE 传输）、`usearch`（向量库兜底）、`fastembed`（embedding 加载） |
-| **Legacy pip**（`sqlite-vec`） | ~1 MB | 仅工具需要 | `vec0` 虚拟表给 `migrate` / `repair` / `init_db` 脚本用——不参与运行时检索 |
+| **工具辅助 pip**（`sqlite-vec`） | ~1 MB | 仅工具需要 | `vec0` 虚拟表给 `migrate` / `repair` / `init_db` 脚本用——不参与运行时检索 |
 | **可选 pip**（`zvec`） | ~60 MB native | 仅 AVX2+ 机器 | HNSW + 原生 FTS + INT8；装了就跑，没装自动回退 usearch |
 | **Embedding 模型** | ~92 MB | 首次运行必装 | `BAAI/bge-small-zh-v1.5`（中文特调）——由 fastembed 自动下载到 `~/.cache/huggingface/hub/`。可换 `bge-small-en-v1.5`（英文）或 `paraphrase-multilingual-MiniLM-L12-v2`（多语）通过 `config.toml [embedder]` |
 | **Python + MCP 运行时** | ~50 MB | 必装 | Python 3.11 + MCP SDK + onnxruntime |
@@ -541,7 +539,7 @@ MIT。见 [`LICENSE`](LICENSE)。
 ## 🙏 致谢
 
 - [usearch](https://github.com/unum-cloud/usearch) / [zvec](https://github.com/alibaba/zvec) — 向量后端（8/6 默认：`auto` 链 zvec→usearch）
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) — legacy vec0 表，仅迁移/修复工具用，不再做 runtime 后端
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) — vec0 虚拟表，`migrate` / `repair` / `init_db` 脚本使用
 - [fastembed](https://qdrant.github.io/fastembed) — 嵌入器封装
 - [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5) — 中文嵌入模型
 - [MCP](https://modelcontextprotocol.io) — 协议规范
