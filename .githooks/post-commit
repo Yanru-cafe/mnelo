@@ -1,5 +1,5 @@
 #!/bin/bash
-# mnelo post-commit hook — sync repo → live ~/.hermes/memory/
+# mnelo post-commit hook — sync repo → live 目录 (env MNELO_MEMORY_DIR > 默认 ~/.hermes/memory)
 # 让 repo HEAD 跟 live MCP server 代码永远一致 (root cause fix for "tests
 # 跑 live 而不是 repo" 类问题).
 #
@@ -18,7 +18,10 @@ set -euo pipefail
 umask 077
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-LIVE_ROOT="/Users/apple/.hermes/memory"
+# [8/5 fix] LIVE_ROOT 不再硬编码 — 与 config.py 一致: env MNELO_MEMORY_DIR > ~/.hermes/memory
+#   headless VPS 可能没导出 HOME — 用 `~` 经 passwd 解析, 不依赖 $HOME
+_HOME="$(printf '%s' ~)"
+LIVE_ROOT="${MNELO_MEMORY_DIR:-$_HOME/.hermes/memory}"
 LIVE_API="$LIVE_ROOT/api"
 LIVE_SCRIPTS="$LIVE_ROOT/scripts"
 LOG_PREFIX="[mnelo sync hook]"
@@ -170,7 +173,15 @@ done
 
 if [ "$HEALTH_CHECK" -eq 1 ] && [ -f "$LIVE_SCRIPTS/health_check.py" ]; then
     log "运行 health_check.py 验证 live server 还能跑..."
-    if /Users/apple/hermes-agent/venv/bin/python3 "$LIVE_SCRIPTS/health_check.py" 2>&1 | tail -5; then
+    # [8/5 fix] python 不再硬编码 — 优先 repo venv, 其次 live venv, 最后系统 python3
+    if [ -x "$REPO_ROOT/.venv/bin/python" ]; then
+        _PY="$REPO_ROOT/.venv/bin/python"
+    elif [ -x "$LIVE_ROOT/.venv/bin/python" ]; then
+        _PY="$LIVE_ROOT/.venv/bin/python"
+    else
+        _PY="python3"
+    fi
+    if "$_PY" "$LIVE_SCRIPTS/health_check.py" 2>&1 | tail -5; then
         ok "health_check 通过 ✓"
     else
         err "health_check 失败 — live server 可能有回归"
@@ -184,7 +195,11 @@ echo ""
 ok "sync 完成: $SYNCED 成功, $FAILED 失败"
 if [ $SYNCED -gt 0 ]; then
     log "⚠️  live server 还跑着旧的 import 缓存 — 改 memory.py/embedder.py/config.py 后必须重启:"
-    log "    launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp"
+    if command -v launchctl >/dev/null 2>&1; then
+        log "    launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp"
+    else
+        log "    (非 macOS) 重启 MCP server 以加载新代码"
+    fi
 fi
 
 exit $FAILED
