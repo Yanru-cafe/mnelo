@@ -27,6 +27,25 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "api"))
 
+
+def _bootstrap_venv() -> bool:
+    """若当前解释器缺 mcp 依赖 (如系统 python3), 用仓库 venv 重新执行自身.
+
+    SessionStart 钩子命令常用 `python3` (PATH 解析), 但 mnelo 的 mcp/starlette
+    依赖装在 venv 里 — 直接 import mnelo_client 会静默失败。这里自举:
+    mcp 不可导入 → os.execv 仓库 .venv/bin/python 重跑本脚本。
+    """
+    try:
+        import mcp  # noqa: F401  # 门禁依赖; mnelo_client 需要它
+
+        return False  # 当前解释器 OK
+    except ImportError:
+        pass
+    for vp in (_REPO_ROOT / ".venv" / "bin" / "python", _REPO_ROOT / "venv" / "bin" / "python"):
+        if vp.exists():
+            os.execv(str(vp), [str(vp), str(Path(__file__).resolve())] + sys.argv[1:])
+    return False  # 无 venv → 走主流程, 由调用方容错
+
 # 摘要开关: MNELO_MEMORY_DIGEST_ENABLED=false 时静默 (与 config [digest] 一致)
 _DIGEST_ENABLED = os.environ.get("MNELO_MEMORY_DIGEST_ENABLED", "true").lower() not in (
     "false", "0", "no", "off"
@@ -36,6 +55,8 @@ _DIGEST_ENABLED = os.environ.get("MNELO_MEMORY_DIGEST_ENABLED", "true").lower() 
 def main() -> int:
     if not _DIGEST_ENABLED:
         return 0
+    if _bootstrap_venv():
+        return 0  # 已 re-exec, 不会到这
     try:
         from mnelo_client import MneloClient
 
