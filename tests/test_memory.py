@@ -25,15 +25,17 @@ from datetime import datetime, timedelta
 # 过滤 shim 的 DeprecationWarning
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# === 路径 ===
-sys.path.insert(0, "/Users/apple/.hermes/memory")
-sys.path.insert(0, "/Users/apple/.hermes/memory/api")
-sys.path.insert(0, "/Users/apple/.hermes/memory/scripts")
+# === 路径 (仓库相对, 不用作者专属绝对路径) ===
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "api"))
+sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
 from memory import Memory, generate_id, now
 from entity_resolve import find_duplicate_candidates, merge_entities
 
-DB_PATH = Path("/Users/apple/.hermes/memory/memory.db")
+# [8/6 fix] 原硬编码 /Users/apple/.hermes/memory/memory.db — 改为仓库相对 (未实际使用)
+DB_PATH = _REPO_ROOT / "memory.db"
 
 
 class TestMemoryCRUD(unittest.TestCase):
