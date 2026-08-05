@@ -124,6 +124,8 @@ def backup(snapshot_dir: Path, retention: int, dry_run: bool = False, force: boo
 
     if not dry_run:
         snapshot_dir.mkdir(parents=True, exist_ok=True)
+        # [8/5 fix] 快照含 KG/PII — 目录收紧到 0700 (仓库 P0-1 政策)
+        os.chmod(snapshot_dir, 0o700)
 
     # force 模式下, 如果同 ts 已有快照, 加秒后缀强制唯一
     base_ts = _timestamp()
@@ -176,6 +178,10 @@ def backup(snapshot_dir: Path, retention: int, dry_run: bool = False, force: boo
     sha = _sha256_file(gz_path)
     sha_path.write_text(f"{sha}  {gz_path.name}\n")
 
+    # [8/5 fix] 快照文件收紧到 0600 — 仓库 P0-1 政策 (KG/PII 不该对本地其他 user 可读)
+    os.chmod(gz_path, 0o600)
+    os.chmod(sha_path, 0o600)
+
     # 4. Retention
     pruned = _prune_old(snapshot_dir, retention)
 
@@ -199,7 +205,16 @@ def main():
                     help="覆盖 config [backup] snapshot_dir")
     ap.add_argument("--retention", type=int, default=None,
                     help="覆盖 config [backup] retention (保 N 份)")
+    ap.add_argument("--scheduled", action="store_true",
+                    help="调度调用 (cron/plist) — 尊重 [backup] enabled, disabled 时跳过")
     args = ap.parse_args()
+
+    # [8/5 fix] scheduled 调用尊重 enabled: [backup] enabled=false 或 env=false → 跳过.
+    # 手动调用 (不带 --scheduled) 不受限 — 随时可做一次性备份.
+    if args.scheduled and not _config.backup_enabled:
+        print("backup disabled — [backup] enabled 未开启 (scheduled run 跳过). "
+              "设 MNELO_MEMORY_BACKUP_ENABLED=true, 或去掉 --scheduled 手动备份.")
+        return 0
 
     cfg = _read_backup_config()
     snap_dir = Path(args.snapshot_dir) if args.snapshot_dir else cfg["snapshot_dir"]

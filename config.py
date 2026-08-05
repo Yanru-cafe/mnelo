@@ -94,6 +94,21 @@ def _resolve_tz(value: Optional[str]) -> str:
     return value
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse a boolean env var the way people actually type it.
+
+    '1'/'true'/'yes'/'on' (case-insensitive) → True; anything else, including
+    '0'/'false'/'no'/'' → False. Missing env → default.
+
+    [8/5 fix] 不能用 bool(os.environ.get(...)) — 非空字符串都是 truthy,
+    'false'/'0' 会错误地变成 True.
+    """
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 class Config:
     """Loaded config singleton."""
 
@@ -162,14 +177,17 @@ class Config:
             os.environ.get("MNELO_MEMORY_BACKUP_SNAPSHOT_DIR")
             or backup_section.get("snapshot_dir")
         )
-        self.backup_retention = int(
-            os.environ.get("MNELO_MEMORY_BACKUP_RETENTION")
-            or backup_section.get("retention", 30) or 30
-        )
-        self.backup_enabled = bool(
-            os.environ.get("MNELO_MEMORY_BACKUP_ENABLED")
-            or backup_section.get("enabled", False)
-            or False
+        _ret_env = os.environ.get("MNELO_MEMORY_BACKUP_RETENTION")
+        if _ret_env is not None:
+            try:
+                self.backup_retention = int(_ret_env)
+            except ValueError:
+                self.backup_retention = 30
+        else:
+            self.backup_retention = int(backup_section.get("retention", 30) or 30)
+        # [8/5 fix] 布尔 env 显式解析, 否则 'false'/'0' 会变成 True
+        self.backup_enabled = _env_bool(
+            "MNELO_MEMORY_BACKUP_ENABLED", backup_section.get("enabled", False)
         )
 
         # [zvec 集成] SearchIndex 后端 (DESIGN §3.6/§8.3):

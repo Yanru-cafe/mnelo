@@ -216,11 +216,24 @@ TOML
                 else
                     warn "backup plist 模板不存在: $BACKUP_PLIST_SRC (跳过)"
                 fi
+            else
+                # [8/5 fix] Linux/VPS 原实现不装任何调度 — 补 crontab 周三+周日 03:00.
+                # 内联 MNELO_MEMORY_DIR, 因为 cron 环境不 source ~/.profile.
+                CRON_BACKUP="MNELO_MEMORY_DIR=$LIVE_ROOT $VENV_PY $REPO_ROOT/scripts/backup_db.py --scheduled"
+                if crontab -l 2>/dev/null | grep -q "backup_db.py --scheduled"; then
+                    ok "backup cron 已存在, 跳过"
+                else
+                    mkdir -p "$LIVE_ROOT/logs"
+                    ( crontab -l 2>/dev/null | grep -v "backup_db.py"; \
+                      echo "0 3 * * 0,3 $CRON_BACKUP >> $LIVE_ROOT/logs/mnelo.backup.log 2>&1" ) | crontab -
+                    ok "backup cron 已装 (周三+周日 03:00)"
+                    log "备份日志: tail -f $LIVE_ROOT/logs/mnelo.backup.log"
+                fi
             fi
             ;;
     esac
 else
-    log "非交互模式 / 跳过备份询问 (设 MNELO_MEMORY_BACKUP_SKIP_PROMPT=0 强制 prompt)"
+    log "非交互模式 或 MNELO_MEMORY_BACKUP_SKIP_PROMPT=1 — 跳过备份询问 (交互终端才会提示)"
 fi
 
 ok "✅ install 完成"

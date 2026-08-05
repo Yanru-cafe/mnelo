@@ -42,6 +42,21 @@ def _read_backup_config():
     return snap_dir
 
 
+def _server_running(port: int | None = None) -> bool:
+    """MCP server 是否在监听 127.0.0.1:port.
+
+    [8/5 fix] restore 到 live db 前必须确认 server 已停 — server 持有旧 inode,
+    运行中替换会把它后续写入导向已删文件, 静默丢失.
+    """
+    port = port if port is not None else int(getattr(_config, "server_port", 8086) or 8086)
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def _verify_sha256(gz_path: Path) -> tuple[bool, str]:
     """Return (ok, sha256_hex)."""
     # backup_db.py 写的是 <ts>.db.gz.sha256 (gzip + 显式 .sha256 后缀),
@@ -149,8 +164,12 @@ def restore(
     ts: str | None,
     target: Path | None = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict:
-    """Run one restore. Returns stats dict."""
+    """Run one restore. Returns stats dict.
+
+    force: MCP server 运行时也强制替换 live db (恢复后必须重启 server).
+    """
     target = Path(target) if target else _expand(_config.db_path)
     gz_path = _select_snapshot(snapshot_dir, ts)
     report = {"selected": str(gz_path), "target": str(target), "dry_run": dry_run}
@@ -169,6 +188,8 @@ def restore(
         tmp.unlink()
     with gzip.open(gz_path, "rb") as f_in, tmp.open("wb") as f_out:
         shutil.copyfileobj(f_in, f_out, length=1 << 20)
+    # [8/5 fix] tmp 也是 KG 数据 — 0600; os.replace 后目标继承此权限
+    os.chmod(tmp, 0o600)
 
     try:
         check = _integrity_check(tmp)
@@ -186,6 +207,19 @@ def restore(
         if dry_run:
             return report
 
+        # [8/5 fix] live db 恢复前检查 MCP server — 运行中替换会把 server 的
+        # 后续写入导向已删 inode, 静默丢失.
+        if target == _expand(_config.db_path) and _server_running():
+            if not force:
+                port = int(getattr(_config, "server_port", 8086) or 8086)
+                report["error"] = (
+                    f"MCP server 仍在运行 (127.0.0.1:{port}) — 直接替换 live db "
+                    f"会丢失 server 的后续写入。请先停止 server 再恢复, "
+                    f"或 --force 明确覆盖 (恢复后必须重启 server)。"
+                )
+                return report
+            report["warning"] = "MCP server 仍在运行 — 恢复后必须重启 server 才能生效"
+
         # 3. 隔离当前 db
         corrupt = _isolate(target)
         if corrupt:
@@ -196,6 +230,11 @@ def restore(
         # 4. 原子替换 (从 tmp → target)
         try:
             os.replace(tmp, target)
+            # [8/5 fix] 清掉属于旧 db 的 WAL/SHM — 残留的 -wal 会被新 db 误应用
+            for suffix in ("-wal", "-shm"):
+                stale = target.parent / (target.name + suffix)
+                if stale.exists():
+                    stale.unlink(missing_ok=True)
             report["restored"] = str(target)
         except Exception:
             # 失败: 从 corrupt 恢复
@@ -220,6 +259,8 @@ def main():
                     help="覆盖 config [backup] snapshot_dir")
     ap.add_argument("--target", type=Path, default=None,
                     help="恢复目标路径 (默认 live db 路径)")
+    ap.add_argument("--force", action="store_true",
+                    help="MCP server 运行时也强制恢复 (恢复后必须重启 server)")
     args = ap.parse_args()
 
     snap_dir = Path(args.snapshot_dir) if args.snapshot_dir else _read_backup_config()
@@ -238,7 +279,7 @@ def main():
         return 2
     ts = args.ts if args.ts else None
 
-    report = restore(snap_dir, ts, target=args.target, dry_run=args.dry_run)
+    report = restore(snap_dir, ts, target=args.target, dry_run=args.dry_run, force=args.force)
     print(report)
     if report.get("error"):
         return 1
