@@ -206,8 +206,8 @@ The agent handles venv creation, pip install, the embedding-model download, and 
 mnelo is a **generic agent memory system** — Hermes, Claude Code, Cursor, or any MCP client use it directly. The digest rides **standard MCP** (initialize + resource), so injecting it at session start needs **no per-client code**:
 
 ```toml
-# 默认路径: 假如本机是 hermes agent, 装在 ~/.hermes/memory/config.toml — works for ANY MCP client:
-# 其他 agent (Claude Code/Cursor/...) 用 $HOME/mnelo-data/config.toml 或自定 path.
+# Default install dir: any visible workspace-adjacent folder (e.g. $HOME/mnelo-data).
+# Override via MNELO_MEMORY_DIR; works for ANY MCP client:
 [digest]
 inject_on_initialize = true   # digest rides the MCP initialize response
 ```
@@ -221,13 +221,13 @@ Either way, your agent opens each session already knowing the current memory sta
 
 ## 🤖 For AI agents (adopt mnelo as your memory)
 
-If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for your user, follow these operational steps:
+If you're an AI agent (Claude Code, Cursor, …) setting up mnelo for your user, follow these operational steps:
 
 **1. Choose the install directory (LIVE_ROOT) — propose options, let the user pick or customize.**
-- If you're running as **hermes agent** (default), the conventional path is `~/.hermes/memory` (hidden dot-dir in `$HOME`). It works, but hidden dirs are easy to lose track of and get mixed in with unrelated dotfiles.
-- For **other agents** (Claude Code, Cursor, …) the **recommended** path is a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<your workspace>/mnelo-data`. Keep it out of the repo you just cloned — memory data isn't source code.
+- The **recommended** path is a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<workspace>/mnelo-data`. Hidden dot-dirs under `$HOME` (like `~/.hermes/memory`) work too but are easy to lose track of.
+- Keep it out of the repo you just cloned — memory data isn't source code.
 - Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
-- Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To leave `.hermes` behind entirely, also redirect the health-check report dir with `MNELO_CRON_OUTPUT_DIR` (hermes-agent default `~/.hermes/cron/output`, recreated by `health_check.py` on every run; other agents pick a different one).
+- Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To customize the health-check report dir, override with `MNELO_CRON_OUTPUT_DIR` (default `$MNELO_MEMORY_DIR/cron/output`, recreated by `health_check.py` on every run).
 
 **2. Choose the vector backend — based on the actual machine.**
 - **`usearch`** (f16) works on any CPU — the default fallback.
@@ -478,11 +478,10 @@ Total disk for a fresh install: **~200 MB** (model is the bulk). After that, gro
 
 ## 🔄 Repo ↔ live sync (post-commit hook)
 
-mnelo has two copies of every `.py` / `.sql` file: the repo (default `~/projects/mnelo/`, configurable to wherever you cloned) and the live server dir. For **hermes-agent** the conventional live dir is `~/.hermes/memory/`; for other agents it's wherever you set `MNELO_MEMORY_DIR`. The repo ships a **post-commit hook** that syncs edited files to live, backs up the old version, and runs `health_check.py` after:
+mnelo has two copies of every `.py` / `.sql` file: the repo (whatever directory you cloned it into) and the live server dir (set via `MNELO_MEMORY_DIR`; defaults to `~/mnelo-data`). The repo ships a **post-commit hook** that syncs edited files to live, backs up the old version, and runs `health_check.py` after:
 
 ```bash
-# For hermes-agent:    cd ~/projects/mnelo && git config core.hooksPath .githooks
-# For other agents:    cd <your-clone-dir> && git config core.hooksPath .githooks
+cd <your-clone-dir> && git config core.hooksPath .githooks
 ```
 
 Skips `memory.db` / `config.toml` / `*.md` / `tests/` (by design). Restart the MCP server after sync: `launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp`.
