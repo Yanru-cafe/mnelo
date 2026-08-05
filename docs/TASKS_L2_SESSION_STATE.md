@@ -23,16 +23,33 @@ Claude Code / Hermes 每次开场自动注入 mnelo digest（身份 + 近期关�
 | `[digest] inject_on_initialize` config 键 | ⚠️ 存在（config.py:189）但死配置（无消费） |
 | Claude Code SessionStart 钩子 | ❌ 未建 |
 
-## 1.2 任务清单（Part 1）
+## 1.2 通用优先原则（v0.2 修订，主人指示）
+
+**mnelo 功能默认通用（任何 MCP 客户端可用），客户端专属件单列 + 附加说明。**
+
+- **通用层（primary，Hermes/Claude Code/Cursor 等任何 MCP 客户端都可用）**：S1 MCP 工具 / S2 客户端方法 / **S5 MCP initialize 注入**（协议级，天然通用）
+- **Claude Code 适配层（optional adapter，单列）**：S3 钩子脚本 + S4 SessionStart 钩子——是"通用 initialize 注入"在 Claude Code 上的**薄包装**，不是独立机制
+- **其它 agent 适配**：Hermes/Cursor 若要开场注入，走**同一个通用层**（S1+S5），各自配一层薄适配即可——**不为某个客户端新造机制**
+
+## 1.3 任务清单（Part 1）
+
+### 1.3A 通用层（primary，任何 MCP 客户端）
 
 | ID | 任务 | 依赖 | 验收 |
 |---|---|---|---|
 | **S1** | 注册 `memory_get_digest` MCP 工具 | — | 工具可调 |
 | **S2** | `MneloClient.get_digest()` 客户端方法 | S1 | 客户端可调 |
+| **S5** | **MCP initialize 注入（primary 注入路径，消费死配置键）** | S1 | 开关生效，任何 MCP 客户端收到 |
+| **S6** | 回归 + 容错测试 | S1/S2/S5 | 全绿 + 容错 |
+
+### 1.3B Claude Code 适配层（optional，单列）
+
+> **说明**：这层**只**为 Claude Code 服务（`.claude/settings.json` SessionStart 钩子是 Claude Code 机制）。它是在 S5 通用注入之上的薄适配；若走 S5 协议级注入，本层可完全跳过。
+
+| ID | 任务 | 依赖 | 验收 |
+|---|---|---|---|
 | **S3** | `scripts/session_start_digest.py` 钩子脚本（容错） | S2 | 独立可跑 |
 | **S4** | Claude Code `.claude/settings.json` SessionStart 钩子 | S3 | 会话开场注入 |
-| **S5** | (可选) G7 MCP initialize 注入（消费死配置键） | S1 | 开关生效 |
-| **S6** | 回归 + 容错测试 | S1-S5 | 全绿 + 容错 |
 
 ## 1.3 任务详述
 
@@ -100,19 +117,20 @@ except Exception:
 - **注意**：Claude Code 钩子以**用户完整权限**执行（安全审计：这是只读调 mnelo，无副作用）
 - **验收**：新开会话 → 上下文出现 `[mnelo-digest]` 块；`/clear` 后重启也有
 
-### S5 — (可选) G7 MCP initialize 注入
+### S5 — MCP initialize 注入（primary 通用路径，v0.2 升级）
 
-- 消费 `config.digest_inject_on_initialize`（现在死配置）
-- MCP initialize 响应（或首条通知）附带 digest——适合 MCP 客户端而非 shell 钩子场景
-- 与 S4 二选一或并存：S4 是 Claude Code 专用；S5 是通用 MCP 客户端
-- **验收**：`inject_on_initialize=true` → initialize 含 digest；false → 不含
+- 消费 `config.digest_inject_on_initialize`（现在死配置）——**这是主注入路径，任何 MCP 客户端都收到**
+- MCP initialize 响应（或首条通知）附带 digest——协议级，Hermes/Claude Code/Cursor 通用
+- **与 S4 关系**：S5 通用、S4 Claude Code 专属。**优先 S5**；S4 只在需要"比 initialize 更细的会话粒度注入"时才加（薄适配）
+- **验收**：`inject_on_initialize=true` → 任意 MCP 客户端 initialize 含 digest；false → 不含
 
 ### S6 — 回归 + 容错测试
 
 - `pytest tests/` 全绿
 - 新测试 `tests/test_session_state.py`：
   - digest MCP 工具双模式
-  - 钩子脚本 mnelo 跑/停两种状态（停 → 静默 exit 0）
+  - S5 initialize 注入（开关 true/false 两态）
+  - S3 钩子脚本 mnelo 跑/停两种状态（停 → 静默 exit 0）
   - 摘要注入不破坏现有 6 核心接口
 
 ---
@@ -184,10 +202,11 @@ LIMIT 20
 ## 3. 执行顺序与依赖
 
 ```
-Part1: S1 → S2 → S3 → S4 → (S5) → S6
+Part1 通用层: S1 → S2 → S5 → S6     ← 主路径, 任何 MCP 客户端
+Part1 适配层: S3 → S4               ← 仅 Claude Code, 可选 (S5 通用够了就跳过)
 Part2: P1 → P2 → P3 → P4 (依赖 H0 audit 基建, 已实现 448af0b)
 ```
-**分批 commit**：Part1 ① S1-S2（工具+客户端）② S3-S4（钩子+注入）③ S6（回归）；Part2 ① P1-P2（信号+晋升）② P3（降级+上限）③ P4（审计链）
+**分批 commit**：Part1 ① S1-S2（工具+客户端）② S5（通用注入，主路径）③ S3-S4（Claude Code 适配层，可选）④ S6（回归）；Part2 ① P1-P2（信号+晋升）② P3（降级+上限）③ P4（审计链）
 
 ---
 
