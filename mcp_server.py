@@ -728,38 +728,32 @@ def _build_sse_app(auth_token: str) -> "Starlette":
     Args:
         auth_token: 已加载的 Bearer token (不能为空)
     """
-    from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
-
-    class _BearerAuthMiddleware(BaseHTTPMiddleware):
-        """校验 Authorization: Bearer *** header. 用 hmac.compare_digest 防 timing attack."""
-
-        # [7/19 v0.5.3] Public paths (no auth required)
-        _PUBLIC_PATHS = frozenset({"/health", "/metrics"})
-
-        async def dispatch(self, request, call_next):
-            # Public paths: /health (健康检查) + /metrics (Prometheus scrape)
-            if request.url.path in self._PUBLIC_PATHS:
-                return await call_next(request)
-            # SSE + messages 路由都需 Bearer token
-            auth_header = request.headers.get("authorization", "")
-            if not verify_bearer(auth_header, auth_token):
-                logger.warning(
-                    f"rejected {request.method} {request.url.path} from "
-                    f"{request.client.host if request.client else '?'} - invalid/missing token"
-                )
-                return JSONResponse(
-                    {"error": "unauthorized", "detail": "Bearer token required"},
-                    status_code=401,
-                    headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp"'},
-                )
-            return await call_next(request)
 
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request):
+        from starlette.responses import JSONResponse, Response
+
+        # 不再用 BaseHTTPMiddleware (SSE 直发与其中间件 body_stream 不兼容),
+        # /sse 与 /messages/ 的 Bearer 鉴权各自独立实现, 这里自己校验.
+        auth_header = request.headers.get("authorization", "")
+        if not verify_bearer(auth_header, auth_token):
+            logger.warning(
+                f"rejected GET /sse from "
+                f"{request.client.host if request.client else '?'} - invalid/missing token"
+            )
+            return JSONResponse(
+                {"error": "unauthorized", "detail": "Bearer token required"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp"'},
+            )
+
         async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
+        # mcp SDK sse.py docstring: handle_sse 必须返回 Response, 否则 client 断开时
+        # starlette 调 None(...) 报 "TypeError: 'NoneType' object is not callable"
+        return Response()
 
     async def handle_health(request):
         """Public liveness/readiness endpoint with compact hygiene signals."""
@@ -835,15 +829,40 @@ def _build_sse_app(auth_token: str) -> "Starlette":
         body = reg.render()
         return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
+    async def handle_messages(scope, receive, send):
+        """/messages/ 的 Bearer 鉴权 ASGI 包装.
+
+        BaseHTTPMiddleware 包 SSE 端点会在断开时 body_stream 断言崩 (SSE 响应绕过
+        中间件 send_stream), 所以这里用纯 ASGI 写鉴权, 不经过 BaseHTTPMiddleware.
+        """
+        auth_header = ""
+        for k, v in scope.get("headers", []):
+            if k == b"authorization":
+                auth_header = v.decode("latin-1")
+                break
+        if not verify_bearer(auth_header, auth_token):
+            client = scope.get("client")
+            logger.warning(
+                f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from "
+                f"{client[0] if client else '?'} - invalid/missing token"
+            )
+            response = JSONResponse(
+                {"error": "unauthorized", "detail": "Bearer token required"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp"'},
+            )
+            await response(scope, receive, send)
+            return
+        await sse.handle_post_message(scope, receive, send)
+
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Route("/health", endpoint=handle_health),
             Route("/metrics", endpoint=handle_metrics),  # [7/19 v0.5.3] Prometheus
-            Mount("/messages/", app=sse.handle_post_message),
+            Mount("/messages/", app=handle_messages),
         ]
     )
-    app.add_middleware(_BearerAuthMiddleware)
     return app
 
 
