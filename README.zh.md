@@ -138,7 +138,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 | **usearch** | 任意 | HNSW（真 ANN） | 更大规模 / 旧 CPU 上更快 |
 | **zvec** | **AVX2+** | HNSW + 原生 FTS（BM25 + jieba 中文） | 规模 + 全文检索 |
 
-自动检测；`[search] backend` 切换；配置的后端不可用则**默认 fail-fast**（可用 `MNELO_MEMORY_ALLOW_FALLBACK=1` 放开降级）。见 [部署矩阵](#-向量后端部署矩阵)。
+自动检测；`[search] backend` 切换；配置的后端不可用则**自动降级**（zvec → usearch → sqlite_vec 子进程检测）。见 [部署矩阵](#-向量后端部署矩阵)。
 
 ---
 
@@ -150,7 +150,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 4. **通用优先**。功能默认协议通用（任何 MCP 客户端）；客户端专属胶水（如 Claude Code 钩子）是薄的、有文档的适配器——绝不新造机制。
 5. **无道德立场（amoral by design）**。mnelo 不评判内容（合法/涉密/冒犯）——只忠实存取。它守护的是**机制**（注入/身份/完整性），不是**内容**。
 6. **信息单源**。派生视图（摘要、canonical facts）绝不携带源 chunk 没有的信息。
-7. **boring & predictable**。无魔法。fail-fast 优于静默降级。显式选择优于意外默认。
+7. **boring & predictable**。无魔法。后端不可用时自动沿降级链回落（不是 fail-fast — 8/5 修订），但回落到哪一步要可见（日志 + `/health`）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
 8. **measured（实测）**。测评节所有数字可复现。
 
 ---
@@ -256,11 +256,21 @@ mnelo 的向量索引后端可插拔（[DESIGN §3.6/§8.3](docs/DESIGN.md)）�
 
 **部署规则**：
 - **不装** → 默认 `sqlite_vec`，全功能，零配置
-- **装了但 CPU 不支持**（如旧 VPS 上 `import zvec` 崩溃）→ mnelo **子进程检测**，**默认 fail-fast**（`MNELO_MEMORY_ALLOW_FALLBACK=1` 放开优雅降级）
+- **装了但 CPU 不支持**（如旧 VPS 上 `import zvec` 崩溃）→ mnelo **子进程检测**（安全，不带崩主进程）后**自动沿降级链回落**
 - **启用 usearch/zvec**：`pip install -r requirements-usearch.txt`（或 `-zvec.txt`）+ `config.toml` `[search] backend = 'usearch'|'zvec'`（或 env `MNELO_MEMORY_SEARCH_BACKEND`）
 - `scripts/health_check.py` 报告实际生效后端；`/health` 降级时给出维护建议
 
-> ⚠️ zvec 0.6 在 Ivy Bridge 之前的旧 x86_64 上 `import` 即崩——这些机器别装 zvec。
+**自动降级链（8/5 主人拍板）**：`build_search_index()` 工厂通过子进程 `import` 检测实现 **zvec → usearch → sqlite_vec** 级联——装一个就跑；工厂挑 import 成功的最高优先级后端。**不抛 fail-fast**：即使 CPU 跑不了 zvec，系统仍可用（装了 usearch 就 usearch，没装就 sqlite_vec）。工厂永远返回能跑的索引。
+
+**切换后端**（sqlite_vec → usearch/zvec）：必须从 chunks 全量重嵌：
+```bash
+python scripts/rebuild_index.py --backend usearch    # 全量重建
+python scripts/repair_index.py --backend usearch     # 清孤儿向量（chunk 删了但索引残留）
+# 或先 dry-run:
+python scripts/rebuild_index.py --backend usearch --dry-run
+```
+
+> ⚠️ zvec 0.6 在 Ivy Bridge 之前的旧 x86_64 上 `import` 即崩——这些机器别装 zvec。工厂会自动跳过它，但装一个跑不了的包是浪费磁盘。
 
 ---
 
