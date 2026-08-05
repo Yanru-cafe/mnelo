@@ -242,6 +242,12 @@ If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for yo
 
 **4. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
 
+**📌 Adding a new entity kind** (open taxonomy — no registration needed): entity `kind` is free-form; "adding a kind" simply means *starting to use it*. When the user introduces a new kind, record it as a convention and use it consistently:
+
+> Add a new entity kind: `product`, for product-related entities. When using `memory_remember` for products, pass `kind: 'product'` and keep naming/aliases consistent (e.g. id `product:sku-1024`). Record this convention in your CLAUDE.md/SOUL.md and use it consistently; filter product recalls with `kind: 'product'`.
+
+Optionally: add the kind to `[recall] boost_kinds` to give it the same recall boost as `stock`; backfill existing entities via `correct()` or a script.
+
 ---
 
 ## 🔎 Search backend (deployment matrix)

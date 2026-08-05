@@ -242,6 +242,12 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 
 **4. 验证** —— 跑 `scripts/health_check.py`（或访问 `/health`），确认 server ready 再宣布完成。
 
+**📌 新增实体 kind**（开放分类——无需注册）：实体 `kind` 是自由文本；"加一个 kind" 本质上就是**开始用它**。用户引入新 kind 时，把它记为约定并一致使用：
+
+> 新增一个实体 kind：`product`，用于记录产品/商品相关的实体。用 `memory_remember` 记录产品时，entities 里带 `kind: 'product'`，并保持命名与别名一致（如 id `product:sku-1024`）。把这个约定记到你的 CLAUDE.md/SOUL.md 并长期一致使用；产品召回时用 `kind: 'product'` 过滤。
+
+可选：把这个 kind 加进 `[recall] boost_kinds` 让它像 `stock` 一样召回浮顶；用 `correct()` 或脚本回填已有实体。
+
 ---
 
 ## 🔎 向量后端部署矩阵
