@@ -14,6 +14,22 @@
 
 A memory layer for AI agents. Remembers across **4 dimensions** — vector semantics, knowledge graph, full-text metadata, and entity identity — so every decision can be traced back to the conditions that produced it. One local SQLite file, shared by every local MCP client. **Zero cloud, zero lock-in.**
 
+## 🧭 What is this? (plain English, for non-technical readers)
+
+mnelo is a **memory for your AI assistant** — like a notebook your AI carries from one conversation to the next.
+
+- **It remembers you** — who you are, your preferences, the important facts.
+- **It remembers what's happening** — recent decisions, ongoing work.
+- **It files memories automatically** — no manual organizing needed.
+- **It keeps itself tidy over time** (optional) — stale stuff fades, expired stuff is cleaned up, and every change can be undone.
+- **It greets your AI each session** — a short "where things stand" summary, so your assistant starts every chat already knowing the context.
+
+It runs **entirely on your own computer** (a single local file). Nothing goes to the cloud, no account, no subscription.
+
+**If you're not technical**: you don't need to read the rest of this page. The setup is designed so you can hand this page to any AI coding agent (Claude Code, Cursor, …) and it will install mnelo for you — see [🤖 One-line agent install](#-one-line-agent-install). After that, your AI uses mnelo automatically.
+
+---
+
 **What's inside (2026-08):**
 - **4-way recall + RRF** — vector / graph / meta / entity lanes fused without score normalization
 - **memory_type taxonomy** — every memory auto-classified (fact / preference / episode / decision / procedure / ephemeral) by a zero-LLM rule classifier, bilingual (简体/繁體/EN)
@@ -186,6 +202,33 @@ inject_on_initialize = true   # digest rides the MCP initialize response
 - **Claude Code (optional adapter)**: agents that don't read the initialize resource can use the included **SessionStart hook** (`scripts/session_start_digest.py`, wired in `.claude/settings.json`). It is a thin adapter over the same generic mechanism — **fault-tolerant** (mnelo down → silent exit 0), **self-bootstrapping** (re-execs into the repo venv if `python3` resolves elsewhere), and emits a `[mnelo-digest]` fenced block (data, not instruction — DESIGN §12).
 
 Either way, your agent opens each session already knowing the current memory state — no recall needed.
+
+---
+
+## 🤖 For AI agents (adopt mnelo as your memory)
+
+If you're an AI agent (Claude Code, Hermes, Cursor, …) setting up mnelo for your user, follow these operational steps:
+
+**1. Choose the vector backend — based on the actual machine.**
+- Default **`sqlite-vec`** works on any CPU — use it unless there's a reason not to.
+- Larger scale or faster recall on an older CPU → **`usearch`** (any CPU).
+- **`zvec`** adds native full-text, but **requires AVX2+** — do **not** install it on old CPUs (it crashes on `import` there). Detect the CPU or ask.
+- Configure via `config.toml [search] backend` or env `MNELO_MEMORY_SEARCH_BACKEND`.
+
+**2. Ask the user about their primary language before picking an embedding model** (switching later requires re-initializing the DB — so ask *before* first use):
+- Chinese → `bge-small-zh-v1.5` (default, 512d)
+- English → `bge-small-en-v1.5` (384d)
+- Mixed / multilingual → `paraphrase-multilingual-MiniLM-L12-v2` (384d)
+
+**3. After install, update your own config to adopt mnelo as your memory system.** Add a note to your `SOUL.md` / `CLAUDE.md` (or equivalent):
+
+> **Memory**: I use the mnelo MCP server (SSE at `http://127.0.0.1:8086/sse`) as my memory system.
+> - `memory_remember` — persist important facts & decisions, with a type (`preference`, `decision`, …)
+> - `memory_recall` — retrieve before answering anything that might not be in context
+> - `memory_get_digest` / `memory://session/digest` — the session-state summary injected at start
+> Keep mnelo running. If it's down, work without it and note the memory gap.
+
+**4. Verify** — run `scripts/health_check.py` (or hit `/health`) and confirm the server is ready before declaring done.
 
 ---
 
