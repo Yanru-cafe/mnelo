@@ -43,16 +43,30 @@ def _load_embedding(content: str) -> bytes:
 
 
 def _unlink_existing_index_files(db_path: Path) -> dict:
-    """[8/6 plan §6] fresh=True 时清掉旧索引文件, 避免残留 rowid 干扰."""
+    """[8/6 plan §6] fresh=True 时清掉旧索引文件, 避免残留 rowid 干扰.
+    [8/6 fix] zvec 0.6 collection 是目录不是文件, 用 shutil.rmtree 替代 unlink.
+    """
+    import shutil
     removed = []
-    for name in ("usearch.index", "search_index.zv"):
-        p = db_path.parent / name
-        if p.exists():
-            try:
-                p.unlink()
-                removed.append(str(p))
-            except OSError as e:
-                print(f"[rebuild] failed to unlink {p}: {e}", file=sys.stderr)
+    # usearch: 单文件 .index
+    p_usearch = db_path.parent / "usearch.index"
+    if p_usearch.exists():
+        try:
+            p_usearch.unlink()
+            removed.append(str(p_usearch))
+        except OSError as e:
+            print(f"[rebuild] failed to unlink {p_usearch}: {e}", file=sys.stderr)
+    # zvec: collection 目录
+    p_zvec = db_path.parent / "search_index.zv"
+    if p_zvec.exists():
+        try:
+            if p_zvec.is_dir():
+                shutil.rmtree(p_zvec)
+            else:
+                p_zvec.unlink()
+            removed.append(str(p_zvec))
+        except OSError as e:
+            print(f"[rebuild] failed to remove {p_zvec}: {e}", file=sys.stderr)
     return {"removed": removed}
 
 
