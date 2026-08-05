@@ -380,6 +380,48 @@ $ python3 -m pytest tests/ -q
 
 ---
 
+## 🛡️ L2 自主维护层
+
+一个**可选**的层，让长期运行的记忆保持健康，**全程无 LLM**。状态存在 `meta` + `audit_log` 表里；CLI、MCP server、cron 都跑同一份代码。
+
+### 4 个 pass
+
+| Pass | 作用 | 副作用 |
+|---|---|---|
+| `hygiene` | `importance` 朝 floor (0.1) 衰减 + 按 `memory_type` 的 TTL（ephemeral 7 天 / fact 365 天 / preference 180 天 / episode+decision 730 天 / procedure 永久） | 默认软改，不破坏 |
+| `promote` | 高频 `fact` 升级为结构化 `canonical_fact` 实体 | 只追加（新建实体） |
+| `decay` | 内置在 `hygiene` 里——陈旧低 importance 降权，**绝不硬删** | 只改元数据 |
+| `audit_log_gc` | 修剪 1 年以上的 `audit_log` 条目（TASKS §3 L2 hygiene GC） | 只改元数据 |
+
+### 启用：默认关闭，翻一行 SQL
+
+```sql
+-- 默认不启用（DESIGN §5.7 opt-in 设计）：
+UPDATE meta SET value='1' WHERE key='l2.enabled';
+-- 可选：关掉 dry-run 安全网
+UPDATE meta SET value='0' WHERE key='l2.dry_run';
+
+-- 查状态：
+SELECT key, value FROM meta WHERE key LIKE 'l2.%';
+```
+
+或调 `memory_maintenance` MCP 工具——**默认 dry_run**（跟 meta 设置无关），cron 触发稳。
+
+### 安全保证
+
+- **`dry_run=true` 是默认值**。`hygiene` / `promote` 只产 proposal 不动 chunk；只有 `purge`（TTL 真删）需要显式 `confirm_destructive=true`。
+- **每提案独立事务**——坏提案不会毒害整批。
+- **每个动作落 `audit_log`**（`before/after` JSON + `revert_sql`）。用 `memory_audit_undo` 回滚。
+- **防重入**——`meta.l2.running=1` 期间阻断新一轮。
+
+### 实战数据
+
+一个线上实例（8/6）：累计 `audit_log` ~47 k 行，跨越多轮 L2 sweep。最近一次 `last_run_hygiene` 在快照前 1 小时，`audit_log_total=47408`。同实例 `hygiene` 跑完剩 `decay_floor_chunks=2259`（保存在 0.1）、`purge_backlog=2170`（等 destructive sweep）。
+
+用 `scripts/health_check.py`（或 `/health` 端点）看最新 `last_run_*`。`memory_stats` 也暴露同样指标。
+
+---
+
 ## 🏗 项目结构
 
 ```
@@ -476,7 +518,7 @@ cd <你的 clone 目录> && git config core.hooksPath .githooks
 | 单用户（无多租户） | 别把 8086 端口暴露到局域网 |
 | 无 PII 自动检测 | 别存密码 / token / 信用卡 |
 | bge-small-zh 中文特调 | 英文为主的工作负载换 `bge-small-en-v1.5` |
-| L2 自主层**默认关**（显式启用） | 准备好了再开 `[l2] enabled=true`，先 dry-run |
+| L2 自主维护层**默认关**（opt-in） | DESIGN §5.7 设计如此——默认关闭；`UPDATE meta SET value='1' WHERE key='l2.enabled'` 一行启用 |
 
 ---
 
