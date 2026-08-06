@@ -1386,21 +1386,37 @@ def list_stale_proposals(
     status: str = "proposed",
     limit: int = 50,
 ) -> Dict[str, Any]:
-    """[8/6 M5.2 + 8/6 fix] 列 stuck_task Proposal (DESIGN §4.4 上浮).
+    """[8/6 M5.2 + 8/6 fix + M34 fix] 列 stuck_task Proposal (DESIGN §4.4 上浮).
 
     [8/6 fix] status='proposed' 过滤排除已 resolved 的 Proposal (audit_log 中同
     ref_id 有 stale_resolved 行) — 让 propose/apply 闭环后 list_stale_proposals
     不再返回本 Proposal.
 
+    [M34 fix] status 白名单 - 拒绝 invalid 状态. 旧实现任意字符串都过 else 分
+    支当 SQL 参数, 静默返 'unfiltered' 行迷惑 caller. 显式抛错.
+
     Args:
         conn: open sqlite3.Connection.
-        status: 'proposed' / 'applied' / 'reverted'.
+        status: 'proposed' / 'applied' / 'reverted' / 'all'.
         limit: 上限.
 
     Returns:
         {"proposals": [{"id", "run_id", "ref_id", "action_type",
                         "after_json", "status", "created_at"}], "count": int}
+
+    Raises:
+        TaskLoopError: status 不在白名单.
     """
+    if status not in ("proposed", "applied", "reverted", "all"):
+        raise TaskLoopError(
+            f"status {status!r} 不在白名单 (proposed/applied/reverted/all)",
+            field="status", code="InvalidStatusError",
+        )
+    if not isinstance(limit, int) or limit < 1 or limit > 1000:
+        raise TaskLoopError(
+            f"limit 必须 1-1000 整数, got {limit!r}",
+            field="limit", code="InvalidLimitError",
+        )
     if status == "proposed":
         # 排除已 resolved (有 stale_resolved 行的 ref_id)
         rows = conn.execute(
@@ -1413,6 +1429,15 @@ def list_stale_proposals(
                      WHERE pass_name='stuck_task' AND action_type='stale_resolved'
                        AND status='applied'
                  )
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    elif status == "all":
+        # [M34 fix] 'all' 白名单 - 审计追溯需要看所有阶段 (无 not-resolved 过滤)
+        rows = conn.execute(
+            """SELECT id, run_id, action_type, ref_id, after_json, status, created_at
+               FROM audit_log
+               WHERE pass_name='stuck_task'
                ORDER BY id DESC LIMIT ?""",
             (limit,),
         ).fetchall()
