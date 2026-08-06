@@ -45,3 +45,29 @@
   - **[低] transition() 关旧窗+开新窗在 autocommit 连接上非原子**
     - 位置: task_states.py:174-185
     - 问题: CAS 的 UPDATE（关旧窗）与 INSERT（开新窗）是两条语句；若调用方未包事务，UPDATE 立即提交，INSERT 失败（唯一索引/证据 FK 冲突）时旧窗已关 → task 变"无活动窗"，后续 transfer 报 TaskNotFoundError。当前调用方（测试/未来 M3 API）需自行保证事务包裹。
+
+## 2026-08-06 13:21 审查 e98de450..131aae4
+- 范围: e98de450..131aae4（共 3 个提交）
+- 提交:
+  - `afa3f779` fix(task-states): review-pass 6 项整改 (RF1-RF7) — 41/41 测试 pass
+  - `6714fd74` docs: scrub 2 '实战' filler in test_review_fixes.py (RF5 docstring)
+  - `131aae45` feat(mcp): M3 Step 8-11 — task_transition/list/replay + loop_create/tick (50/50 pass)
+- 结论: 发现 4 个问题（1 高 / 1 中 / 2 低）。测试声明 "41/41" 与 "50/50" 在本机不成立——`test_review_fixes.py` 有 2 个用例因硬编码 macOS 路径 FAIL（见[中] #2）。
+- 发现:
+  - **[高] MCP 层 task/loop 工具无事务回滚，RF3 失败路径泄漏孤儿行**
+    - 位置: mcp_server.py:432-433（`_handle_task_simple`：`func(...)` 后直接 `commit()`，异常无 `rollback`）
+    - 问题: `task_create`（task_states.py:693-717）在 INSERT entity + INSERT 状态窗之后才做 RF3 原子 UPDATE；当 UPDATE 命中 0 行（并发双 spawn 竞态，正是 RF3 要防的场景）或中途任何 SQL 异常时 raise，此前两行 INSERT 留在 sqlite3 默认隐式事务里未提交。`_call_tool`（mcp_server.py:650-663）的 `except Exception` 只返回错误 JSON，不 rollback。下一次任意成功的 tool call 的 `commit()` 会把孤儿 task entity + open 状态窗一并落库。
+    - 失败场景: 两个连接并发对同一 loop 调 `memory_task_create`（RF3 竞态窗口：pre-check SELECT 后、原子 UPDATE 前另一连接写入 `active_task_id`），后到者报 `LoopHasActiveTaskError` 错误，但其 task 实体 + 状态窗仍被下一次调用提交 → 记忆库出现"失败调用"产生的幻影 task，`memory_task_list` 可见、永远没有关联 loop。已用最小 sqlite 复现（UPDATE 0 行 → raise → 无 rollback → 下次 commit 孤儿行落库）。建议: `_handle_task_simple`/`_call_tool` 用 `with mem._conn:` 包裹（异常自动回滚），或 except 分支显式 `mem._conn.rollback()`。transition() 关旧窗后 INSERT 失败的同类路径同样受益。
+  - **[中] test_review_fixes.py 硬编码已删除的 `/Users/apple/.hermes/...` 绝对路径，2 个用例本机 FAIL**
+    - 位置: tests/test_review_fixes.py:237（test_rf5）与 :266（test_rf7）
+    - 问题: `concurrent_test = Path("/Users/apple/.hermes/memory/tests/test_task_states_concurrent.py")` 与 `Path("/Users/apple/.hermes/memory/task_states.py").read_text()` 引用的是项目历史中已"彻底移除"的旧记忆目录（CLAUDE.md 明示本机无 Hermes 残留）。仓库内真实文件在 `tests/test_task_states_concurrent.py` 与 `task_states.py`（repo-relative）。
+    - 失败场景: 本机 `pytest tests/test_review_fixes.py -q` → `test_rf5_concurrent_test_present_with_caveat`（断言路径存在，AssertionError）与 `test_rf7_list_typing_imported`（FileNotFoundError）FAIL，8 过 2 败。提交信息声称的 "41/41" / "50/50 pass" 在本机不成立；测试不可移植、非自包含。建议: 改用 `_REPO / "task_states.py"` 与 `_REPO / "tests" / "test_task_states_concurrent.py"`。
+  - **[低] `_slugify` docstring 示例为编造，与实现矛盾；RF2 测试名/注释仍称"拼音"**
+    - 位置: task_states.py:85-88（docstring 示例）、tests/test_review_fixes.py:145-148（test_rf2 名称与注释）
+    - 问题: docstring 声称 "更新 task 列表" → "e7b2f910"（hash 路径），但实现走 ASCII 路径返回 `"task"`（含英文字母即命中分支 1）；所列 md5 示例值全部与真实 `hashlib.md5(name.encode()).hexdigest()[:8]` 不符（如 "采购耗材" 实际 `a49a962a`，非 `3c8e2f1a`）。同时 test_rf2 名字/注释仍写"拼音 fallback / cai-gou-hao-cai"，而实现注释明确"弃 pinyin"改用 md5。
+    - 失败场景: 维护者据 docstring 推断中文名一律走 hash（含中英混合名），实际 "更新 task 列表" 得 `task:20260806-task` 且与纯 "task" 名同日起碰撞；docstring 与代码不符，误导后续改动。测试虽通过（仅断言前缀与长度），但命名/注释传递了错误的实现心智模型。
+  - **[低] RF1 只修了默认时间戳；`now` override 秒级精度仍可制造零长状态窗**
+    - 位置: task_states.py:69-72（`_default_now` 毫秒级）与 :221（`transition` 的 `ts = now or _default_now()`）
+    - 问题: 默认路径已提毫秒级，但 MCP 工具 `memory_task_transition`/`memory_task_create` 仍公开暴露 `now` 覆盖参数且不校验精度。同一 task 连续两次 transition 传入相同秒级 `now`（如均 `"2026-08-06T10:00"`），仍产生 `valid_from == valid_until` 的零长窗——正是 RF1 与上轮[中]发现要消除的场景。
+    - 失败场景: 调用方带 `now` 秒级值快速两跳（如 A open→in_progress、B in_progress→waiting 同 now），`replay_task(asof='10:00')` 只见 open/waiting，in_progress 中间态在 asof 回放中不可见，核心设计卖点受损。建议: 工具层校验/拒绝秒级 `now`，或 transition CAS 时强制严格递增。
+- 测试: 本机运行 9 个受影响测试文件 → `45 passed, 2 failed`（fail 全部来自上述[中] #2 的两个路径用例）；`test_review_fixes.py` 8 过 2 败，其余 8 个 task/loop 测试文件 37 个用例全过，0 regression。
