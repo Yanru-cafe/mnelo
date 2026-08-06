@@ -108,8 +108,14 @@ def check_mcp_alive():
             pass
     if not pid_str:
         return (False, None, None)
+    # [M37 defensive] 解析 pid 一次, 后续复用避免 except 内重复 int(). 防御性
+    # 加固: 若 lsof 输出非数字 (理论场景; lsof -t 仅返 pid 数字, 实际行为不可触发),
+    # 不应再次 int() 再抛, 应如实在 except 内报 DOWN.
     try:
         pid = int(pid_str)
+    except (ValueError, TypeError):
+        return (False, None, None)
+    try:
         ps = subprocess.run(
             ["ps", "-p", str(pid), "-o", "etime="],
             capture_output=True, text=True, timeout=5,
@@ -118,7 +124,7 @@ def check_mcp_alive():
         uptime_sec = parse_etime(etime)
         return (True, pid, uptime_sec)
     except Exception:
-        return (True, int(pid_str), None)
+        return (True, pid, None)
 
 
 def parse_etime(s):
