@@ -5,7 +5,7 @@ RF1: 零长状态窗 — timestamp 毫秒级, 同秒 2-100ms 间隔转移, 状�
 RF2: 中文 slug 退化 — task:20260806-cai-gou-ye (拼音 fallback) 而非 task:20260806-task.
 RF3: task_create check-then-write 无 CAS — single UPDATE WHERE 控 active_task_id 设值.
 RF4: import re 在 docstring 之前 — module.__doc__ 应 != None.
-RF5: 并发 CAS 测试实为顺序模拟 — 后续拆分实战 (跟 task:tlm*-rf5 前缀).
+RF5: 并发 CAS 测试实为顺序模拟 — 后续拆分实测 (跟 task:tlm*-rf5 前缀).
 RF6: transition() 在 autocommit 下非原子 — 文档 + 接口显式要求事务包裹.
 RF7: List 未导入 — typing.List 导入生效, 函数签名注解不抛 NameError.
 """
@@ -230,7 +230,7 @@ def test_rf4_module_docstring_intact():
     assert "task_states" in ts_mod.__doc__.lower() or "状态" in ts_mod.__doc__
 
 
-# === RF5: 并发 CAS 测试实为顺序模拟 — 后续拆分实战 (验证现状) ===
+# === RF5: 并发 CAS 测试实为顺序模拟 — 后续拆分实测 (验证现状) ===
 
 def test_rf5_concurrent_test_present_with_caveat():
     """test_task_states_concurrent.py 仍存在, docstring 标 '顺序模拟'."""
