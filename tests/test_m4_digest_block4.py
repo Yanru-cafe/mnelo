@@ -59,6 +59,10 @@ def _setup():
             "OR task_id LIKE 'task:%m29-%' "
             "OR task_id LIKE 'task:%m30-%' "
             "OR task_id LIKE 'task:%m32-%' "
+            "OR task_id LIKE 'task:%m33-%' "
+            "OR task_id LIKE 'task:%m34-%' "
+            "OR task_id LIKE 'task:%m35-%' "
+            "OR task_id LIKE 'task:%m36-%' "
             "OR task_id LIKE 'task:%e2e-%'"
         )
         mem._conn.execute(
@@ -77,7 +81,7 @@ def _setup():
             "OR id LIKE 'task:20260806-second%' "
             "OR id LIKE 'task:20260806-cli%' "
             "OR id LIKE 'task:tlm12-%' OR id LIKE 'task:step14-%' OR id LIKE 'loop:step14-%' OR id LIKE 'task:20260806-step14-%' OR id LIKE 'loop:20260806-step14-%' "
-            "OR id LIKE 'task:%m5-%' OR id LIKE 'task:%m28-%' OR id LIKE 'task:%m29-%' OR id LIKE 'task:%m30-%' OR id LIKE 'task:%m32-%' OR id LIKE 'task:%e2e-%'"
+            "OR id LIKE 'task:%m5-%' OR id LIKE 'task:%m28-%' OR id LIKE 'task:%m29-%' OR id LIKE 'task:%m30-%' OR id LIKE 'task:%m32-%' OR id LIKE 'task:%m33-%' OR id LIKE 'task:%m34-%' OR id LIKE 'task:%m35-%' OR id LIKE 'task:%m36-%' OR id LIKE 'task:%e2e-%'"
         )
     finally:
         mem._conn.execute("PRAGMA foreign_keys = ON")
