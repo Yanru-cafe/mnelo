@@ -46,7 +46,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 | | |
 |---|---|
 | **Storage** | Single SQLite file (~45 MB @ 4498 entities / 4343 chunks, 2026-08 measured) |
-| **Vector backends** | `usearch` (HNSW, any CPU, f16) · `zvec` (HNSW+FTS+INT8, AVX2+) — mandatory 二选一 (8/6) |
+| **Vector backends** | `usearch` (HNSW, any CPU, f16) · `zvec` (HNSW+FTS+INT8, AVX2+) |
 | **Embedder** | `bge-small-zh-v1.5` (512-dim, CN-native; EN/multilingual swappable) |
 | **Recall** | 4-way hybrid: `vector + graph + meta + entity` → RRF fusion |
 | **Memory types** | fact / preference / episode / decision / procedure / ephemeral (auto-classified, zero-LLM) |
@@ -130,17 +130,6 @@ A **500–2000 char digest** (identity facts + recent key decisions + in-progres
 - Locale auto-detect (`MNELO_MEMORY_LANG` > `LC_ALL` > `LANG` > `en`)
 - Classifier handles 简体 / 繁體 / English (via char-map normalization)
 
-### 🔎 Vector backends (mandatory 二选一, 8/6)
-
-Vector library is **mandatory**: runtime backend must be `usearch` or `zvec`. Install one (`pip install 'usearch>=2.26'` or `zvec`) before first use.
-
-| Backend | CPU | Precision | Features | When |
-|---|---|---|---|---|
-| **zvec** | **AVX2+** | INT8 | HNSW + native FTS (BM25 + jieba 中文) | new CPUs (auto chain top) |
-| **usearch** | any | **f16** | HNSW (real ANN) | old CPUs / fallback |
-
-`[search] backend = 'auto'` (default) picks zvec → usearch; precision is baked in per backend. See the [deployment matrix](#-search-backend-deployment-matrix).
-
 ---
 
 ## 🛡 Design tenets
@@ -196,7 +185,7 @@ Non-technical? Skip all the steps above — hand this to any AI coding agent (Cl
 > **Install and adopt mnelo from https://github.com/chinesewebman/mnelo as my memory system:**
 > 1. Clone, set up the venv, `pip install -r requirements.txt`, run `scripts/init_db.py`, launch the MCP server on port 8086, and verify with `scripts/health_check.py` (report back when `MCP server ready`).
 > 2. **Ask me my primary language first** (中文 / English / mixed), then set the matching embedding model in `config.toml [embedder]` *before* first use (switching later requires re-initializing the DB).
-> 3. Vector backend is mandatory 二选一: `auto` (default) picks **`zvec`** if this CPU supports AVX2+ else **`usearch`** (f16). Configure via `config.toml [search] backend = 'auto'|'usearch'|'zvec'`.
+> 3. Vector backend: `auto` (default) picks **`zvec`** if this CPU supports AVX2+ else **`usearch`** (f16). Configure via `config.toml [search] backend = 'auto'|'usearch'|'zvec'`.
 > 4. After it's running, **update your own SOUL.md / CLAUDE.md** to declare: "I use the mnelo MCP server (`http://127.0.0.1:8086/sse`) as my memory system — `memory_remember` to persist, `memory_recall` to retrieve, `memory_get_digest` for the session digest."
 
 The agent handles venv creation, pip install, the embedding-model download, and the health probe. Typical install ~90s (the 92 MB model download is the slow part).
@@ -313,31 +302,27 @@ Write: `memory_remember(content, ..., memory_type='decision')` when you know it;
 
 ---
 
-## 🔎 Search backend (deployment matrix)
+## 🔎 Vector backends
 
-Vector index backend must be `usearch` or `zvec`. Pick based on the actual machine (see [Vector backends](#-vector-backends)).
+mnelo has 2 supported runtime vector backends ([DESIGN §3.6/§8.3](docs/DESIGN.md)):
 
-| Backend | CPU requirement | Precision | Features | When to use |
-|---|---|---|---|---|
-| **zvec** | **AVX2+** (M-series / 2020+ x86_64 / modern ARM) | INT8 | HNSW + native FTS (BM25 + jieba 中文) + INT8 quantization | new CPUs (auto chain top) |
-| **usearch** | any (hardware-agnostic) | **f16** | **HNSW** real ANN | old CPUs / fallback |
+| Backend | Quantization | When |
+|---|---|---|
+| **zvec** | INT8 | Modern CPUs (M-series / AVX2+); M2 measured 5k vectors p50=18ms |
+| **usearch** | f16 | Any CPU — fallback when zvec unavailable |
 
-**Deployment rules**:
-- `config.toml [search] backend = 'auto'` (default) → **zvec** if its CPU supports it, else **usearch**.
-- **zvec on an unsupported CPU** (e.g. `import zvec` crashes on an old VPS) → factory detects in a **subprocess** (safe — doesn't crash the host process) and uses usearch.
-- **Neither available** → `RuntimeError` — the vector library is a mandatory dependency (`pip install 'usearch>=2.26'` or `zvec`).
-- **Precision is baked in** per backend (zvec=INT8, usearch=f16), not configurable.
-- `scripts/health_check.py` reports the active backend + precision; `/health` surfaces maintenance recommendations when degraded.
+The `build_search_index()` factory detects via **main-process import** (macOS 26 launchd forks hit BlockingIOError running zvec native mmap, so we import in-process): zvec installed → zvec; otherwise usearch. If neither is installed → `RuntimeError` (a vector library is a mandatory dependency). **Default `auto` chain** — `config.toml [search] backend = 'auto'`; override via env `MNELO_MEMORY_SEARCH_BACKEND=zvec|usearch`.
 
-**Switching backends** (usearch ↔ zvec): requires full re-embed of all chunks:
+`scripts/health_check.py` reports the active backend; `/health` advises when it downgrades.
+
+**Switching backends** (zvec ↔ usearch; index formats are not interchangeable) requires a full re-embed from chunks:
+
 ```bash
-python scripts/rebuild_index.py --backend usearch --fresh   # full re-embed from chunks (fresh = unlink old index)
-python scripts/repair_index.py --backend usearch            # remove orphan vectors (chunk gone but index not)
-# Or dry-run first:
-python scripts/rebuild_index.py --backend usearch --dry-run
+python scripts/rebuild_index.py --backend zvec      # full re-embed
+python scripts/repair_index.py --backend zvec       # cleanup orphan vectors
+# or dry-run first:
+python scripts/rebuild_index.py --backend zvec --dry-run
 ```
-
-> ⚠️ zvec 0.6 on pre-Ivy-Bridge x86_64 crashes on `import` — don't install it there. The factory will skip it and fall back to usearch.
 
 ---
 

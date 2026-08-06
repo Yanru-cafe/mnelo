@@ -46,7 +46,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 | | |
 |---|---|
 | **存储** | 单 SQLite 文件（~45 MB @ 4498 entities / 4343 chunks，2026-08 实测） |
-| **向量后端** | `usearch`（HNSW，任意 CPU，f16）· `zvec`（HNSW+FTS+INT8，AVX2+）——必选二选一（8/6） |
+| **向量后端** | `usearch`（HNSW，任意 CPU，f16）· `zvec`（HNSW+FTS+INT8，AVX2+） |
 | **嵌入模型** | `bge-small-zh-v1.5`（512 维，中文原生；英文/多语可换） |
 | **召回** | 4 路混合：`vector + graph + meta + entity` → RRF 融合 |
 | **记忆类型** | fact / preference / episode / decision / procedure / ephemeral（零 LLM 自动分类） |
@@ -130,17 +130,6 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 - 语言自动检测（`MNELO_MEMORY_LANG` > `LC_ALL` > `LANG` > `en`）
 - 分类器处理简体 / 繁體 / 英文（字符映射归一化）
 
-### 🔎 可插拔向量后端
-
-| 后端 | CPU | 特性 | 何时用 |
-|---|---|---|---|
-| **zvec** | **AVX2+** | INT8 | HNSW + 原生 FTS（BM25 + jieba 中文）+ INT8 量化 | 新 CPU（auto 链上层） |
-| **usearch** | 任意 | **f16** | **HNSW** 真实 ANN | 旧 CPU / 兜底 |
-| **usearch** | 任意 | HNSW（真 ANN） | 更大规模 / 旧 CPU 上更快 |
-| **zvec** | **AVX2+** | HNSW + 原生 FTS（BM25 + jieba 中文） | 规模 + 全文检索 |
-
-`[search] backend = 'auto'`（默认）→ zvec（CPU 支持时）> usearch；两者都不可用 → RuntimeError（向量库必选）。见 [向量后端](#-向量后端)。
-
 ---
 
 ## 🛡 设计原则
@@ -151,7 +140,7 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 4. **通用优先**。功能默认协议通用（任何 MCP 客户端）；客户端专属胶水（如 Claude Code 钩子）是薄的、有文档的适配器——绝不新造机制。
 5. **内容中立（content-neutral by design）**。mnelo 不评判内容——只忠实存取调用方提供的任何数据。它守护的是**机制**（注入/身份/完整性），不是**内容**。
 6. **信息单源**。派生视图（摘要、canonical facts）绝不携带源 chunk 没有的信息。
-7. **boring & predictable**。无魔法。向量后端必选二选一（8/6）：zvec/usearch 都不可用时 fail-fast（RuntimeError）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
+7. **boring & predictable**。无魔法。zvec/usearch 两者都不可用时 fail-fast（RuntimeError）；其他场景仍 fail-fast（配置错误、SQL 错、token 过期等）。显式选择优于意外默认。
 8. **measured（实测）**。测评节所有数字可复现。
 
 ---
@@ -229,7 +218,7 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 - 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
 - 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想改 health_check 的报告目录，用 `MNELO_CRON_OUTPUT_DIR`（默认 `$MNELO_MEMORY_DIR/cron/output`，每次运行会重建）。
 
-**2. 按实际机器选择向量后端（8/6 后端 = 必选二选一）。**
+**2. 按实际机器选择向量后端。**
 - 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要；两者都不可用 → `RuntimeError`。
 - **`zvec`** 跑原生全文（BM25 + jieba 中文）+ INT8 HNSW，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
 - **`usearch`** 任意 CPU，HNSW + f16 量化，老 CPU 兜底。
