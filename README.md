@@ -189,7 +189,7 @@ Non-technical? Skip all the steps above — hand this to any AI coding agent (Cl
 > **Install and adopt mnelo from https://github.com/chinesewebman/mnelo as my memory system:**
 > 1. Clone, set up the venv, `pip install -r requirements.txt`, run `scripts/init_db.py`, launch the MCP server on port 8086, and verify with `scripts/health_check.py` (report back when `MCP server ready`).
 > 2. **Ask me my primary language first** (中文 / English / mixed), then set the matching embedding model in `config.toml [embedder]` *before* first use (switching later requires re-initializing the DB).
-> 3. Vector backend: `auto` (default) picks **`zvec`** if this CPU supports AVX2+ else **`usearch`** (f16). Configure via `config.toml [search] backend = 'auto'|'usearch'|'zvec'`.
+> 3. Vector backend: `auto` (default) picks **`zvec`** if this CPU supports AVX2+ else **`usearch`** (f16). ⚠️ **On a pre-AVX2 CPU, explicitly set `backend = 'usearch'` in `config.toml [search]`** (or env `MNELO_MEMORY_SEARCH_BACKEND=usearch`) — `auto` probes zvec by importing it in-process, and if the machine ever had zvec pip-installed the import is a SIGILL crash with no fallback. See "Choose the vector backend" below.
 > 4. After it's running, **update your own SOUL.md / CLAUDE.md** to declare: "I use the mnelo MCP server (`http://127.0.0.1:8086/sse`) as my memory system — `memory_remember` to persist, `memory_recall` to retrieve, `memory_get_digest` for the session digest."
 
 The agent handles venv creation, pip install, the embedding-model download, and the health probe. Typical install ~90s (the 92 MB model download is the slow part).
@@ -220,11 +220,14 @@ If you're an AI agent (Claude Code, Cursor, …) setting up mnelo for your user,
 - Keep it out of the repo you just cloned — memory data isn't source code.- Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
 - Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To customize the health-check report dir, override with `MNELO_CRON_OUTPUT_DIR` (default `$MNELO_MEMORY_DIR/cron/output`, recreated by `health_check.py` on every run).
 
-**2. Choose the vector backend — based on the actual machine.**
-- **`usearch`** (f16) works on any CPU — the default fallback.
-- **`zvec`** (INT8) only if this CPU supports AVX2+ — auto chain top.
-- **`zvec`** adds native full-text, but **requires AVX2+** — do **not** install it on old CPUs (it crashes on `import` there). Detect the CPU or ask.
-- Configure via `config.toml [search] backend` or env `MNELO_MEMORY_SEARCH_BACKEND`.
+**2. Choose the vector backend (`auto` / `usearch` / `zvec`).**
+- **`usearch`** (f16, HNSW) — works on **any CPU**; the only option for pre-AVX2 machines and the default fallback.
+- **`zvec`** (INT8 + native full-text BM25/jieba) — **requires AVX2+**. On old CPUs `import zvec` is a hard **SIGILL process crash (not a catchable Python exception)** — do **not** install it there.
+- **`auto` (default)** — prefers zvec, falls back to usearch. ⚠️ **But `auto` probes zvec by importing it in the main process: if the machine ever had zvec pip-installed (even just for a trial you forgot to uninstall), `import zvec` crashes on a non-AVX2 CPU before any fallback can happen — the whole process dies with SIGILL.** This bit a real Ivy Bridge box: a leftover zvec in the venv + a config-less scratch dir → `auto` → crash.
+- **On any machine that ever had zvec installed, pin `usearch` explicitly.** Two ways:
+  - **Persistent (recommended)** → `config.toml [search] backend = 'usearch'`; applies to server, scripts, and tests alike.
+  - **One-shot (env)** → `MNELO_MEMORY_SEARCH_BACKEND=usearch`, applies only to the current process. ⚠️ pytest / cron / subprocess scripts do **not** carry the env by default, and any config-less scratch dir falls back to `auto` → crash. For critical paths (server start, `scripts/rebuild_index.py`, `scripts/health_check.py`, tests) set **both** config.toml and env to `usearch`.
+- **Precedence**: env `MNELO_MEMORY_SEARCH_BACKEND` > `config.toml [search] backend` > `auto`. Valid values: `auto` / `usearch` / `zvec` (`sqlite_vec` is retired and coerced back to `auto`).
 
 **3. Ask the user about their primary language before picking an embedding model** (switching later requires re-initializing the DB — so ask *before* first use):
 - Chinese → `bge-small-zh-v1.5` (default, 512d)

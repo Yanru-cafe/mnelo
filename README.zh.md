@@ -189,7 +189,7 @@ print(c.get_digest()['content'][:100])                     # 会话摘要
 > **从 https://github.com/chinesewebman/mnelo 安装并采用 mnelo 作为我的记忆系统：**
 > 1. 克隆、建 venv、`pip install -r requirements.txt`、跑 `scripts/init_db.py`、在 8086 端口启动 MCP server，并用 `scripts/health_check.py` 验证（`MCP server ready` 时报我）。
 > 2. **先问我的主语言**（中文 / 英文 / 混合），然后*首次使用前*在 `config.toml [embedder]` 设好对应的嵌入模型（之后切换需重建库）。
-> 3. 向量后端必选二选一：`auto`（默认）→ 本机支持 AVX2+ 用 **`zvec`**（INT8），否则 **`usearch`**（f16）。`config.toml [search] backend = 'auto'|'usearch'|'zvec'`。
+> 3. 向量后端必选二选一：`auto`（默认）→ 本机支持 AVX2+ 用 **`zvec`**（INT8），否则 **`usearch`**（f16）。⚠️ **无 AVX2 的旧 CPU 机器必须在 `config.toml [search]` 显式写 `backend = 'usearch'`**（或 env `MNELO_MEMORY_SEARCH_BACKEND=usearch`）——auto 链在主进程 `import zvec` 检测，一旦机器残留过 zvec 包，import 即 SIGILL 崩进程，不会自动降级。详见下方「按实际机器选择向量后端」。
 > 4. 跑起来后，**修改你自己的 SOUL.md / CLAUDE.md** 声明："我使用 mnelo MCP server（`http://127.0.0.1:8086/sse`）作为我的记忆系统——`memory_remember` 持久化、`memory_recall` 检索、`memory_get_digest` 会话摘要。"
 
 agent 会处理 venv 创建、pip 安装、嵌入模型下载和健康探针。典型安装约 90 秒（92 MB 模型下载是最慢部分）。
@@ -220,12 +220,16 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 - 别放在刚 clone 的仓库里（记忆数据不是源代码）。- 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
 - 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想改 health_check 的报告目录，用 `MNELO_CRON_OUTPUT_DIR`（默认 `$MNELO_MEMORY_DIR/cron/output`，每次运行会重建）。
 
-**2. 按实际机器选择向量后端。**
-- 默认 **`auto` 链**：`zvec`（CPU 支持 AVX2+ 时） → `usearch`（任意 CPU）。`build_search_index()` 工厂实现**自动降级**：装一个就跑，CPU 不重要；两者都不可用 → `RuntimeError`。
-- **`zvec`** 跑原生全文（BM25 + jieba 中文）+ INT8 HNSW，但**需要 AVX2+**——旧 CPU **别装**（那里 `import` 即崩）。检测 CPU 或询问用户。
-- **`usearch`** 任意 CPU，HNSW + f16 量化，老 CPU 兜底。
-- `config.toml` `[search] backend = 'auto'|'zvec'|'usearch'` 或 env `MNELO_MEMORY_SEARCH_BACKEND` 显式指定。
-- 配置：`config.toml [search] backend` 或 env `MNELO_MEMORY_SEARCH_BACKEND`。
+**2. 按实际机器选择向量后端（`auto` / `usearch` / `zvec` 三选一）。**
+- **`usearch`**（f16，HNSW）：**任意 CPU**，无 AVX2 老 CPU 的唯一选择，也是标准安装的兜底后端。
+- **`zvec`**（INT8 + 原生全文 BM25/jieba）：**需要 AVX2+**。旧 CPU 上 `import zvec` 直接 **SIGILL 崩进程（不是可捕获的 Python 异常）**——所以旧 CPU **别装**。
+- **`auto`（默认）**：优先 zvec、用不了才回落 usearch。⚠️ **但 auto 是在主进程 `import zvec` 检测的：只要机器上 pip 装过 zvec（哪怕试用后忘了卸），无 AVX2 的 CPU 上 import 即崩，auto 根本没有"降级"机会，整个进程直接 SIGILL**。本机（Ivy Bridge，无 AVX2）因此崩过：venv 残留 zvec → 临时库无 config.toml → fallback `auto` → 崩。
+
+**在装过 zvec 的旧 CPU 机器上，必须显式指定 `usearch`：**
+- 两种方式任选：
+  - **持久化（推荐）** → `config.toml [search] backend = 'usearch'`，对 server、脚本、测试所有进程生效。
+  - **临时（env）** → `MNELO_MEMORY_SEARCH_BACKEND=usearch`，只对当前进程生效。⚠️ pytest / cron / 子进程默认**不带**这个 env，且如果它们用的库没有 config.toml，就会 fallback 回 `auto` → 崩。关键路径（server 启动、`scripts/rebuild_index.py`、`scripts/health_check.py`、测试）最好 config.toml 和 env **都**设成 usearch。
+- **优先级**：env `MNELO_MEMORY_SEARCH_BACKEND` > `config.toml [search] backend` > `auto`。合法值：`auto` / `usearch` / `zvec`（`sqlite_vec` 已淘汰，会被强制转回 `auto`）。
 
 **3. 选嵌入模型前先问用户主语言**（之后切换需重新初始化 DB——所以*首次使用前*就问）：
 - 中文 → `bge-small-zh-v1.5`（默认，512 维）

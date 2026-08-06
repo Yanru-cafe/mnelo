@@ -51,6 +51,25 @@ python3 -c "from fastembed import TextEmbedding; t = TextEmbedding('BAAI/bge-sma
 
 模型缓存在 `~/.cache/huggingface/`，下次启动秒级 warm-up。
 
+### 2.2 向量后端 — 无 AVX2 机器必须显式 `usearch`
+
+后端三选一：`auto`（默认）/ `usearch` / `zvec`，优先级 **env `MNELO_MEMORY_SEARCH_BACKEND` > `config.toml [search] backend` > `auto`**。
+
+⚠️ **`auto` 链在主进程 `import zvec` 检测后端**：只要机器上 pip 残留过 zvec（即使只是试用后忘了卸），在**无 AVX2 的 CPU 上 `import zvec` 直接 SIGILL 崩进程**（进程级崩溃，不是可捕获异常），auto 没有任何"降级"机会。本机（Ivy Bridge，无 AVX2）实测：venv 残留 zvec + 临时库无 config.toml → fallback `auto` → 崩。标准安装（`requirements.txt` 不含 zvec）安全；装过 `requirements-zvec.txt` 或手动 `pip install zvec` 的机器必须显式指定。
+
+**部署时两条都设（覆盖所有路径）：**
+```toml
+# live 库的 config.toml — 持久化，对 server / 脚本 / 测试生效
+[search]
+backend = 'usearch'
+```
+```bash
+# shell profile — env 只对当前进程生效；pytest / cron / 子进程默认不带
+export MNELO_MEMORY_SEARCH_BACKEND=usearch
+```
+
+为什么两条都要：pytest / cron / 子进程默认不带 env，且如果它们用的库目录没有 config.toml（如 `mktemp -d` 临时库）就会 fallback 回 `auto` → 崩。config.toml 与 env 都显式 `usearch` 后，任何路径都安全。
+
 ---
 
 ## 3. 文件布局
