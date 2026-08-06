@@ -34,3 +34,14 @@
     - 问题: typing 仅导入 `Any, Dict, Optional`，无 `List`
     - 失败场景: 因是局部变量注解（PEP 526 不求值），27 个测试全过不报错；但静态检查 F821 报 undefined name，一旦 `List[...]` 挪到函数签名或返回注解即 NameError。建议补 `from typing import List`。
 - 测试: 6 个受影响测试文件全部通过，`27 passed`（test_task_loop_m1_schema / test_task_states_transition / test_task_states_concurrent / test_task_states_list_replay / test_task_states_loop_tick / test_task_states_create），0 regression。
+- 补充（同日 12:50 并行审查实例去重后新增 3 条，合计发现 7 条）:
+  - **[中] 中文名 task/loop 的 id slug 全部退化**
+    - 位置: task_states.py:607-611（task_create）、task_states.py:703（loop_create）
+    - 问题: `re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-")` 把纯中文名整段替换为连字符，strip 后为空 → slug 回落 "task"/"loop"。mnelo 主语言是中文，故中文命名实体全部命中此退化路径。
+    - 失败场景: 已实测 `'采购耗材'` 与 `'下单发货'` 均得 `task:20260806-task`，靠碰撞循环补 -1/-2；ID 不含语义、随创建顺序漂移，破坏 DESIGN §2.1 `task:YYYYMMDD-<slug>` 约定与 asof 可回放的可读性。
+  - **[低] "并发 CAS"测试实为顺序模拟，真竞态未覆盖**
+    - 位置: tests/test_task_states_concurrent.py:13-16（docstring 自认"没有真并发"）
+    - 问题: 两个测试仅在单线程按顺序执行语句求证 CAS 语义；transition() 真并发下"关旧窗+开新窗"竞态与 `ux_task_current_state` 唯一索引兜底路径未被测试。上文[中]零长状态窗（同秒双转移）正源于该路径漏测。
+  - **[低] transition() 关旧窗+开新窗在 autocommit 连接上非原子**
+    - 位置: task_states.py:174-185
+    - 问题: CAS 的 UPDATE（关旧窗）与 INSERT（开新窗）是两条语句；若调用方未包事务，UPDATE 立即提交，INSERT 失败（唯一索引/证据 FK 冲突）时旧窗已关 → task 变"无活动窗"，后续 transfer 报 TaskNotFoundError。当前调用方（测试/未来 M3 API）需自行保证事务包裹。
