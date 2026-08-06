@@ -396,6 +396,39 @@ TOOLS = [
             "required": ["loop_id"],
         },
     },
+    # === [8/6 M3 Step 12] memory_loop_update ===
+    {
+        "name": "memory_loop_update",
+        "description": "改 loop properties (DESIGN §5.1). enabled/trigger/interval_hours/priority/owner_id 任一可改; None 字段不动. enabled 切换落 dormant/running 状态窗. 不动 active_task_id (那是 task_create 的领域).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "loop_id": {"type": "string", "description": "loop entity id (必填)"},
+                "enabled": {"type": "boolean", "description": "True=启动, False=停用 (写 dormant)"},
+                "trigger": {"type": "string", "description": "新触发条件"},
+                "interval_hours": {"type": "integer", "description": "新轮转间隔 (小时)"},
+                "priority": {"type": "integer", "description": "新优先级 0-5"},
+                "owner_id": {"type": "string", "description": "新责任人 entity id"},
+                "now": {"type": "string", "description": "timestamp 覆盖"},
+            },
+            "required": ["loop_id"],
+        },
+    },
+    # === [8/6 M3 Step 12] memory_loop_list ===
+    {
+        "name": "memory_loop_list",
+        "description": "列 loop entities + 当前状态 (DESIGN §5.1). enabled_only=True 仅启用的; state= 精确过滤 (running/dormant/paused); asof 时间切片.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "enabled_only": {"type": "boolean", "description": "仅 enabled=True", "default": False},
+                "state": {"type": "string", "description": "当前状态精确过滤"},
+                "asof": {"type": "string", "description": "时间切片 (默认 = 当前)"},
+                "limit": {"type": "integer", "description": "max rows", "default": 50},
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -414,6 +447,8 @@ _TASK_TOOL_REGISTRY = {
     "memory_task_list":      ("list_tasks",     None),
     "memory_task_replay":    ("replay_task",    None),
     "memory_loop_create":    ("loop_create",    "loop_id"),
+    "memory_loop_update":    ("loop_update",    "loop_id"),
+    "memory_loop_list":      ("list_loops",     None),
     "memory_loop_tick":      ("loop_tick",      None),
 }
 
@@ -834,6 +869,17 @@ if _MCP_AVAILABLE:
             # handler returns {loop_id, verdict, ...}
             verdict = data.get("verdict", "?") if isinstance(data, dict) else "?"
             return f"{_ECHO} {_ECHO_LABEL}    ⏱{data.get('loop_id', '?') if isinstance(data, dict) else '?'}  verdict={verdict}"
+
+        if name == "memory_loop_update":
+            # handler returns {loop_id, changed: {...}, enabled, interval_hours}
+            lid = data.get("loop_id", "?") if isinstance(data, dict) else "?"
+            changed = data.get("changed", {}) if isinstance(data, dict) else {}
+            return f"{_ECHO} {_ECHO_LABEL}    ✎{lid}  changed={list(changed.keys())}"
+
+        if name == "memory_loop_list":
+            # handler returns {loops: [...], count, truncated}
+            loops = data.get("loops", []) if isinstance(data, dict) else []
+            return f"{_ECHO} {_ECHO_LABEL}    ⊃{len(loops)} loops"
 
         # Fallback for unknown shape
         return f"{_ECHO} {_ECHO_LABEL}    {name}  (ok)"
