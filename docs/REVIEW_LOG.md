@@ -449,3 +449,15 @@
   - test_m5_3_d11_forget（reason 长度回归）—— 10/10 通过
   - docstring 核实: propose_stale_tasks / apply_stale_proposal __doc__ 均非空
   - reason 边界实测: int → AttributeError（即发现 1）；纯空白 → ReasonRequiredError 正常
+
+## 2026-08-06 21:02 审查 a8e7dca..cd0cd05
+- 范围: a8e7dca..cd0cd05（共 1 个提交）
+- 提交:
+  - cd0cd05 fix(review): M35 review-pass 整改 — 2 低危 API 边界 (75/75 pass)
+- 结论: 通过（修复核实正确）。M35.1 reason isinstance(str) 守卫生效——int/None/list 均抛 InvalidReasonTypeError（TaskLoopError），不再 AttributeError，与 M34 limit 守卫风格一致；M35.2 dormant loop 段 digest 改新公式（sum(len(s))+n-1）+ 60-char name 截断 + 显式 truncated flag，与 task 段对称。7 个新测试覆盖类型边界与 ≤2000 截断断言。
+- 发现: 无新增发现。
+- 测试:
+  - 环境: 隔离临时库（scripts/init_db.py + MNELO_MEMORY_DIR + MNELO_MEMORY_SEARCH_BACKEND=usearch）。
+  - test_m35(7)+test_m34(5)+test_m33(7)+test_m30(5) —— 24/24 通过
+  - 跨文件回归 test_m35+test_m4+test_m5_3 —— 23/23 通过
+  - 边界实测: reason=12345/None/['x']/42 → 全部 InvalidReasonTypeError
