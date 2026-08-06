@@ -119,3 +119,23 @@
     - 问题: 定义了但从未调用；docstring 声称"事务包裹 task_states 调用"，函数体却是 `pass`，且实际提交逻辑散布在各 cmd_* 里。具误导性，易让后续维护者以为有统一事务入口。
     - 建议: 删除该函数，或在 cmd_* 内真正复用统一 commit/rollback 助手。
 - 测试: 本机 `pytest tests/test_task_manager_cli.py -q` → **8 failed**（全部 `OperationalError`，硬编码路径，见[高]#1）；`pytest tests/test_task_loop_m1_schema.py tests/test_task_states_list_replay.py -q` → **10 passed**（本轮对既有 fixture 的清理补充无 regression）。
+
+## 2026-08-06 13:55 审查 1e720eba..dea3978
+- 范围: 1e720eba..dea3978（共 1 个提交）
+- 提交:
+  - `dea3978` fix(task-states+review): RF8-RF14 整改 — 77/77 测试 pass
+- 结论: 通过（发现 3 个问题：1 中 / 2 低，无高）。RF8 事务回滚、RF11 秒级零长窗推进、RF12 interval_hours 校验、RF13 软删过滤、RF14 enabled CAS 全部落地且实现正确；7 个新测试 + RF9 硬编码路径可移植化均通过。遗留：上轮 [高]（test_task_manager_cli.py 硬编码 macOS 路径）本轮 diff 未触碰，仍在。
+- 发现:
+  - **[中] RF8 数据完整性修复的 MCP 接线零测试覆盖**
+    - 位置: mcp_server.py:476-485 + tests/test_review_fixes.py:283-337
+    - 问题: 本提交涉及数据完整性的核心修复（失败路径 `mem._conn.rollback()` 防孤儿行）落在 `_handle_task_simple`，但新增 `test_rf8_rollback_on_task_create_double_spawn` 只直接调用 `task_states.task_create` 并**手动** `m._conn.rollback()` 模拟 MCP 行为，从未真正走 `_call_tool('memory_task_*')` → `_handle_task_simple` 触发异常路径。mcp_server.py 那 30 行改动（commit 移入 try、except 兜底、错误 JSON 返回）零测试接触。
+    - 失败场景: 若未来有人从 `_handle_task_simple` 的 except 分支移除 rollback（或把 commit 挪出 try），test_rf8 依旧通过——它测的是 task_states 层语义而非被改的接线；孤儿行保证悄然失效且 CI 不报警。建议补一个走真实 MCP 分发、触发 task_states 抛错、断言 DB 无孤儿行的测试。
+  - **[低] RF8 错误契约与其余工具不一致：task 工具直通完整 str(e) + 丢失全 traceback**
+    - 位置: mcp_server.py:479-485
+    - 问题: except 分支把 `str(e)` 原样塞进返回 JSON；同文件 `_call_tool` 外层对其他工具刻意只返异常类型名、不带原始消息（防泄露内部路径/SQL 细节）。task 工具成为唯一把完整底层异常消息直通 MCP client 的入口。另失败只记 `logger.warning`（无 traceback），改动前该路径异常冒泡到外层 `logger.exception`（全 traceback），排障信息降级。
+    - 失败场景: 真并发下 RF14 输家触发的裸 `UNIQUE constraint failed: task_states.task_id` 现直通 client；运营排查 task 工具失败只剩一行 warning，无堆栈定位不到 task_states 内部哪一步抛错。建议: 领域错误（TaskLoopError 等）保留 message，底层 sqlite/IntegrityError 只返类型名，并改用 logger.exception。
+  - **[低] RF11 只对「已关闭窗」递增，非单调 now 仍可写负长窗**
+    - 位置: task_states.py:228-240
+    - 问题: 递增保护查询 `valid_until IS NOT NULL`（已关窗）的 max 并推进 ts，但不校验当前活动窗的 valid_from。若调用方传的 `now` 早于当前活动窗 valid_from（乱序回放 / 重试消息携带旧时间戳），关旧窗的 valid_until 会小于该窗 valid_from → 负长窗（valid_from > valid_until），asof 回放出现时间空洞。
+    - 失败场景: task_create 建初始窗 valid_from="2026-08-06T11:00:00" 后，transition(now="2026-08-06T10:00:05")（回拨）→ RF11 查到无已关窗（cur_vu=None）不推进 → 初始窗 valid_until="10:00:05" < valid_from="11:00:00"。零长窗修了，负长窗仍可能。正常 MCP 调用不传 now 不触发；建议递增比较参考 `max(cur_vu, current_valid_from)`。
+- 测试: 本机 `.venv/bin/python -m pytest tests/test_review_fixes.py -q` → **17 passed**；12 个 task/loop 相关文件（task_states_*/task_loop_m1_schema/mcp_task*/asof_replay）→ **72 passed, 0 failed**。全量套件中 test_backup_restore.py / test_task_manager_cli.py 在本机触发 zvec "Illegal instruction"（无 AVX2，CLAUDE.md 已知约束）崩溃、CLI 另有硬编码 `/Users/apple` 路径 8/8 失败——均属既有环境/遗留问题，与本提交 diff 无关（本提交仅触碰 mcp_server.py / task_states.py / test_review_fixes.py，全绿）。
