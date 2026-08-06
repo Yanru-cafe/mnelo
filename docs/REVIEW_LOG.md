@@ -522,3 +522,13 @@
 - 测试: tests/test_search_index.py 新增 `TestUsearchF16Assertion`（2 用例，用空索引文件构造，避开本机 usearch add 偶发 SIGSEGV）— f16 加载通过 / f32 触发 RuntimeError。
 - 验证: test_search_index.py 13/13 pass（隔离临时库 + init_db.py）。
 - 备注: MCP server（PID 1197572）仍在跑旧代码，断言在下次自然重启生效；live 索引本就 f16，重启亦安全。本轮改动不触发自动审查（审查 cron 23713671 已暂停）。
+
+## 2026-08-06 22:30 文档修复: 安装部署说明显式化 MNELO_MEMORY_SEARCH_BACKEND
+
+- 背景: 用户要求确保 `MNELO_MEMORY_SEARCH_BACKEND` 在安装部署说明里"正确、清晰"。
+- 触发事件: 验证时序状态机测试时三文件全崩 `dumped core`。根因链: conftest `Memory()` → `build_search_index('auto')` → `zvec_available()` 主进程 `import zvec` → 本机 (Ivy Bridge 无 AVX2) SIGILL。本机 venv **残留 zvec 0.6.0**，pytest 临时库 (`mktemp -d`) **无 config.toml** → fallback `auto` → 崩。live 库有 config.toml `backend='usearch'` 故 server 不崩。带 `MNELO_MEMORY_SEARCH_BACKEND=usearch` 后 21/21 pass，非代码回归。
+- **新发现 (代码级隐患, 待评估)**: `search_index.py` 顶部 docstring (8/6) 明确警告"zvec 可用性检测必须在子进程进行, 不可在 mnelo 进程内 try-import (会把 mnelo 一起带崩)", 但 `zvec_available()` (search_index.py:585-601) 实际是**主进程 import** (注释: macOS 26 launchd fork 子进程跑 zvec native mmap 必现 BlockingIOError)。结果是: 装了 zvec 但无 AVX2 的机器上 auto 链 import 即 SIGILL, **与 docstring 契约矛盾**, 且 config.toml.example 的 "auto: 用不了 zvec 用 usearch" 描述对"残留 zvec 的无 AVX2 机"不成立。修复方向候选: zvec_available 先检测 CPU AVX2 (无则直接 False 不 import), 或恢复子进程检测+launchd fork 保护。**未改代码** — 文档层已显式化规避。
+- 文档改动 (3 文件, 纯文档):
+  - `README.zh.md` / `README.md`: backend 选择章节修正"自动降级/CPU 不重要"误导 → 明确 auto 主进程 import zvec 的 SIGILL 陷阱; 加 env 优先级 (env > config.toml > auto)、持久化推荐 config.toml + env 双设、合法值。
+  - `README.zh.md` / `README.md` agent 安装步骤第 3 步: 无 AVX2 机器显式 `backend='usearch'` 警告。
+  - `docs/RUNBOOK.md` 新增 §2.2: 无 AVX2 机器必须显式 usearch, 含根因、config.toml+env 双设示例、为什么双设。
