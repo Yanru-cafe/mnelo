@@ -139,6 +139,18 @@ def transition(
             result = transition(conn, task_id=tid, to_state="done",
                                 reason="收货", now="2026-08-06T10:30")
     """
+    # [M36 fix] task_id / to_state isinstance 守卫 — API 边界一致.
+    if not isinstance(task_id, str):
+        raise TaskLoopError(
+            f"task_id 必须 str, got {type(task_id).__name__}",
+            field="task_id", code="InvalidInputError",
+        )
+    if not isinstance(to_state, str):
+        raise TaskLoopError(
+            f"to_state 必须 str, got {type(to_state).__name__}",
+            field="to_state", code="InvalidInputError",
+        )
+
     # 0. 状态词汇校验
     if to_state not in ALL_STATES:
         raise InvalidTransitionError(
@@ -147,11 +159,25 @@ def transition(
             field="to_state",
         )
 
-    # 0.1 force 必须带 reason (D8)
-    if force and not (reason and reason.strip()):
+    # [M36 fix] reason 必填 + isinstance 守卫 — D8 显式纠正门, 不依赖 force.
+    # 旧 'if force and not reason' 只在 force=True 校验, 但 docstring 写
+    # 'reason: required', 行为不一. 统一为 always required + str 类型.
+    if not isinstance(reason, str):
         raise ReasonRequiredError(
-            "force=True requires reason (D8 纠正门需要审计痕迹)",
+            f"reason 必须 str 类型, got {type(reason).__name__}",
             field="reason",
+        )
+    if not reason.strip():
+        raise ReasonRequiredError(
+            "transition reason 必填 (D8 显式纠正门, docstring 契约)",
+            field="reason",
+        )
+
+    # [M36 fix] evidence_chunk_id isinstance 守卫 — str 或 None.
+    if evidence_chunk_id is not None and not isinstance(evidence_chunk_id, str):
+        raise TaskLoopError(
+            f"evidence_chunk_id 必须 str 或 None, got {type(evidence_chunk_id).__name__}",
+            field="evidence_chunk_id", code="InvalidInputError",
         )
 
     # 0.2 evidence_chunk_id 存在性校验
