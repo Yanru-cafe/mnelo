@@ -80,7 +80,7 @@ def _slugify(name: str) -> str:
       2. 含中文等非 ASCII: 走 hashlib.md5(name.encode()).hexdigest()[:8]
          (DESIGN §2.1 弃 pinyin — 主人 8/6 P22 '永不偷工' 不加新依赖).
 
-    例 (实测 hash, 主人 8/6 RF10 实测):
+    例 (RF10 cross-check):
         "采购耗材"        → "a49a962a"
         "下单发货"        → "9e7a4e54"
         "耗材库存监控"    → "7b526973"
@@ -1129,6 +1129,268 @@ def list_active_tasks_and_loops(
         },
         "truncated": truncated,
     }
+
+def propose_stale_tasks(
+    conn: Any,
+    *,
+    now: Optional[str] = None,
+    stale_days_threshold: int = 7,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """[8/6 M5.2 + DESIGN §4.4 Proposal 模式] 扫描 stale task, 写 audit_log Proposal.
+
+    走 audit_log 现有表 (pass_name='stuck_task', status='proposed'). 跟 M5.1
+    loop_tick_cron 提议 due loop 同模式, 但 pass_name 不同, 便于 L2 audit
+    区分. mnelo 绝不自主转移任务 (D5) — Proposal 只做提议, 真正的 transition
+    必须由 agent/用户经 memory_task_transition 显式 apply.
+
+    收缩分桶 (DESIGN §4.4 D7):
+      open > 7d  → stale, 提议 review
+      waiting > 14d → stale, 提议 review
+      blocked > 3d → stale, 提议 review
+      in_progress 走 stale_days_threshold (默认 7d) 单桶
+
+    Args:
+        conn: open sqlite3.Connection.
+        now: 时间参考 (默认 = 当前).
+        stale_days_threshold: 通用 fallback (默认 7d). 上面分桶覆盖更具体.
+        run_id: 自定义 run_id (默认 = 'stuck_task-<now>-<uuid8>').
+
+    Returns:
+        {
+            "run_id": str,
+            "scanned": int,    # 扫到的 active task 总数
+            "proposed": int,   # 写的 Proposal 数
+            "skipped_existing": int,  # 已有 pending Proposal 跳过
+            "proposals": [{"task_id", "state", "age_days", "threshold_days", "is_stale"}],
+        }
+    """
+    import uuid as _uuid
+    from datetime import datetime as _dt
+
+    now_ts = now or _default_now()
+    try:
+        ref_now = _dt.fromisoformat(now_ts)
+    except (ValueError, TypeError):
+        ref_now = _dt.fromisoformat(_default_now())
+
+    # 阈值桶 (DESIGN §4.4 D7)
+    thresholds = {
+        "open": 7,
+        "waiting": 14,
+        "blocked": 3,
+        "in_progress": stale_days_threshold,
+    }
+
+    # 1. 扫 active task
+    rows = conn.execute(
+        """SELECT t.task_id, t.state, t.valid_from, t.reason, t.evidence_chunk_id
+           FROM task_states t
+           JOIN entities e ON e.id = t.task_id
+           WHERE t.valid_until IS NULL
+             AND t.state NOT IN ('done', 'cancelled')
+             AND e.kind = 'task'"""
+    ).fetchall()
+
+    proposals = []
+    skipped = 0
+    for r in rows:
+        state = r[1]
+        threshold = thresholds.get(state, stale_days_threshold)
+        try:
+            vf = _dt.fromisoformat(r[2])
+            age_days = (ref_now - vf).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            age_days = 0.0
+        if age_days < threshold:
+            continue
+        # 已有 pending Proposal? (status='proposed' 且 pass_name='stuck_task')
+        existing = conn.execute(
+            """SELECT id FROM audit_log
+               WHERE pass_name='stuck_task' AND status='proposed'
+                 AND ref_type='task' AND ref_id=?""",
+            (r[0],),
+        ).fetchone()
+        if existing:
+            skipped += 1
+            continue
+        proposals.append({
+            "task_id": r[0],
+            "state": state,
+            "age_days": round(age_days, 2),
+            "threshold_days": threshold,
+            "is_stale": True,
+            "last_reason": r[3],
+        })
+
+    # 2. 写 audit_log Proposal
+    rid = run_id or f"stuck_task-{now_ts}-{_uuid.uuid4().hex[:8]}"
+    for p in proposals:
+        conn.execute(
+            """INSERT INTO audit_log (
+                run_id, pass_name, action_type, ref_type, ref_id,
+                before_json, after_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                rid,
+                "stuck_task",
+                "stale_review",       # action_type: 跟现有 enum 兼容
+                "task",
+                p["task_id"],
+                None,                 # before_json: 不带前置
+                json.dumps({
+                    "state": p["state"],
+                    "age_days": p["age_days"],
+                    "threshold_days": p["threshold_days"],
+                    "proposed_at": now_ts,
+                    "prompt": (
+                        f"task {p['task_id']} 处于 {p['state']} 状态 "
+                        f"{p['age_days']:.1f} 天, 超过阈值 {p['threshold_days']} 天. "
+                        f"建议: transition 到 done / cancelled / 下一步, 或更新 reason."
+                    ),
+                }, ensure_ascii=False),
+                0.7,                  # confidence: 机械 stale 判定中等
+                "proposed",
+                now_ts,
+            ),
+        )
+    conn.commit()
+    return {
+        "run_id": rid,
+        "scanned": len(rows),
+        "proposed": len(proposals),
+        "skipped_existing": skipped,
+        "proposals": proposals,
+    }
+
+
+def apply_stale_proposal(
+    conn: Any,
+    proposal_id: int,
+    *,
+    applied_action: str,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    # [M5.2 fix] UNIQUE(run_id, pass_name, action_type, ref_id, status) 约束
+    # proposal_id 全局唯一, 自带 part of run_id 防并发 apply 碰撞.
+    """[8/6 M5.2 + DESIGN §4.4] 标记 stuck_task Proposal 为 applied (用户/agent 评估后).
+
+    走 audit_log 现有 status 字段 ('proposed' → 'applied'). 不自主转移任务,
+    只记录人类决策. 真正的 transition 已经由 agent 经 memory_task_transition
+    显式发起 (跟 status 解耦).
+
+    Args:
+        conn: open sqlite3.Connection.
+        proposal_id: audit_log row id (propose_stale_tasks 写入行).
+        applied_action: 文字描述用户做了啥 (e.g. 'transitioned to done',
+                        'ignored', 'will_revisit_at_2026-08-10').
+        now: 时间参考 (默认 = 当前).
+
+    Returns:
+        {"proposal_id": int, "status": "applied", "ref_id": str, "applied_action": str}
+    """
+    now_ts = now or _default_now()
+    row = conn.execute(
+        "SELECT id, pass_name, status, ref_id FROM audit_log WHERE id=?",
+        (proposal_id,),
+    ).fetchone()
+    if not row:
+        raise TaskLoopError(
+            f"proposal_id={proposal_id} 不存在",
+            field="proposal_id", code="ProposalNotFound",
+        )
+    if row[1] != "stuck_task":
+        raise TaskLoopError(
+            f"proposal_id={proposal_id} 不是 stuck_task Proposal (pass_name={row[1]})",
+            field="proposal_id", code="ProposalMismatch",
+        )
+    # [M5.2 fix] 校验是否已 applied — 检查原 proposal_id 是否有 stale_resolved 行
+    # (新 audit_log row 在 apply 时写入, run_id 含 proposal_id).
+    resolved = conn.execute(
+        """SELECT id FROM audit_log
+           WHERE pass_name='stuck_task' AND action_type='stale_resolved'
+             AND ref_id=? AND status='applied'""",
+        (row[3],),
+    ).fetchone()
+    if resolved:
+        raise TaskLoopError(
+            f"ref_id={row[3]} 已被 applied (resolved_id={resolved[0]}), 不能重复",
+            field="proposal_id", code="ProposalAlreadyResolved",
+        )
+    # Update: status=applied, after_json += applied_action metadata
+    # 用新 row 记录 applied 决策 (避免覆盖原 Proposal)
+    # 实务上 audit_log append-only — 写一条新行 trace applied
+    # [M5.2 fix] UNIQUE(run_id, pass_name, action_type, ref_id, status) 约束
+    # 不让 run_id 跟原 Proposal 同 — 用 resolved_<timestamp> 区分. status='applied'
+    # 跟前面 status='proposed' 自然错开, 不冲突.
+    conn.execute(
+        """INSERT INTO audit_log (
+            run_id, pass_name, action_type, ref_type, ref_id,
+            before_json, after_json, confidence, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            f"resolved-{now_ts}-{proposal_id}",  # 新 run_id, 关联原 proposal_id
+            "stuck_task",
+            "stale_resolved",
+            "task",
+            row[3],
+            json.dumps({"original_proposal_id": proposal_id, "status": "proposed"}, ensure_ascii=False),
+            json.dumps({"applied_action": applied_action, "resolved_at": now_ts}, ensure_ascii=False),
+            1.0,
+            "applied",
+            now_ts,
+        ),
+    )
+    conn.commit()
+    return {
+        "proposal_id": proposal_id,
+        "status": "applied",
+        "ref_id": row[3],
+        "applied_action": applied_action,
+    }
+
+
+def list_stale_proposals(
+    conn: Any,
+    *,
+    status: str = "proposed",
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """[8/6 M5.2] 列 stuck_task Proposal (DESIGN §4.4 上浮).
+
+    Args:
+        conn: open sqlite3.Connection.
+        status: 'proposed' / 'applied' / 'reverted'.
+        limit: 上限.
+
+    Returns:
+        {"proposals": [{"id", "run_id", "ref_id", "action_type",
+                        "after_json", "status", "created_at"}], "count": int}
+    """
+    rows = conn.execute(
+        """SELECT id, run_id, action_type, ref_id, after_json, status, created_at
+           FROM audit_log
+           WHERE pass_name='stuck_task' AND status=?
+           ORDER BY id DESC LIMIT ?""",
+        (status, limit),
+    ).fetchall()
+    proposals = []
+    for r in rows:
+        try:
+            after = json.loads(r[4]) if r[4] else None
+        except (ValueError, TypeError):
+            after = None
+        proposals.append({
+            "id": r[0],
+            "run_id": r[1],
+            "action_type": r[2],
+            "ref_id": r[3],
+            "after_json": after,
+            "status": r[5],
+            "created_at": r[6],
+        })
+    return {"proposals": proposals, "count": len(proposals)}
+
 
 
 def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, List[str]]]:
