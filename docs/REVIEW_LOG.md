@@ -71,3 +71,23 @@
     - 问题: 默认路径已提毫秒级，但 MCP 工具 `memory_task_transition`/`memory_task_create` 仍公开暴露 `now` 覆盖参数且不校验精度。同一 task 连续两次 transition 传入相同秒级 `now`（如均 `"2026-08-06T10:00"`），仍产生 `valid_from == valid_until` 的零长窗——正是 RF1 与上轮[中]发现要消除的场景。
     - 失败场景: 调用方带 `now` 秒级值快速两跳（如 A open→in_progress、B in_progress→waiting 同 now），`replay_task(asof='10:00')` 只见 open/waiting，in_progress 中间态在 asof 回放中不可见，核心设计卖点受损。建议: 工具层校验/拒绝秒级 `now`，或 transition CAS 时强制严格递增。
 - 测试: 本机运行 9 个受影响测试文件 → `45 passed, 2 failed`（fail 全部来自上述[中] #2 的两个路径用例）；`test_review_fixes.py` 8 过 2 败，其余 8 个 task/loop 测试文件 37 个用例全过，0 regression。
+
+## 2026-08-06 13:22 审查 131aae4..21ecf61（推送期间新到提交，并入本轮）
+- 范围: 131aae4..21ecf61（共 1 个提交）
+- 提交:
+  - `21ecf61` feat(mcp): M3 Step 12 — memory_loop_update + memory_loop_list (62/62 pass)
+- 结论: 发现 3 个问题（全部低严重度）。Step 12 测试在本机 12 个用例全过。
+- 发现:
+  - **[低] `loop_update` 绕过 `loop_create` 的 interval_hours>0 校验，可写坏 tick 判定**
+    - 位置: task_states.py:838-840（`loop_update` 直接 `cfg["interval_hours"] = interval_hours`，无校验）；对照 task_states.py:755-758（`loop_create` 校验 `interval_hours <= 0` 拒绝）
+    - 问题: `memory_loop_update` 的 `interval_hours` 参数不受任何范围约束；`loop_create` 明确拒绝 <=0，更新路径却可绕过。
+    - 失败场景: 对已建 loop 调 `memory_loop_update(interval_hours=0)` → `loop_tick` 里 `elapsed_hours < interval_hours`（0）恒为 False → verdict 恒 "due"（每次 tick 都判定到期）；设负数则恒 "not_due"（永不到期）。loop 轮转语义被静默破坏，且与 create 路径行为不一致。建议: `loop_update` 内补 `if interval_hours is not None and interval_hours <= 0: raise`。
+  - **[低] `loop_update` / `list_loops` 不过滤 `valid_until IS NULL`，可操作已软删 loop**
+    - 位置: task_states.py:821（loop_update 查 loop）与 :909（list_loops 拉 entities）
+    - 问题: 其余所有 task/loop 访问器（transition:196、loop_tick:323、task_create:615、loop_create 均带 `AND valid_until IS NULL`）都排除软删实体；`loop_update`/`list_loops` 是唯二不带该过滤的新函数，可读取/改写已软删的 loop 行。
+    - 失败场景: 一个 loop 被软删（`valid_until` 已设）后，`memory_loop_list` 仍列出它、`memory_loop_update` 仍能改它的 properties 并新写状态窗，恢复逻辑/清理逻辑会被幽灵 loop 干扰。建议: 两个查询补 `AND valid_until IS NULL`。
+  - **[低] `loop_update` enabled 切换是 check-then-write（非 CAS），并发下可关窗后 INSERT 撞唯一索引；叠加[高]#1 的无回滚，部分写入会落地**
+    - 位置: task_states.py:855-866（SELECT 当前窗 → UPDATE 关旧 → INSERT 新窗，两步非原子）
+    - 问题: 与上轮 RF3 修复的 task_create 竞态同型——先读后写。并发两个 `loop_update(enabled=...)` 对同一 loop：双方都读到同一活动窗并各自 UPDATE 关掉，再各自 INSERT 新活动窗，第二个 INSERT 撞 `ux_task_current_state` 部分唯一索引（schema.sql:176）抛 IntegrityError。
+    - 失败场景: 该 IntegrityError 在 `_handle_task_simple`/`_call_tool` 不 rollback（[高]#1 根因）→ 关旧窗的 UPDATE 留在隐式事务，下一次成功调用 commit 后 loop 变"无活动窗"（既非 running 也非 dormant），`list_loops`/`transition` 对它的判定失真。建议: enabled 切换也改 CAS 单语句（或 `INSERT ... WHERE NOT EXISTS` + 唯一索引兜底），并随 [高]#1 一起补事务回滚。
+- 测试: 本机 `pytest tests/test_task_states_loop_update_list.py tests/test_mcp_loop_update_list.py -q` → `12 passed`；与 131aae4 之前的 task/loop 套件无 regression（前述 45 过 2 败不变）。
