@@ -139,3 +139,27 @@
     - 问题: 递增保护查询 `valid_until IS NOT NULL`（已关窗）的 max 并推进 ts，但不校验当前活动窗的 valid_from。若调用方传的 `now` 早于当前活动窗 valid_from（乱序回放 / 重试消息携带旧时间戳），关旧窗的 valid_until 会小于该窗 valid_from → 负长窗（valid_from > valid_until），asof 回放出现时间空洞。
     - 失败场景: task_create 建初始窗 valid_from="2026-08-06T11:00:00" 后，transition(now="2026-08-06T10:00:05")（回拨）→ RF11 查到无已关窗（cur_vu=None）不推进 → 初始窗 valid_until="10:00:05" < valid_from="11:00:00"。零长窗修了，负长窗仍可能。正常 MCP 调用不传 now 不触发；建议递增比较参考 `max(cur_vu, current_valid_from)`。
 - 测试: 本机 `.venv/bin/python -m pytest tests/test_review_fixes.py -q` → **17 passed**；12 个 task/loop 相关文件（task_states_*/task_loop_m1_schema/mcp_task*/asof_replay）→ **72 passed, 0 failed**。全量套件中 test_backup_restore.py / test_task_manager_cli.py 在本机触发 zvec "Illegal instruction"（无 AVX2，CLAUDE.md 已知约束）崩溃、CLI 另有硬编码 `/Users/apple` 路径 8/8 失败——均属既有环境/遗留问题，与本提交 diff 无关（本提交仅触碰 mcp_server.py / task_states.py / test_review_fixes.py，全绿）。
+
+---
+
+## 2026-08-06 15:16 审查 ef36def7..b6e35c6
+
+- 范围: ef36def721beb8cc6309952d6acfa07e8cf17329..b6e35c62edbffe4607ec919079b3b316158b7c88（共 1 个提交）
+- 提交:
+  - b6e35c6 fix(review): RF15-RF17 整改 — 真 MCP 接线测试 + 错误契约统一 + 乱序 now 修因 (89/89 pass)
+- 结论: 发现 1 个问题（中）。生产代码（task_states.transition 递增逻辑、mcp_server 错误契约/RF8 回滚）经独立实测正确；问题集中在新增测试自身的可移植性。
+
+- 发现:
+  - **[中] tests/test_review_rf15_rf16.py — 两个子进程测试在干净 checkout 上必失败，并污染仓库**
+    - 位置: tests/test_review_rf15_rf16.py `_subprocess_mcp_call` 的 `setup_src`（约 line 104-117）
+    - 问题: `_setup` 硬编码 `sqlite3.connect('<repo>/memory.db')`（`mcp_server_path.parent / 'memory.db'` = `/root/work/mnelo/memory.db`）。该文件不被跟踪（`.gitignore` 忽略 `*.db`），干净 checkout 上不存在 → `sqlite3.connect` 新建一个空库 → 紧随其后的 `DELETE FROM task_states` 抛 `sqlite3.OperationalError: no such table: task_states` → 子进程 rc≠0 → `_subprocess_mcp_call` 抛 `AssertionError` → `test_rf15_double_spawn_rollback_no_orphan` 与 `test_rf16_task_loop_error_preserves_message_and_code` 两个测试必失败。同时在 repo 根留下一个 0 字节 `memory.db`（被 .gitignore 隐形，属工作树污染）。
+    - 附带问题: 子进程 env 只传 PATH/HOME/MNELO_MEMORY_SEARCH_BACKEND，不含 `MNELO_MEMORY_DIR`，故子进程内 `Memory()` 解析到 `~/.hermes/memory/memory.db`——而项目 8/6 已明确移除 `~/.hermes`。即清理 DELETE 打的 DB（repo 根 memory.db）与测试实际写入的 DB（~/.hermes）不是同一个，跨次运行的清理无效；残留仅被"task id 带时间戳唯一"掩盖。提交信息称 89/89 pass，推断是作者本机残留了带 schema 的 repo 根 memory.db 才通过。
+    - 失败场景: 干净 checkout 上 `pytest tests/test_review_rf15_rf16.py` → `AssertionError: subprocess failed: rc=1, stderr=sqlite3.OperationalError: no such table: task_states`（本机已实测复现；且实测后 repo 根出现 0 字节 memory.db）。
+    - 建议: 清理连接与 `Memory()` 用同一 DB 路径（统一走 `config.resolve_db_path()`），并在子进程 env 显式设 `MNELO_MEMORY_DIR` 指向临时目录；或在执行 DELETE 前先建表/保证 DB 存在。
+
+- 测试:
+  - 本机全量 pytest 套件被既有环境问题阻断：conftest session 级 autouse fixture `_clean_test_data_session` 在 `usearch/index.py load` 处 `Fatal Python error: Aborted`（与 mnelo 数据目录索引文件状态有关）。本提交未触碰 conftest.py / memory.py / search_index.py，属既有环境问题，非本提交引入。
+  - 因此改用独立 harness 直接实测本提交改动的核心逻辑（对 live 库副本，绕过 search index）：
+    - `task_states.transition` 新递增逻辑（RF17/RF11）：实测 4 场景——乱序 now 回拨（初始窗 11:00:00 + now=10:00:05）、同秒连跳、正常未来 now、同秒链式 5 次转移 → 全部无零长/负长窗，新窗 valid_from 严格 > 旧窗 valid_until（通过）。
+    - `mcp_server._handle_task_simple` 错误契约（RF16）+ RF8 回滚：实测 TaskNotFoundError → 返回保 message/code/field/type/tool；底层错（TypeError）→ 只返类型名不泄内部信息；loop 双 spawn → 无孤儿 entity/窗口行（通过）。
+    - `tests/test_review_rf15_rf16.py` 静态测试 `test_rf15_real_mcp_wiring_in_source`：当前源码满足其全部断言（通过）；两个子进程测试在干净状态实测失败（见发现 1）。
