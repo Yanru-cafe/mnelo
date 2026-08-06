@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auth import AuthError, load_auth_token, verify_bearer
+from task_states import TaskLoopError
 from config import config  # [Round 2] server host/port 配置
 from validation import ValidationError
 
@@ -471,16 +472,33 @@ def _handle_task_simple(mem, name: str, args: Dict) -> str:
     attr_name, _id_field = _TASK_TOOL_REGISTRY[name]
     func = getattr(_ts, attr_name)
 
-    # [RF8 8/6 修订] Python sqlite3 默认 implicit transaction; 不显式 BEGIN.
-    # 失败路径 rollback, 成功路径 commit (跟 _handle_simple 一致).
+    # [RF8 8/6 + RF16 8/6 review-pass] 错误契约统一:
+    #   - 领域错 (TaskLoopError + 子类): 保 message (含 field/code, Claude 可解析决策)
+    #   - 底层错 (sqlite/IntegrityError/OperationalError): 只返类型名 (防泄露内部
+    #     路径/SQL 细节), logger.exception 留 traceback 给运营
     try:
         result = func(mem._conn, **args)
         mem._conn.commit()
+    except TaskLoopError as e:
+        mem._conn.rollback()
+        logger.warning(f"_handle_task_simple {name} 领域错: {type(e).__name__}: {e.message}")
+        return json.dumps(
+            {
+                "error": e.message,
+                "code": e.code,
+                "field": getattr(e, "field", None),
+                "type": type(e).__name__,
+                "tool": name,
+            },
+            ensure_ascii=False,
+        )
     except Exception as e:
         mem._conn.rollback()
-        logger.warning(f"_handle_task_simple {name} rolled back: {type(e).__name__}: {e}")
+        # 底层错 (sqlite / IntegrityError / OperationalError): 不暴露原始 message
+        # 同 _call_tool 外层对待其他工具的契约.
+        logger.exception(f"_handle_task_simple {name} 底层错 rolled back")
         return json.dumps(
-            {"error": str(e), "type": type(e).__name__, "tool": name},
+            {"error": type(e).__name__, "type": type(e).__name__, "tool": name},
             ensure_ascii=False,
         )
 

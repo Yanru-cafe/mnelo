@@ -223,17 +223,28 @@ def transition(
 
     # 3. CAS 关旧 + 开新
     ts = now or _default_now()
-    # [review-pass RF11 8/6] 严格递增: 旧窗 valid_until >= ts 时推进 1ms,
-    # 防 now=秒级 + 连跳产生 valid_from == valid_until 零长窗.
-    cur_vu = conn.execute(
-        "SELECT valid_until FROM task_states WHERE task_id=? AND valid_until IS NOT NULL "
-        "ORDER BY valid_until DESC LIMIT 1",
+    # [RF11 + RF17 8/6 review-pass] 严格递增: 防 0 窗 + 负长窗.
+    #   取 max(已关窗最大 valid_until, 当前活动窗 valid_from), 若 >= ts 推进 1ms.
+    #   - 修 RF11: 旧 valid_until == ts → 零长
+    #   - 修 RF17: caller 回拨 now 早于当前活动窗 valid_from → 负长
+    #     (取 max(closed, active_from) 让 ts 至少 >= active 起点)
+    _ts_row = conn.execute(
+        "SELECT valid_until, valid_from FROM task_states "
+        "WHERE task_id=? "
+        "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    if cur_vu and cur_vu[0] and cur_vu[0] >= ts:
+    _max_floor_ts = None
+    if _ts_row is not None:
+        # _ts_row[0] = 最新一窗的 valid_until (None = 该窗仍是活动)
+        # _ts_row[1] = 该窗的 valid_from
+        # 若最新一窗 valid_until IS NULL (活动窗), 取它的 valid_from 作 floor
+        # 若最新一窗 valid_until 有值 (刚关), 取它作 floor
+        _max_floor_ts = _ts_row[0] if _ts_row[0] else _ts_row[1]
+    if _max_floor_ts and _max_floor_ts >= ts:
         from datetime import datetime as _dt, timedelta as _td
         try:
-            _t = _dt.fromisoformat(cur_vu[0])
+            _t = _dt.fromisoformat(_max_floor_ts)
             _t = _t + _td(milliseconds=1)
             ts = _t.isoformat(timespec="milliseconds")
         except (ValueError, TypeError):
