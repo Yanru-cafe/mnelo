@@ -178,7 +178,7 @@ def test_m5_3_5_forget_task_not_found():
     m = memory.Memory()
     try:
         try:
-            task_states.forget_task(m._conn, "task:nonexistent-9999", reason="x")
+            task_states.forget_task(m._conn, "task:nonexistent-9999", reason="not_real_task_path")
             assert False, "expected raise"
         except task_states.TaskLoopError as e:
             assert e.code == "TaskNotFoundError"
@@ -279,7 +279,7 @@ def test_m5_3_9_forget_closes_task_states_window():
         ).fetchone()[0]
         assert n_before == 1
 
-        task_states.forget_task(m._conn, tid, reason="x")
+        task_states.forget_task(m._conn, tid, reason="cleanup_test_for_verification")
 
         # forget 后: 0 行当前
         n_after = m._conn.execute(

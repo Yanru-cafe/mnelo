@@ -1539,72 +1539,94 @@ def forget_task(
         TaskLoopError: task_id 不存在 / 已经是 valid_until IS NOT NULL / reason 缺失.
     """
     import uuid as _uuid
-    if not reason:
+    # [M33.2 fix] 强校验 reason: 必填 + 去前后空白 + min length 5 (审计可读).
+    # 旧 `if not reason` 接受 ' ' (空格) 当真, audit trace 后人看不懂.
+    reason_clean = reason.strip() if reason else ""
+    if not reason_clean:
         raise TaskLoopError(
-            "forget_task 必须提供 reason (D8 显式纠正门)",
+            "forget_task 必须提供非空 reason (D8 显式纠正门)",
             field="reason", code="ReasonRequiredError",
+        )
+    if len(reason_clean) < 5:
+        raise TaskLoopError(
+            f"forget_task reason 长度需 >=5 字符 (审计可读), got {len(reason_clean)}",
+            field="reason", code="ReasonTooShortError",
         )
     now_ts = now or _default_now()
 
-    # 1. 校验 task 存在 + 当前未软删 (valid_until IS NULL)
-    row = conn.execute(
-        "SELECT valid_until FROM entities WHERE id=? AND kind='task'",
-        (task_id,),
-    ).fetchone()
-    if not row:
-        raise TaskLoopError(
-            f"task_id={task_id} 不存在或已软删",
-            field="task_id", code="TaskNotFoundError",
+    # [M33.1 fix] BEGIN IMMEDIATE 事务 - check + UPDATE 原子化, 并发 forget 同
+    # task_id 第二个拿锁时 row[0] IS NOT NULL, 抛 TaskAlreadyForgotten.
+    # 旧实现 check + UPDATE 跨语句, 两 agent 都过 check, 双 UPDATE 同 task_id
+    # 双 audit_log 行 (同 reason), audit trace 重复污染.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # 1. 校验 task 存在 + 当前未软删 (valid_until IS NULL)
+        row = conn.execute(
+            "SELECT valid_until FROM entities WHERE id=? AND kind='task'",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"task_id={task_id} 不存在或已软删",
+                field="task_id", code="TaskNotFoundError",
+            )
+        # [8/6 M28 fix] row[0] 是 valid_until 列; 若已非 NULL, 重复 forget 应抛错.
+        if row[0] is not None:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"task_id={task_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
+                field="task_id", code="TaskAlreadyForgotten",
+            )
+
+        # 2. 关闭 task_states 当前行
+        invalidated = conn.execute(
+            """UPDATE task_states SET valid_until = ?
+               WHERE task_id=? AND valid_until IS NULL""",
+            (now_ts, task_id),
+        ).rowcount
+
+        # 3. 软删 entity
+        conn.execute(
+            """UPDATE entities SET valid_until = ?
+               WHERE id=? AND valid_until IS NULL""",
+            (now_ts, task_id),
         )
-    # [8/6 M28 fix] row[0] 是 valid_until 列; 若已非 NULL, 重复 forget 应抛错.
-    if row[0] is not None:
-        raise TaskLoopError(
-            f"task_id={task_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
-            field="task_id", code="TaskAlreadyForgotten",
+
+        # 4. cascade relations
+        rels = conn.execute(
+            """UPDATE relations SET valid_until = ?
+               WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
+            (now_ts, task_id, task_id),
+        ).rowcount
+
+        # 5. audit_log (M5.3 D11 留痕)
+        rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
+        conn.execute(
+            """INSERT INTO audit_log (
+                run_id, pass_name, action_type, ref_type, ref_id,
+                before_json, after_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                rid,
+                "forced_forget",
+                "explicit_softdelete",
+                "task",
+                task_id,
+                json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
+                json.dumps({"reason": reason_clean, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
+                1.0,
+                "applied",  # 立即 applied — 这不是 Proposal, 是显式 delete
+                now_ts,
+            ),
         )
-
-    # 2. 关闭 task_states 当前行
-    invalidated = conn.execute(
-        """UPDATE task_states SET valid_until = ?
-           WHERE task_id=? AND valid_until IS NULL""",
-        (now_ts, task_id),
-    ).rowcount
-
-    # 3. 软删 entity
-    conn.execute(
-        """UPDATE entities SET valid_until = ?
-           WHERE id=? AND valid_until IS NULL""",
-        (now_ts, task_id),
-    )
-
-    # 4. cascade relations
-    rels = conn.execute(
-        """UPDATE relations SET valid_until = ?
-           WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
-        (now_ts, task_id, task_id),
-    ).rowcount
-
-    # 5. audit_log (M5.3 D11 留痕)
-    rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
-    conn.execute(
-        """INSERT INTO audit_log (
-            run_id, pass_name, action_type, ref_type, ref_id,
-            before_json, after_json, confidence, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            rid,
-            "forced_forget",
-            "explicit_softdelete",
-            "task",
-            task_id,
-            json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
-            json.dumps({"reason": reason, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
-            1.0,
-            "applied",  # 立即 applied — 这不是 Proposal, 是显式 delete
-            now_ts,
-        ),
-    )
-    conn.commit()
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     return {
         "task_id": task_id,
         "forgotten_at": now_ts,
@@ -1639,69 +1661,86 @@ def forget_loop(
         {"loop_id", "forgotten_at", "run_id", "rows_invalidated"}
     """
     import uuid as _uuid
-    if not reason:
+    # [M33.2 fix] reason 强校验 — strip + 非空 + min length 5.
+    reason_clean = reason.strip() if reason else ""
+    if not reason_clean:
         raise TaskLoopError(
-            "forget_loop 必须提供 reason (D8 显式纠正门)",
+            "forget_loop 必须提供非空 reason (D8 显式纠正门)",
             field="reason", code="ReasonRequiredError",
         )
+    if len(reason_clean) < 5:
+        raise TaskLoopError(
+            f"forget_loop reason 长度需 >=5 字符 (审计可读), got {len(reason_clean)}",
+            field="reason", code="ReasonTooShortError",
+        )
     now_ts = now or _default_now()
-    row = conn.execute(
-        "SELECT valid_until FROM entities WHERE id=? AND kind='loop'",
-        (loop_id,),
-    ).fetchone()
-    if not row:
-        raise TaskLoopError(
-            f"loop_id={loop_id} 不存在或已软删",
-            field="loop_id", code="LoopNotFoundError",
+    # [M33.1 fix] BEGIN IMMEDIATE 事务 — check + UPDATE 原子化, 跟 forget_task 同.
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT valid_until FROM entities WHERE id=? AND kind='loop'",
+            (loop_id,),
+        ).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"loop_id={loop_id} 不存在或已软删",
+                field="loop_id", code="LoopNotFoundError",
+            )
+        if row[0] is not None:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"loop_id={loop_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
+                field="loop_id", code="LoopAlreadyForgotten",
+            )
+
+        # 关闭 task_states 当前行 (loop 用 task_states 记录 enabled/dormant)
+        invalidated = conn.execute(
+            """UPDATE task_states SET valid_until = ?
+               WHERE task_id=? AND valid_until IS NULL""",
+            (now_ts, loop_id),
+        ).rowcount
+
+        # 软删 entity
+        conn.execute(
+            """UPDATE entities SET valid_until = ?
+               WHERE id=? AND valid_until IS NULL""",
+            (now_ts, loop_id),
         )
-    # [8/6 M28 fix] 重复 forget 检测 — valid_until 已非 NULL 拒绝.
-    if row[0] is not None:
-        raise TaskLoopError(
-            f"loop_id={loop_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
-            field="loop_id", code="LoopAlreadyForgotten",
+
+        # cascade relations
+        rels = conn.execute(
+            """UPDATE relations SET valid_until = ?
+               WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
+            (now_ts, loop_id, loop_id),
+        ).rowcount
+
+        rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
+        conn.execute(
+            """INSERT INTO audit_log (
+                run_id, pass_name, action_type, ref_type, ref_id,
+                before_json, after_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                rid,
+                "forced_forget",
+                "explicit_softdelete",
+                "loop",
+                loop_id,
+                json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
+                json.dumps({"reason": reason_clean, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
+                1.0,
+                "applied",
+                now_ts,
+            ),
         )
-
-    # 关闭 task_states 当前行 (loop 用 task_states 记录 enabled/dormant)
-    invalidated = conn.execute(
-        """UPDATE task_states SET valid_until = ?
-           WHERE task_id=? AND valid_until IS NULL""",
-        (now_ts, loop_id),
-    ).rowcount
-
-    # 软删 entity
-    conn.execute(
-        """UPDATE entities SET valid_until = ?
-           WHERE id=? AND valid_until IS NULL""",
-        (now_ts, loop_id),
-    )
-
-    # cascade relations
-    rels = conn.execute(
-        """UPDATE relations SET valid_until = ?
-           WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
-        (now_ts, loop_id, loop_id),
-    ).rowcount
-
-    rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
-    conn.execute(
-        """INSERT INTO audit_log (
-            run_id, pass_name, action_type, ref_type, ref_id,
-            before_json, after_json, confidence, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            rid,
-            "forced_forget",
-            "explicit_softdelete",
-            "loop",
-            loop_id,
-            json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
-            json.dumps({"reason": reason, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
-            1.0,
-            "applied",
-            now_ts,
-        ),
-    )
-    conn.commit()
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     return {
         "loop_id": loop_id,
         "forgotten_at": now_ts,
