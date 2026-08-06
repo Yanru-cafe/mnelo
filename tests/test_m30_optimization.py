@@ -25,11 +25,22 @@ import task_states
 
 
 def _setup():
+    """[M32.1 fix] task_states/entities 清理前缀加日期通配符 '%m30-%' / '%m32-%'.
+
+    task_create 生成的 id 形如 'task:YYYYMMDD-<slug>', 例如
+    'task:20260727-m30-race-dup'. 旧 'task:m30-%' 永远不命中 — 日期前缀
+    夹在 'task:' 与 'm30' 之间. 跨测试泄漏 ghost open task + 破坏
+    test_m4_digest_block4 (counts.active_tasks 断言失败).
+
+    [M32.4 fix] 同步清 m32-* — 并发测试需要全新 task, 不能有 resolved
+    audit_log 行残留 (会触发 ProposalAlreadyResolved 阻断两个 apply).
+    """
     c = sqlite3.connect(str(memory.DB_PATH))
     c.execute("PRAGMA foreign_keys = OFF")
-    c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:m30-%' OR task_id LIKE 'loop:m30-%'")
-    c.execute("DELETE FROM entities WHERE id LIKE 'task:m30-%' OR id LIKE 'loop:m30-%'")
-    c.execute("DELETE FROM audit_log WHERE (pass_name='stuck_task' OR pass_name='forced_forget') AND (ref_id LIKE 'task:%m30-%' OR ref_id LIKE 'loop:%m30-%')")
+    c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:%m30-%' OR task_id LIKE 'loop:%m30-%' OR task_id LIKE 'task:%m32-%' OR task_id LIKE 'loop:%m32-%'")
+    c.execute("DELETE FROM entities WHERE id LIKE 'task:%m30-%' OR id LIKE 'loop:%m30-%' OR id LIKE 'task:%m32-%' OR id LIKE 'loop:%m32-%'")
+    c.execute("DELETE FROM audit_log WHERE (pass_name='stuck_task' OR pass_name='forced_forget') AND (ref_id LIKE 'task:%m30-%' OR ref_id LIKE 'loop:%m30-%' OR ref_id LIKE 'task:%m32-%' OR ref_id LIKE 'loop:%m32-%')")
+    c.execute("DELETE FROM chunks WHERE id LIKE 'chunk:m30-%' OR id LIKE 'chunk:m32-%' OR source LIKE '%m30-%' OR source LIKE '%m32-%'")
     c.execute("PRAGMA foreign_keys = ON")
     c.commit()
     c.close()
@@ -194,6 +205,83 @@ def test_m30_2_propose_rejects_invalid_threshold():
 
 # ===== M30.3 digest truncation =====
 
+def test_m32_4_concurrent_apply_only_one_succeeds():
+    """[M32.4] 真实并发 (双连接) apply 同 proposal_id, 应只有 1 成功.
+
+    旧 M30.1 是同连接顺序双 apply, 只能验幂等. 本测开双 sqlite3 连接 +
+    threading 双线程并发, 验 BEGIN IMMEDIATE 事务在跨连接 write-lock 下的
+    序列化. 期望:
+      - 1 个 apply 成功 (status=applied)
+      - 1 个 apply 抛 TaskLoopError ProposalAlreadyResolved
+      - audit_log 只 1 行 stale_resolved/applied (不双写)
+    """
+    import threading
+    import time as _time
+    _setup()
+    tid = _create_stale_task("m32-concurrent")
+
+    c1 = sqlite3.connect(str(memory.DB_PATH), timeout=30)
+    try:
+        # propose (用 c1, 让 audit_log id 一致)
+        result = task_states.propose_stale_tasks(c1, now="2026-08-06T15:00")
+        # 找本 task 的 proposal_id
+        row = c1.execute(
+            """SELECT id FROM audit_log
+               WHERE pass_name='stuck_task' AND ref_id=? AND status='proposed'""",
+            (tid,),
+        ).fetchone()
+        assert row is not None
+        pid = row[0]
+
+        # 双连接并发 apply (c1 vs c2)
+        # [M32.4 fix] sqlite3.Connection 默认 thread-local, 子线程内必须
+        # 自己 connect (check_same_thread=False 也行, 但每线程独立连接更
+        # 接近真实并发场景). BEGIN IMMEDIATE 拿写锁的序列化行为在这模式下成立.
+        results = {"a": None, "b": None}
+        errors = {"a": None, "b": None}
+
+        def worker(name: str):
+            conn = sqlite3.connect(str(memory.DB_PATH), timeout=30)
+            try:
+                # sleep 0 让两线程竞争锁
+                _time.sleep(0.01)
+                r = task_states.apply_stale_proposal(
+                    conn, pid, applied_action=f"from_{name}",
+                )
+                results[name] = r
+            except task_states.TaskLoopError as e:
+                errors[name] = e.code
+            finally:
+                conn.close()
+
+        ta = threading.Thread(target=worker, args=("a",))
+        tb = threading.Thread(target=worker, args=("b",))
+        ta.start()
+        tb.start()
+        ta.join(timeout=10)
+        tb.join(timeout=10)
+
+        # 期望: 一个成功 + 一个 ProposalAlreadyResolved
+        ok_count = sum(1 for k in ("a", "b") if results[k] is not None)
+        err_count = sum(1 for k in ("a", "b") if errors[k] is not None)
+        assert ok_count == 1, f"应 1 个 apply 成功, got {ok_count} ({results}, {errors})"
+        assert err_count == 1, f"应 1 个 apply 抛错, got {err_count} ({results}, {errors})"
+        # 错误码应为 ProposalAlreadyResolved
+        assert (errors["a"] == "ProposalAlreadyResolved" or
+                errors["b"] == "ProposalAlreadyResolved")
+
+        # 校验 audit_log 只 1 行 stale_resolved/applied (race fix 核心)
+        n = c1.execute(
+            """SELECT COUNT(*) FROM audit_log
+               WHERE pass_name='stuck_task' AND action_type='stale_resolved'
+                 AND ref_id=? AND status='applied'""",
+            (tid,),
+        ).fetchone()[0]
+        assert n == 1, f"并发 apply 应只有 1 行 stale_resolved/applied, got {n}"
+    finally:
+        c1.close()
+
+
 def test_m30_3_render_digest_block4_truncates_to_2000_chars():
     """[M30.3] render_digest_block4 输出截断到 ≤2000 字符 (digest 契约).
 
@@ -202,6 +290,7 @@ def test_m30_3_render_digest_block4_truncates_to_2000_chars():
     旧实现不截断 — 大量 stale task 会让 block 4 撑爆 digest, 注入 agent 上下文
     overflow. 修: 截断 + "..." 后缀.
     """
+    _setup()  # [M32.1 fix] 清理 m30 跨测试残留 (fixture prefix 兼容日期)
     c = sqlite3.connect(str(memory.DB_PATH))
     try:
         c.execute("PRAGMA foreign_keys = OFF")
@@ -216,9 +305,10 @@ def test_m30_3_render_digest_block4_truncates_to_2000_chars():
                 "INSERT OR IGNORE INTO entities (id, kind, name, properties_json, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)",
                 (tid, "task", long_name, "{}", "2026-08-06T09:00", "2026-08-06T09:00"),
             )
+            # [M32 fix] task_states.created_at NOT NULL 必填 (schema.sql H-1).
             c.execute(
-                "INSERT OR IGNORE INTO task_states (task_id, state, valid_from, valid_until, reason, evidence_chunk_id) VALUES (?, ?, ?, NULL, ?, NULL)",
-                (tid, "open", "2026-08-06T09:00", "task_create"),
+                "INSERT OR IGNORE INTO task_states (task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) VALUES (?, ?, ?, NULL, ?, NULL, ?)",
+                (tid, "open", "2026-08-06T09:00", "task_create", "2026-08-06T09:00"),
             )
         c.commit()
 
@@ -230,13 +320,15 @@ def test_m30_3_render_digest_block4_truncates_to_2000_chars():
 
         # 断言 1: block 4 输出 ≤2000 chars
         n_active = len(active["active_tasks"])
-        if n_active > 50:  # 超过 ~50 个 task 应触发截断
-            assert len(text_block) <= 2000, "block 4 应 ≤2000 chars, got " + str(len(text_block))
-            # 截断后应以 "..." 结尾
-            assert text_block.endswith("..."), "截断后应以 ... 结尾"
-        else:
-            # active_tasks 少, 不应截断
-            assert not text_block.endswith("...")
+        # [M32.3 fix] 校验 — live DB 可能含其他 stale task (e2e/m28/m5 残留),
+        # 我们 100 个 m30-digest task 自身已足够触发 2000 chars 截断.
+        # 不依赖 n_active 阈值, 直接断言:
+        #   1. block 4 总长 ≤ 2000 chars (含末尾 "..." 截断)
+        #   2. 截断后应以 "..." 结尾 (M30.3 显式 truncated flag 后置)
+        assert len(text_block) <= 2000, \
+            "block 4 应 ≤2000 chars, got " + str(len(text_block))
+        assert text_block.endswith("..."), \
+            "block 4 应被截断以 ... 结尾 (M30.3 truncation)"
     finally:
         c.execute("PRAGMA foreign_keys = OFF")
         c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:m30-digest-%'")
