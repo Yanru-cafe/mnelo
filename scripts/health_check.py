@@ -57,32 +57,68 @@ BJT = timezone(timedelta(hours=8))
 
 
 def check_mcp_alive():
-    """Returns (alive: bool, pid: int|None, uptime_sec: int|None)."""
+    """Returns (alive: bool, pid: int|None, uptime_sec: int|None).
+
+    双探测: lsof (默认 PATH 在 /usr/sbin) + ps (兜底, 不依赖 PATH).
+    macOS sandbox 环境可能 PATH 缺 /usr/sbin, lsof 报 FileNotFoundError.
+    """
+    pid_str = None
+    # 探测 1: lsof (PATH 完整时)
+    for lsof_path in ("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"):
+        try:
+            result = subprocess.run(
+                [lsof_path, "-tiTCP:%d" % MCP_PORT, "-sTCP:LISTEN"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pid_str = result.stdout.strip().split("\n")[0]
+                break
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    # 探测 2: ps 兜底 — mcp_server.py 进程 + LISTEN 该端口
+    if not pid_str:
+        try:
+            ps = subprocess.run(
+                ["ps", "-eo", "pid,command"],
+                capture_output=True, text=True, timeout=5,
+            )
+            # 候选: mcp_server.py 行
+            for line in ps.stdout.split("\n"):
+                if "mcp_server.py" not in line:
+                    continue
+                try:
+                    pid_candidate = int(line.split()[0])
+                    # 二次验证: lsof 该 pid 持有 MCP_PORT
+                    for lsof_path in ("lsof", "/usr/sbin/lsof", "/usr/bin/lsof"):
+                        try:
+                            lsof_pid = subprocess.run(
+                                [lsof_path, "-tiTCP:%d" % MCP_PORT, "-a", "-p", str(pid_candidate)],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                            if lsof_pid.returncode == 0 and lsof_pid.stdout.strip():
+                                pid_str = lsof_pid.stdout.strip().split("\n")[0]
+                                break
+                        except (FileNotFoundError, subprocess.TimeoutExpired):
+                            continue
+                    if pid_str:
+                        break
+                except (ValueError, IndexError):
+                    continue
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+    if not pid_str:
+        return (False, None, None)
     try:
-        # lsof is the source of truth — listens means it's actually serving
-        result = subprocess.run(
-            ["lsof", "-tiTCP:%d" % MCP_PORT, "-sTCP:LISTEN"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        pid_str = result.stdout.strip().split("\n")[0] if result.stdout.strip() else None
-        if not pid_str:
-            return (False, None, None)
         pid = int(pid_str)
-        # etime
         ps = subprocess.run(
             ["ps", "-p", str(pid), "-o", "etime="],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            capture_output=True, text=True, timeout=5,
         )
         etime = ps.stdout.strip()
-        # Parse [[DD-]HH:]MM:SS
         uptime_sec = parse_etime(etime)
         return (True, pid, uptime_sec)
-    except Exception as e:
-        return (False, None, None)
+    except Exception:
+        return (True, int(pid_str), None)
 
 
 def parse_etime(s):
