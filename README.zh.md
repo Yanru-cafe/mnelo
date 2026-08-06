@@ -30,6 +30,8 @@
   audit_log + undo。出厂默认关闭。
 - **标准 MCP，零锁定**——22 个工具，SSE 协议；兼容 Hermes、Claude
   Code、Cursor 或任意 MCP 客户端
+- **适合 \$10/年美国 VPS**——usearch f16 让内存 + 磁盘足够小，可跑
+  KVM1 1 GB / 25 GB SSD；一个盒子 = 完整记忆系统 + agent 中转
 
 ## 安装
 
@@ -66,7 +68,7 @@ Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — 安装、launchd、客户端接入、
   恢复
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — 备份 / 恢复、repo ↔ live
-  同步、launchd 命令、已知限制
+  同步、launchd 命令、**美国低价 VPS 部署**、已知限制
 - [docs/VECTOR_BACKENDS.md](docs/VECTOR_BACKENDS.md) — usearch (f16) vs
   zvec (INT8 + 原生 FTS) + AVX2 检测 + 崩溃诊断
 - [docs/L2_MAINTENANCE.md](docs/L2_MAINTENANCE.md) — 自主维护层细节
