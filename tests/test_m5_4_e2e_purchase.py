@@ -44,7 +44,7 @@ def _setup():
     c.execute("DELETE FROM audit_log WHERE ref_id LIKE 'task:%e2e-%' OR ref_id LIKE 'loop:%e2e-%' OR after_json LIKE '%e2e-%'")
     c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:%e2e-%' OR task_id LIKE 'loop:%e2e-%'")
     c.execute("DELETE FROM chunks WHERE id LIKE 'chunk:e2e-%' OR source LIKE '%e2e-%'")
-    c.execute("DELETE FROM relations WHERE source_id LIKE 'task:%e2e-%' OR target_id LIKE 'task:%e2e-%'")
+    c.execute("DELETE FROM relations WHERE source_id LIKE 'task:%e2e-%' OR target_id LIKE 'task:%e2e-%' OR source_id LIKE 'loop:%e2e-%' OR target_id LIKE 'loop:%e2e-%'")
     c.execute("DELETE FROM entities WHERE id LIKE 'task:%e2e-%' OR id LIKE 'loop:%e2e-%'")
     c.execute("PRAGMA foreign_keys = ON")
     c.commit()
@@ -240,3 +240,6 @@ def test_e2e_proposal_then_apply_resolves():
         assert all(p["ref_id"] != tid for p in rs["proposals"])
     finally:
         m.close()
+        _setup()  # [M31 fix] teardown 清理残留 (proposal 测试是文件最后一个,
+                  # 无下一个 _setup 兜底. 残留幽灵 open task + audit_log 行
+                  # 对 propose_stale_tasks / digest 可见, 跨文件测试污染)
