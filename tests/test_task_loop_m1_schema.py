@@ -140,6 +140,8 @@ def _setup_task_test_fixture(m):
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:tlm12m-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:20260806-t12m%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:tlm12-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:cli-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:20260806-cli-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm12-%'")
     # entities has FKs from relations (source_id/target_id). Disable FK enforcement
     # just for the DELETE (other tests may have left dangling relations).
@@ -162,7 +164,7 @@ def _setup_task_test_fixture(m):
         "OR id LIKE 'loop:tlm5-%' "
         "OR id LIKE '%m3-probe%' "
         "OR id LIKE '%t8-%' "
-        "OR id LIKE 'loop:耗材-%' OR id LIKE 'task:rf%' OR id LIKE 'loop:rf%' OR id LIKE 'task:20260806-rf%' OR id LIKE 'loop:20260806-rf%' OR id LIKE '%rf%-%' OR id LIKE 'task:20260806-t1%' OR id LIKE 'task:tlm9-%' OR id LIKE 'task:tlm10-%' OR id LIKE 'task:tlm11-%' OR id LIKE 'task:20260806-t9-%' OR id LIKE 'task:20260806-t10-%' OR id LIKE 'task:20260806-t11-%' OR id LIKE 'loop:tlm9-%' OR id LIKE 'loop:tlm10-%' OR id LIKE 'loop:tlm11-%' OR id LIKE 'loop:20260806-t9-%' OR id LIKE 'loop:20260806-t10-%' OR id LIKE 'loop:20260806-t11-%' OR id LIKE 'task:20260806-first%' OR id LIKE 'task:20260806-replay%' OR id LIKE 'task:20260806-second%' OR id LIKE 'task:20260806-active%' OR id LIKE 'loop:消耗品%' OR id LIKE 'loop:暂挂%' OR id LIKE '%d31f3997%' OR id LIKE 'loop:7b526973%' OR id LIKE 'loop:3c8e2f1a%' OR id LIKE 'loop:tlm12m-%' OR id LIKE 'loop:20260806-t12m-%' OR id LIKE 'loop:tlm12-%' OR id LIKE 'loop:20260806-t1%' "
+        "OR id LIKE 'loop:耗材-%' OR id LIKE 'task:rf%' OR id LIKE 'loop:rf%' OR id LIKE 'task:20260806-rf%' OR id LIKE 'loop:20260806-rf%' OR id LIKE '%rf%-%' OR id LIKE 'task:20260806-t1%' OR id LIKE 'task:tlm9-%' OR id LIKE 'task:tlm10-%' OR id LIKE 'task:tlm11-%' OR id LIKE 'task:20260806-t9-%' OR id LIKE 'task:20260806-t10-%' OR id LIKE 'task:20260806-t11-%' OR id LIKE 'loop:tlm9-%' OR id LIKE 'loop:tlm10-%' OR id LIKE 'loop:tlm11-%' OR id LIKE 'loop:20260806-t9-%' OR id LIKE 'loop:20260806-t10-%' OR id LIKE 'loop:20260806-t11-%' OR id LIKE 'task:20260806-first%' OR id LIKE 'task:20260806-replay%' OR id LIKE 'task:20260806-second%' OR id LIKE 'task:20260806-active%' OR id LIKE 'loop:消耗品%' OR id LIKE 'loop:暂挂%' OR id LIKE '%d31f3997%' OR id LIKE 'loop:7b526973%' OR id LIKE 'loop:3c8e2f1a%' OR id LIKE 'loop:tlm12m-%' OR id LIKE 'loop:20260806-t12m-%' OR id LIKE 'loop:tlm12-%' OR id LIKE 'loop:cli-%' OR id LIKE 'task:20260806-cli-%' OR id LIKE 'loop:20260806-t1%' "
     )
     m._conn.execute("PRAGMA foreign_keys = ON")
     m._conn.commit()
