@@ -1527,10 +1527,17 @@ def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, L
             if truncated:
                 break
             n += 1
-            line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
+            # [M35.2 fix] 截断长 loop name 到 60 chars (跟 task 段对称)
+            loop_name = l["name"]
+            if len(loop_name) > 60:
+                loop_name = loop_name[:57] + "..."
+            line = f"  - {loop_name} (interval={l.get('interval_hours')}h)"
             text_lines.append(line)
             refs[str(n)] = [l["loop_id"]]
-            if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
+            # [M35.2 fix] 跟 task 段 (1514) 同公式 - 真 joined 长 = sum(len(s)) + n - 1,
+            # 余量 80 chars 保守防超 2000 (loop 行最大 ~80 char after 60-char name cap).
+            current = sum(len(s) for s in text_lines) + len(text_lines) - 1
+            if current + 4 + 80 > DIGEST_BLOCK4_MAX_CHARS:
                 text_lines.append("...")
                 truncated = True
 
@@ -1564,6 +1571,14 @@ def forget_task(
         TaskLoopError: task_id 不存在 / 已经是 valid_until IS NOT NULL / reason 缺失.
     """
     import uuid as _uuid
+    # [M35.1 fix] reason isinstance(str) 守卫 - 非 str 类型 (e.g. int 12345)
+    # 旧实现 .strip() 抛 AttributeError, 未收敛到 TaskLoopError. M34 给 limit
+    # 加了 isinstance 守卫, M33 reason 校验未加, 两批「API 边界」风格不一.
+    if not isinstance(reason, str):
+        raise TaskLoopError(
+            f"reason 必须 str 类型, got {type(reason).__name__}",
+            field="reason", code="InvalidReasonTypeError",
+        )
     # [M33.2 fix] 强校验 reason: 必填 + 去前后空白 + min length 5 (审计可读).
     # 旧 `if not reason` 接受 ' ' (空格) 当真, audit trace 后人看不懂.
     reason_clean = reason.strip() if reason else ""
@@ -1686,6 +1701,12 @@ def forget_loop(
         {"loop_id", "forgotten_at", "run_id", "rows_invalidated"}
     """
     import uuid as _uuid
+    # [M35.1 fix] reason isinstance(str) 守卫 — 跟 forget_task 同, API 边界一致.
+    if not isinstance(reason, str):
+        raise TaskLoopError(
+            f"reason 必须 str 类型, got {type(reason).__name__}",
+            field="reason", code="InvalidReasonTypeError",
+        )
     # [M33.2 fix] reason 强校验 — strip + 非空 + min length 5.
     reason_clean = reason.strip() if reason else ""
     if not reason_clean:
