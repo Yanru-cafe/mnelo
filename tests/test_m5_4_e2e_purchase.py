@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime as _dt
 from datetime import timedelta as _tdelta
 
-REPO = Path("/Users/apple/.hermes/memory")
+REPO = Path(__file__).resolve().parent.parent  # [M29 fix] 不再硬编码作者本机路径
 sys.path.insert(0, str(REPO))
 import os
 os.environ.setdefault("MNELO_MEMORY_SEARCH_BACKEND", "usearch")
@@ -30,13 +30,22 @@ import task_states
 
 
 def _setup():
-    """Clean e2e fixtures. FK off 防 audit_log/tasks_states 级联约束冲突."""
+    """[M29 fix] Clean e2e fixtures (含 audit_log + chunks + task_states 前缀修正).
+
+    task_create 生成 id 为 'task:YYYYMMDD-<slug>' (实测 'task:20260806-e2e-restock-1'),
+    旧前缀 'task:e2e%' 匹配不到 — 残留污染下个 conftest session fixture 触发 FK 崩溃.
+    修: 前缀改为 'task:%e2e-%' / 'loop:%e2e-%' 兼容日期前缀. 补 chunks 表清理
+    (chunks 不会被 FK ON DELETE CASCADE 清, _remember_chunk raw SQL 插入的也清理).
+    """
     c = sqlite3.connect(str(memory.DB_PATH))
     c.execute("PRAGMA foreign_keys = OFF")
-    # 先 audit_log (task_states 当前行有 valid_until IS NULL 触发 FK)
-    c.execute("DELETE FROM audit_log WHERE ref_id LIKE 'task:e2e%' OR ref_id LIKE 'loop:e2e%'")
-    c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:e2e%' OR task_id LIKE 'loop:e2e%'")
-    c.execute("DELETE FROM entities WHERE id LIKE 'task:e2e%' OR id LIKE 'loop:e2e%'")
+    # 顺序: audit_log → task_states → chunks → entities
+    # (evidence_chunk_id FK 约束: 先清 task_states 当前行)
+    c.execute("DELETE FROM audit_log WHERE ref_id LIKE 'task:%e2e-%' OR ref_id LIKE 'loop:%e2e-%' OR after_json LIKE '%e2e-%'")
+    c.execute("DELETE FROM task_states WHERE task_id LIKE 'task:%e2e-%' OR task_id LIKE 'loop:%e2e-%'")
+    c.execute("DELETE FROM chunks WHERE id LIKE 'chunk:e2e-%' OR source LIKE '%e2e-%'")
+    c.execute("DELETE FROM relations WHERE source_id LIKE 'task:%e2e-%' OR target_id LIKE 'task:%e2e-%'")
+    c.execute("DELETE FROM entities WHERE id LIKE 'task:%e2e-%' OR id LIKE 'loop:%e2e-%'")
     c.execute("PRAGMA foreign_keys = ON")
     c.commit()
     c.close()
