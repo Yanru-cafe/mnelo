@@ -503,3 +503,13 @@
   - parse_etime 边界: ''/garbage → None（永不抛）；'5-03:14:22'→443662；'45:23'→2723
   - 新 health_check 全流程: ✅ MCP server alive PID 1197572, uptime 0.2h
 - 备注: lsof 完全缺失时仍报 DOWN 属已知边界（ps 兜底也需 lsof 验证端口；根因是 PATH 剥离非 lsof 缺失，超出本提交范围）。后续可用 ss/netstat 做最终兜底增强，非缺陷。
+
+## 2026-08-06 21:51 审查 57f7886..c75d3cb
+- 范围: 57f7886..c75d3cb（共 1 个提交）
+- 提交:
+  - c75d3cb fix(ops): M37 defensive pid parse — 复用 try 内已解析 pid
+- 结论: 通过（M37 极低危整改核实正确）。pid_str 只解析一次到 pid；int() 失败（ValueError/TypeError）→ 返回 (False, None, None) 与行为语义一致（lsof 给无效输入 → 真 DOWN），不再 except 内二次 int() 打崩整个 health_check。
+- 发现: 无新增。
+- 验证:
+  - 正常路径: check_mcp_alive() = (True, 1197572, 1122) ✓
+  - 模拟 lsof 输出非数字 pid_str → (False, None, None)，不崩 ✓（此前版本会崩溃）
