@@ -316,3 +316,42 @@
   - 未跑: test_m5_1_cron_tick.py 需仓库目录预置 memory.db（工作树缺失，环境问题，与本次改动无关；
     本次对 cron 脚本仅删 timezone import，已静态确认无残留引用）。
   - 本次两个发现均为测试未覆盖的边界（double-forget、apply 后再提议），已实测复现。
+
+## 2026-08-06 17:30 审查 aaca03a..6bbbcd0
+- 范围: aaca03a..6bbbcd0（共 1 个提交）
+- 提交:
+  - 6bbbcd0 feat(m5.4) + fix(m5.2 + m5.4): e2e 演练 + 2 个 bug 修复 (3/3 pass)
+- 结论: 发现 2 个问题（均在新测试文件；task_states.py 两个修复经核实正确）
+- 审查维度小结:
+  - task_states.py list_tasks asof 修复（L472）: 此前 asof 分支两个 `?` 占位只绑一个参数，
+    任何 asof 查询都会抛 "Incorrect number of bindings"。补 `params.append(asof)` 正确。已直接实测。
+  - task_states.py list_stale_proposals（L1376-1394）: status='proposed' 分支用
+    action_type='stale_review' + `ref_id NOT IN (SELECT ... action_type='stale_resolved' AND status='applied')`
+    排除已闭环 Proposal —— 与 propose_stale_tasks（stale_review/proposed）和 apply_stale_proposal
+    （stale_resolved/applied）写入模式逐字段核对一致；else 分支保持原行为。逻辑正确。
+- 发现: 按严重度列出
+  - [中] tests/test_m5_4_e2e_purchase.py `_setup()`（约 L38-46）清理前缀与实际生成的 id 不匹配，且不删
+    chunk，运行后残留脏数据，导致任何后续 pytest 会话的 conftest session fixture 崩溃。
+    - 具体: task_create 生成 id 为 `task:YYYYMMDD-<slug>`（实测 `task:20260806-e2e-restock-1`），
+      `_setup()` 只删 `LIKE 'task:e2e%'` 匹配不到；`_remember_chunk` 插入的 `chunk:e2e-*` 从不删除。
+      一次运行实测残留: 4 chunks + 3 entities + 7 task_states + 3 audit_log。
+    - 失败场景: 运行本测试文件后，下一个 pytest 会话的 autouse `_clean_test_data_session`
+      （先 `DELETE FROM chunks`、从不清理 task_states/audit_log）在
+      `DELETE FROM chunks WHERE source LIKE '%test%'` 处抛
+      `sqlite3.IntegrityError: FOREIGN KEY constraint failed`
+      （task_states.evidence_chunk_id → chunks(id)，schema.sql:172）。已实测复现。
+      若在默认 DB_PATH（live 记忆库）运行，还会把幽灵 open 任务/测试 chunk 写进生产记忆库。
+    - 建议: `_setup()` 改用带前导通配的前缀（如 `task:%e2e-`）并补
+      `DELETE FROM chunks WHERE id LIKE 'chunk:e2e-%'`；e2e 测试避免对 live 库跑。
+  - [低] tests/test_m5_4_e2e_purchase.py:31 硬编码 `REPO = Path("/Users/apple/.hermes/memory")` —
+    该路径在本机已被移除、不存在；测试能过仅因 conftest 把 repo root 注入 sys.path。裸跑/复制到
+    无 conftest 环境会 import 失败。建议改为 `Path(__file__).resolve().parent.parent`。
+- 测试:
+  - 环境: 全量 pytest 被既有 conftest session fixture（usearch index load 原生 abort）阻断；本轮用
+    `scripts/init_db.py` 初始化全新临时 memory.db + `MNELO_MEMORY_SEARCH_BACKEND=usearch` 隔离运行。
+  - 新增: test_m5_4_e2e_purchase.py —— **3/3 通过**。
+  - 回归（各在独立新库上）: test_m5_2_stale_proposal **10/10**、test_task_states_list_replay **4/4**、
+    test_task_states_create **5/5**、test_task_states_transition **4/4**、test_m5_3_d11_forget **10/10**。
+  - list_tasks(asof) 修复直接验证: asof 单查 / asof+state / 默认路径均正常（修复前会抛绑定数错误）。
+  - 未跑: test_asof_replay.py 在 setUpClass 的 memory.remember → usearch index.add 处原生段错误
+    （本机既有环境问题；本提交未触及 search_index / memory.remember 路径，与此改动无关）。
