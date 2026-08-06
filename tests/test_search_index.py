@@ -185,8 +185,20 @@ class TestZvecBackendWithFake(unittest.TestCase):
         import search_index
 
         # 重载以确保用刚注入的 fake zvec
-        search_index.zvec_available = lambda: True
+        # [8/6 fix] 用 mock 而非永久赋值 — 原 zvec_available = lambda: True
+        # 永久改写模块属性且不恢复, 污染后续测试类 (TestZvecAvx2Gate 的
+        # _cpu_has_avx2 mock 因此失效 → zvec_available 已被替换, 测的不是真逻辑).
+        from unittest import mock
+
+        self._zva_patch = mock.patch.object(
+            search_index, "zvec_available", return_value=True
+        )
+        self._zva_patch.start()
         self.module = search_index
+
+    def tearDown(self):
+        if getattr(self, "_zva_patch", None) is not None:
+            self._zva_patch.stop()
 
     def test_01_init_creates_schema(self):
         idx = self.module.ZvecIndex(Path("/tmp/fake_zv_test"), dim=512)
@@ -291,6 +303,55 @@ class TestUsearchF16Assertion(unittest.TestCase):
                 UsearchIndex(td / "memory.db", 512)
             self.assertIn("f16", str(ctx.exception))
             self.assertIn("rebuild_index.py", str(ctx.exception))
+
+
+class TestZvecAvx2Gate(unittest.TestCase):
+    """[8/6 修复] zvec_available CPU AVX2 前置探测 — 无 AVX2 绝不 import zvec.
+
+    背景: zvec_available 原主进程 try-import zvec, 但无 AVX2 的 CPU 上 import 是
+    SIGILL (进程级崩溃, 非 Python 异常), try/except 拦不住 → auto 链带崩整个
+    mnelo (本机 Ivy Bridge 实测 dumped core). 修复: 先 _cpu_has_avx2() 探测,
+    明确无 AVX2 直接返回 False, 不 import.
+    用 fake zvec 注入 sys.modules, 让 import 路径不触发真原生扩展.
+    """
+
+    def test_cpu_probe_returns_bool_or_none(self):
+        """Linux 上应能探测出 AVX2 支持与否 (本机 Ivy Bridge → False)."""
+        from search_index import _cpu_has_avx2
+
+        r = _cpu_has_avx2()
+        self.assertIn(r, (True, False, None),
+                      f"探测应返回 True/False/None, got {r!r}")
+
+    def test_no_avx2_skips_zvec_import(self):
+        """无 AVX2 → zvec_available 返回 False 且不 import (不注入 fake, 若走了
+        import 本机直接 SIGILL 崩测试进程 — 此测试本身即防回归)."""
+        from unittest import mock
+
+        import search_index
+
+        with mock.patch("search_index._cpu_has_avx2", return_value=False):
+            self.assertFalse(search_index.zvec_available())
+
+    def test_avx2_imports_fake_zvec(self):
+        """CPU 支持 AVX2 → 正常 import zvec (fake), 返回 True."""
+        from unittest import mock
+
+        import search_index
+
+        _install_fake_zvec()
+        with mock.patch("search_index._cpu_has_avx2", return_value=True):
+            self.assertTrue(search_index.zvec_available())
+
+    def test_unknown_cpu_falls_back_to_import(self):
+        """平台探测不了 (None) → 回退 try-import (fake), 保持原行为."""
+        from unittest import mock
+
+        import search_index
+
+        _install_fake_zvec()
+        with mock.patch("search_index._cpu_has_avx2", return_value=None):
+            self.assertTrue(search_index.zvec_available())
 
 
 class TestFactory(unittest.TestCase):

@@ -12,8 +12,9 @@ search_index.py — L1 检索层索引抽象 (DESIGN §3.6 / §8.3)
 
 ⚠️ zvec 后端说明 (重要):
   - zvec 0.6 原生扩展要求较新 CPU 指令 (AVX2+)。在旧 CPU 上 `import zvec` 直接
-    Illegal instruction 崩溃 (进程级, 非异常)。因此 zvec 可用性检测必须在
-    **子进程**中进行, 不可在 mnelo 进程内 try-import (会把 mnelo 一起带崩)。
+    Illegal instruction 崩溃 (进程级, 非异常)。因此 import 前必须先探测 CPU:
+    `zvec_available()` 用 `_cpu_has_avx2()` 前置探测, **无 AVX2 直接返回 False
+    绝不 import** (避免 SIGILL 带崩整个 mnelo 进程)。平台探测不了才回退 try-import。
   - zvec 后端代码按 zvec 0.6 类型化 API (zvec.pyi + model/*.py) 编写,
     **尚未在目标机 (Mac ARM64) 实测** — 需在部署机上验证后启用。
     INT8 精度 API 用 DataType.VECTOR_INT8 假设 (见风险 9, 真实 API 待 zvec 文档核实).
@@ -578,17 +579,50 @@ class UsearchIndex(SearchIndex):
 # 工厂 + 特性检测
 # ============================================================
 
+def _cpu_has_avx2() -> Optional[bool]:
+    """探测当前 CPU 是否支持 AVX2 (zvec 0.6 原生扩展的硬性要求).
+
+    返回 True/False 表示探测成功; None 表示当前平台无法探测 (调用方回退到
+    import 试错). Linux 读 /proc/cpuinfo flags; macOS 查 sysctl
+    machdep.cpu.leaf7_features.
+    """
+    try:
+        if sys.platform == "linux":
+            with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("flags"):
+                        return "avx2" in line.lower()
+            return None  # /proc/cpuinfo 无 flags 行 (异常环境)
+        if sys.platform == "darwin":
+            import subprocess
+            out = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.leaf7_features"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return "avx2" in out.stdout.lower()
+            return None  # sysctl 不可用 / 空输出
+    except Exception as e:
+        logger.warning(f"[cpu_has_avx2] 探测失败: {e}")
+        return None
+    return None
+
+
 def zvec_available() -> bool:
-    """子进程检测 zvec 是否可导入 — 防旧 CPU 上 import 崩溃带崩 mnelo 主进程.
+    """检测 zvec 是否可导入 — 主进程 import 前先探测 CPU AVX2.
+
+    ⚠️ zvec 0.6 原生扩展硬性要求 AVX2+; 无 AVX2 的 CPU 上 `import zvec` 是进程级
+    SIGILL 崩溃 (不是可捕获的 Python 异常), try/except 拦不住, 会把整个 mnelo
+    带崩. 因此在主进程 import 之前先探测 CPU: **明确无 AVX2 → 直接返回 False,
+    绝不 import**, auto 链走 usearch. 探测不了 (None) 才回退 try-import.
 
     [8/6 fix] macOS 26 launchd 起的 MCP 进程 fork 子进程跑 zvec native .so mmap
-    必现 BlockingIOError (Errno 35 = EAGAIN, 不是 pipe 阻塞而是 fork syscall
-    期间 kernel 返 EAGAIN). 子进程检测在这环境下不可靠.
-
-    实际方案: 改在主进程直接 try-import zvec. 老 CPU (Ivy Bridge 之前) import
-    zvec 崩溃的假设本机 (M2 MacBook, AVX2+) 不适用 — 本机 0 风险. 旧 CPU 用户
-    应走 usearch 后端 (factory 自动降级).
+    必现 BlockingIOError (Errno 35 = EAGAIN) — 子进程检测不可靠, 故保留主进程路径.
     """
+    cpu_avx2 = _cpu_has_avx2()
+    if cpu_avx2 is False:
+        logger.info("[zvec_available] CPU 无 AVX2 (zvec 0.6 硬性要求) — 回落 usearch, 不 import zvec")
+        return False
     try:
         import zvec  # noqa: F401
         return True
