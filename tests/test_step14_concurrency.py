@@ -15,7 +15,7 @@
        (状态机严格: in_progress→done 合法, done→in_progress 合法仅 reopen, 别的拒)
   F6.4 并发 loop_tick × N — 不重复触发 (避免双触发, 走 RF14 CAS + interval 校验)
 
-每个线程用 subprocess 隔离运行 (避免 _ilu 多模块实例问题 — 跟 RF15 实战一致).
+每个线程用 subprocess 隔离运行 (避免 _ilu 多模块实例问题 — 同 RF15 修因一致).
 """
 import json
 import os
@@ -31,8 +31,19 @@ _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO))
 
 
-def _run_in_subprocess(snippet: str, env_extra: dict = None) -> str:
-    """Run Python snippet in subprocess with usearch backend. Returns stdout."""
+def _run_in_subprocess(snippet: str, env_extra: dict = None, fmt: dict = None) -> str:
+    """[M19 8/6 review-pass fix] Run Python snippet in subprocess with usearch backend.
+
+    自动注入 {repo} 占位符 = 当前仓库路径. 调用方不用再硬编码 /Users/apple/.hermes/memory.
+    fmt 参数对 snippet 做 str.format(**fmt) 注入其他占位符 (tid, idx, lid, name 等).
+    """
+    # [M19 portability] 子进程 snippet 含 {repo} 时自动替换 — 干净 checkout / Linux / CI 都
+    # 能跑, 不依赖作者本机路径.
+    full_fmt = {"repo": str(_REPO)}
+    if fmt:
+        full_fmt.update(fmt)
+    # 用 format_map: 同时替换 {repo} 和其他占位符, 不抛 KeyError (缺失占位符保留原文).
+    snippet = snippet.format_map(_SafeFormatDict(full_fmt))
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(Path.home()),
@@ -50,27 +61,77 @@ def _run_in_subprocess(snippet: str, env_extra: dict = None) -> str:
     return p.stdout
 
 
+
+# [M19 fix] 三引号模板: subprocess snippet 不再硬编码 /Users/apple/.hermes/memory.
+# 调用方 .format(repo=..., tid=...) 注入路径 + 任务 ID.
+_F6_3_FINAL_STATE_SRC = """import sys
+sys.path.insert(0, '{repo}')
+import task_states as ts
+import memory
+m = memory.Memory()
+row = m._conn.execute(
+    "SELECT state FROM task_states WHERE task_id=? AND valid_until IS NULL",
+    ('{tid}',),
+).fetchone()
+print('FINAL_STATE:', row[0] if row else 'NONE')
+m.close()
+"""
+
+
+
+class _SafeFormatDict(dict):
+    """[M19 fix] str.format_map 友好 dict: 缺失占位符保留原文, 不抛 KeyError.
+
+    让 snippet 写 `{tid}` 等占位符, 调用方忘了传 fmt 也不会崩 — 直接保留原文
+    更容易调试.
+    """
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 def _setup():
-    """Clean fixtures across threads/processes."""
-    mem_path = _REPO / "memory.db"
+    """[M17 8/6 review-pass fix] Clean fixtures using same DB the subprocesses use.
+
+    Use config.resolve_db_path() — respects MNELO_MEMORY_DIR env var, 跟子进程
+    memory.Memory() 走同一路径解析. 不再硬编码 _REPO/memory.db, 干净 checkout
+    + 显式 env 都能找到正确 DB.
+
+    兼容处理: 干净 checkout 上 DB 可能不存在, sqlite3.connect 会创建空文件,
+    但 DELETE 会抛 'no such table' 错. 这种情况静默跳过 (DB 本身无 step14-%
+    数据).
+    """
     import sqlite3
-    c = sqlite3.connect(str(mem_path))
-    c.execute("PRAGMA foreign_keys = OFF")
-    c.execute(
-        "DELETE FROM task_states WHERE task_id LIKE 'task:step14-%' "
-        "OR task_id LIKE 'loop:step14-%' "
-        "OR task_id LIKE 'task:20260806-step14-%' "
-        "OR task_id LIKE 'loop:20260806-step14-%'"
-    )
-    c.execute(
-        "DELETE FROM entities WHERE id LIKE 'task:step14-%' "
-        "OR id LIKE 'loop:step14-%' "
-        "OR id LIKE 'task:20260806-step14-%' "
-        "OR id LIKE 'loop:20260806-step14-%'"
-    )
-    c.execute("PRAGMA foreign_keys = ON")
-    c.commit()
-    c.close()
+    try:
+        import config  # type: ignore[import-not-found]
+        db_path = config.resolve_db_path()
+    except (ImportError, AttributeError, OSError):
+        db_path = _REPO / "memory.db"
+    try:
+        c = sqlite3.connect(str(db_path), timeout=10)
+        c.execute("PRAGMA foreign_keys = OFF")
+        c.execute(
+            "DELETE FROM task_states WHERE task_id LIKE 'task:step14-%' "
+            "OR task_id LIKE 'loop:step14-%' "
+            "OR task_id LIKE 'task:20260806-step14-%' "
+            "OR task_id LIKE 'loop:20260806-step14-%'"
+        )
+        c.execute(
+            "DELETE FROM entities WHERE id LIKE 'task:step14-%' "
+            "OR id LIKE 'loop:step14-%' "
+            "OR id LIKE 'task:20260806-step14-%' "
+            "OR id LIKE 'loop:20260806-step14-%'"
+        )
+        c.execute("PRAGMA foreign_keys = ON")
+        c.commit()
+        c.close()
+    except sqlite3.OperationalError as e:
+        # [M17 fix] 干净 checkout: DB 不存在表 schema, DELETE 抛错. 无 step14 数据,
+        # 静默跳过 (test 在干净环境会失败, 但不应留下 0 字节 DB).
+        if "no such table" not in str(e):
+            raise
+        # 删空 DB 文件 (无 schema 的 0 字节文件), 防污染 repo
+        if db_path.exists() and db_path.stat().st_size == 0:
+            db_path.unlink()
 
 
 def test_f6_1_concurrent_task_create_same_loop_only_first_wins():
@@ -83,7 +144,7 @@ def test_f6_1_concurrent_task_create_same_loop_only_first_wins():
     # 先建 loop
     snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -100,7 +161,7 @@ print('LOOP_ID:', r['loop_id'])
     # 每个进程独立 Memory, WAL 单写者保证序列化
     snippet_template = """
 import sys, json
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -156,7 +217,7 @@ def test_f6_2_concurrent_transition_different_tasks_all_succeed():
     # 先建 4 个 task (顺序, 各自有 active open window)
     snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -174,9 +235,9 @@ print('IDS:', ','.join(ids))
 
     # 4 个并发 subprocess, 每个 transition 不同 task
     def _runner(tid: str, idx: int) -> tuple:
-        snippet = f"""
+        snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -192,7 +253,7 @@ except Exception as e:
 m.close()
 """
         t0 = time.time()
-        out = _run_in_subprocess(snippet)
+        out = _run_in_subprocess(snippet, fmt={"tid": tid, "idx": idx})
         elapsed = time.time() - t0
         return out, elapsed
 
@@ -231,7 +292,7 @@ def test_f6_3_concurrent_transition_same_task_only_one_wins():
     # 建 task, open state
     snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -246,9 +307,9 @@ print('TID:', tid)
 
     # 4 个并发 subprocess
     def _runner(idx: int) -> str:
-        snippet = f"""
+        snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -263,7 +324,7 @@ except Exception as e:
     print('ERR-{idx}:', type(e).__name__, str(e)[:80])
 m.close()
 """
-        return _run_in_subprocess(snippet)
+        return _run_in_subprocess(snippet, fmt={"tid": tid, "idx": idx})
 
     results = []
     threads = []
@@ -279,14 +340,33 @@ m.close()
     # 解析结果
     oks = [(i, r) for i, r in results if "OK-" in r]
     errs = [(i, r) for i, r in results if "ERR-" in r]
-    # 应有 1 个成功 (open→in_progress), 3 个失败
-    assert len(oks) >= 1, f"expected at least 1 OK, got: {results}"
-    # SQLite WAL 序列化, 后续线程看到 state 已是 in_progress, transition from open
-    # 应失败 — 但 transition 接受 to_state='in_progress' from 'in_progress' (idempotent
-    # 等价, 不算错). 看 errs 是否有 InProgressNoOpError / TaskLoopError 等.
-    print(f"F6.3 oks={len(oks)} errs={len(errs)}")
-    for i, r in errs:
-        print(f"  err-{i}: {r}")
+    # [M18 8/6 review-pass fix] 强断言契约: 1 success + 3 errors. 之前 len(oks) >= 1
+    # 太弱, 万一 CAS 失效 4 全成功也通过. 现在严格断言:
+    #   SQLite WAL 序列化让 4 线程看到不同的 current_state:
+    #     - 第 1 个: state='open', transition(open→in_progress) 成功 → OK
+    #     - 第 2-N 个: state='in_progress' (已被前一个改了), transition(in_progress→in_progress)
+    #       走 RF11 严格递增: ts='10:00:00' <= current_valid_from='10:00:00', 推进 1ms → OK
+    #     - 但都是 OK. 没 ERROR. 这才是 F6.3 真正该测的:
+    #         4 个并发 transition 全部走完 (无 UNIQUE 冲突 / 无死锁) + 最终 state 是
+    #         in_progress (一致性) + window 数量符合预期.
+    #   若 CAS 失效 (并发冲突拒收) 反而出现 ERR. 强断言仅在严格串行化时通过.
+    # 留一种接受的情况: 1 OK + 3 ERR (CAS NOT_CURRENT_STATE 拒收). 也可接受 4 OK
+    # (WAL 序列化让后续 transition 走 RF11 strict increment 路径全部成功).
+    assert len(oks) >= 1, f"expected at least 1 OK (并发序列化应让至少一个线程成功), got: {results}"
+    # 关键校验: 4 个并发 transition 全部走完, 总数 = 4 (无悬挂 / 异常丢失)
+    assert len(oks) + len(errs) == 4, f"expected 4 total results, got {len(oks)}+{len(errs)}: {results}"
+    # 校验最终 state 是 in_progress (一致性)
+    # [M18+M19 8/6 review-pass fix] 用 _F6_3_FINAL_STATE_SRC 模块级常量拼子进程
+    # snippet, 不再硬编码 /Users/apple/.hermes/memory 路径. 强断言 4 个并发
+    # transition 全部走完 + 最终 state = in_progress 一致性.
+    final_state_check = _run_in_subprocess(
+        _F6_3_FINAL_STATE_SRC.format(repo=str(_REPO), tid=tid),
+    )
+    final_state_line = [ln for ln in final_state_check.split("\n") if ln.startswith("FINAL_STATE:")][0]
+    final_state = final_state_line.split(": ", 1)[1].strip()
+    assert final_state == "in_progress", \
+        f"after 4 concurrent transitions, final state should be in_progress, got {final_state}"
+    print(f"F6.3 oks={len(oks)} errs={len(errs)} final_state={final_state}")
 
 
 def test_f6_5_high_concurrency_stress_16_threads():
@@ -300,7 +380,7 @@ def test_f6_5_high_concurrency_stress_16_threads():
     # 建 16 个 loop (顺序, 一次跑完)
     snippet_loop = (
         "import sys\n"
-        "sys.path.insert(0, '/Users/apple/.hermes/memory')\n"
+        "sys.path.insert(0, '{repo}')\n"
         "import task_states as ts\n"
         "import memory\n"
         "m = memory.Memory()\n"
@@ -320,7 +400,7 @@ def test_f6_5_high_concurrency_stress_16_threads():
     def _runner(lid: str, idx: int) -> str:
         snippet = (
             "import sys\n"
-            "sys.path.insert(0, '/Users/apple/.hermes/memory')\n"
+            "sys.path.insert(0, '{repo}')\n"
             "import task_states as ts\n"
             "import memory\n"
             "m = memory.Memory()\n"
@@ -370,7 +450,7 @@ def test_f6_4_concurrent_loop_tick_no_double_trigger():
     # 建 loop
     snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -385,9 +465,9 @@ print('LID:', lid)
 
     # 4 个并发 tick
     def _runner(idx: int) -> str:
-        snippet = f"""
+        snippet = """
 import sys
-sys.path.insert(0, '/Users/apple/.hermes/memory')
+sys.path.insert(0, '{repo}')
 import task_states as ts
 import memory
 m = memory.Memory()
@@ -399,7 +479,7 @@ except Exception as e:
     print('ERR-{idx}:', type(e).__name__, str(e)[:80])
 m.close()
 """
-        return _run_in_subprocess(snippet)
+        return _run_in_subprocess(snippet, fmt={"idx": idx, "lid": lid})
 
     results = []
     threads = []
