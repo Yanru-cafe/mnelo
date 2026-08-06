@@ -226,3 +226,25 @@
   - 本机无法运行 `pytest tests/test_m5_1_cron_tick.py tests/test_task_states_loop_tick.py`：既有 conftest session fixture 在 `Memory()` 初始化时触发 native 扩展堆损坏（`corrupted size vs. prev_size`，无 AVX2 环境，plist 注释亦承认「测试环境 SIGSEGV 兜底」），属既有环境限制、非本提交引入，与上轮相同。
   - 已用独立最小片段实测关键契约: ① naive − aware 相减抛 `TypeError`（Finding 1 成立）; ② 空库 `Memory()` init 抛 `OperationalError: no such table: entities`（Finding 2 情形①成立）; ③ `list_loops` 返回 `{loops,count,truncated}` 且 loop 含 loop_id/name/trigger/interval_hours、`loop_tick` 返回 verdict/active_task_id/last_cycle_done_at、`audit_log` 列与 UNIQUE(run_id,pass_name,action_type,ref_id,status) 均与新脚本假设一致（run_id 每次带 uuid 唯一，无约束冲突）。
   - 提交声称 6/6 pass 无法在本机复现；鉴于 Finding 3，推断通过依赖作者本机 ~/.hermes 与 repo 根 memory.db 路径重合。
+
+## 2026-08-06 15:58 审查 cd0254d..8b3e483
+- 范围: cd0254d..8b3e483（共 1 个提交）
+- 提交:
+  - 8b3e483 fix(review): M17+M18+M19 review-pass 整改 (100/100 pass)
+- 结论: 发现 2 个问题（1 高 / 1 中）
+- 发现:
+  - **[高] tests/test_step14_concurrency.py:34-61 — `_run_in_subprocess` 子进程 env 剥离 `MNELO_MEMORY_DIR`，DB 解析回落已移除的 `~/.hermes/memory` → 5 个测试全部 `unable to open database file`，M17/M19「干净 checkout / Linux / CI 可跑」的承诺未兑现**
+    - 位置: `_run_in_subprocess` 的 `env = {"PATH":..., "HOME":..., "MNELO_MEMORY_SEARCH_BACKEND":...}`（:47-51）。传 `env=` 给 `subprocess.run` 时子进程环境被整体替换，不继承父进程 `MNELO_MEMORY_DIR`/`MNELO_MEMORY_DB_PATH`。子进程内 `import memory` → `memory.DB_PATH = config.resolve_db_path()`（config.py:51-62）在无 env 时回落到 `DEFAULT_LIVE_ROOT / "memory.db"` = `~/.hermes/memory/memory.db`（config.py:47 默认值）。
+    - 问题: 本机 `~/.hermes` 已被移除（CLAUDE.md 记录），SQLite 不会自动创建父目录 → 实测每个子进程 `sqlite3.connect('/root/.hermes/memory/memory.db')` 抛 `OperationalError: unable to open database file`。直接驱动 5 个测试函数（绕过崩坏的 session fixture）：**5/5 FAIL**，全部 `AssertionError: subprocess failed: rc=1`。提交声称「M17+M19 跨 4 子进程测试可移植性增强」「干净 checkout / Linux / CI 都 OK」，本机（正是该场景）完全不可运行。作者机通过，仅因 `~/.hermes/memory` 恰好存在且指向同一 DB。
+    - 失败场景: 任何 `MNELO_MEMORY_DIR` 指向非 `~/.hermes/memory` 且旧目录不存在的环境（本机、干净 CI），`pytest tests/test_step14_concurrency.py` 5/5 崩溃。
+    - 建议: 继承 `os.environ` 后仅覆盖 PATH 等键，或显式把 `MNELO_MEMORY_DIR`/`MNELO_MEMORY_DB_PATH` 透传进子进程 env；最稳妥是让调用方把解析好的 `db_path` 直接注入 snippet。
+  - **[中] tests/test_step14_concurrency.py:92-134 — `_setup()` 清理的 DB 与子进程实际使用的 DB 不一致（与上轮 def4136 Finding 3 同根因再犯）**
+    - 位置: `_setup()` 用父进程 env 的 `config.resolve_db_path()`（:106），解析到 `/root/work/mnelo-data/memory.db`；而子进程（Finding 1 的 env 剥离）落到 `~/.hermes/memory/memory.db`。M17 docstring 声称「跟子进程 memory.Memory() 走同一路径解析」，不成立。
+    - 问题: 即使 `~/.hermes/memory` 存在、测试能跑，清理也只删 `/root/work/mnelo-data/memory.db` 的 step14 行，子进程库里的 step14 残留（task_states/entities）跨测试、跨运行累积。F6.1 期望「1 success + 3 error」，若子进程库遗留未清理的同名 loop 活跃窗，可能全部失败或断言失真；F6.3 同理。修复只解决了「干净 checkout 上建 0 字节库」这个子问题，主路径（清同一库）没对齐。另注意 `_setup()` 现在会向 /root/work/mnelo-data/memory.db（生产 live 库）执行 DELETE——两库不同时，等于在生产库上反复删 step14 前缀行。
+    - 失败场景: 连续两次运行测试（子进程库遗留上一轮 step14-loop 活跃 task），F6.1/F6.3 断言不稳；或生产库被误清理。
+    - 建议: 与 Finding 1 一并修复——统一 DB 路径来源（子进程 env 透传 + `_setup` 同源解析），或全部用独立临时库 + `MNELO_MEMORY_DB_PATH` 指向它。
+  - 说明（非发现）: F6.3 强断言本身经核对成立——`transition()` 允许图 + RF11 严格递增下，4 并发要么 1 OK+3 ERR、要么 4 OK，终态均为 `in_progress`；`len(oks)+len(errs)==4` 能抓住子进程崩溃/线程悬挂，是对旧 `len(oks)>=1` 的真实加强。`_SafeFormatDict`/format_map 改造经逐一核对所有 snippet，无裸 `{}` 会触发 `ValueError`；`config.resolve_db_path()` 返回 `Path`，`_setup` 的 `.exists()/.unlink()` 类型安全。
+- 测试:
+  - 全量 pytest 仍被既有 conftest session fixture（`_clean_test_data_session` → `Memory()` → usearch index `load` 原生 abort：`free(): corrupted unsorted chunks`）阻断，与上轮同环境问题（usearch 库/索引格式不匹配），非本提交引入——本提交仅改测试文件。
+  - 已绕过该 fixture 直接驱动被改的 5 个测试函数：**5/5 FAIL**，全部因子进程 `OperationalError: unable to open database file`（Finding 1 实测复现）。
+  - 已静态核对 `transition()`/`loop_tick` 语义与 F6.3 新断言匹配（见说明）。提交声称 100/100 pass 在本机不可复现；推断作者机通过依赖 `~/.hermes/memory` 与 `MNELO_MEMORY_DIR` 恰好同指。
