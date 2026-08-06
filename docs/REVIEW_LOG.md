@@ -381,3 +381,24 @@
   - test_m5_4_e2e_purchase.py（memory.forget 变更后回归）—— **3/3 通过**。
   - 环境: 同上轮（init_db.py 全新临时库 + usearch 隔离运行；全量套件仍被既有
     conftest usearch index load 原生 abort 阻断）。
+## 2026-08-06 17:51 审查 d0fe4ab..41a468e
+- 范围: d0fe4ab..41a468e（共 1 个提交）
+- 提交:
+  - 41a468e fix(review): M29 review-pass 整改 (30/30 pass)
+- 结论: 通过（修复核实正确）—— 上轮两个发现（_setup 清理前缀不匹配 + 硬编码路径）均正确修复并有测试覆盖；残留收敛、不再触发下个会话 conftest 崩溃
+- 审查维度小结:
+  - _setup()（tests/test_m5_4_e2e_purchase.py L32-55）: 前缀改为 `task:%e2e-%`/`loop:%e2e-%`（兼容 `task:YYYYMMDD-<slug>` 日期前缀，实测 `task:20260806-e2e-restock-1`），补删 chunks（`chunk:e2e-%`/source 含 e2e-）、relations、audit_log（after_json）。修复前残留 4 chunks+3 entities+7 task_states+3 audit_log → 下个会话 conftest 在 `DELETE FROM chunks` 处 FK constraint failed；修复后实测残留收敛为 0 chunks + 1 ghost open task + 2 audit_log，不再崩溃。删除顺序（audit_log→task_states→chunks→relations→entities）正确：task_states.task_id/evidence_chunk_id 的 FK 目标先于被删源，relations 无 FK。
+  - REPO 硬编码修复: test_m5_4 L23 改 `Path(__file__).resolve().parent.parent`。
+  - 新测试 test_m29_review_fixes.py: 3 测覆盖前缀匹配、chunks 清理、无硬编码路径。task_create id 格式断言（`^task:\d{8}-e2e-`）与 _slugify/task_id 生成逻辑（L588-615）逐字段核对一致。
+- 发现: 按严重度列出
+  - [低] tests/test_m5_4_e2e_purchase.py:47 relations 清理只覆盖 `task:%e2e-%`，与 task_states/entities 清理同时覆盖的 `loop:%e2e-%` 不一致。
+    - 具体: `DELETE FROM relations WHERE source_id LIKE 'task:%e2e-%' OR target_id LIKE 'task:%e2e-%'`，缺 loop 前缀分支。
+    - 失败场景: 若未来 e2e 测试创建指向 `loop:e2e-*` 的关系行，删除 loop 实体后这些 relations 行残留为孤儿（无 FK 约束不崩溃，但污染图谱）。当前 m5.4 全链路不建 relations（实测残留 relations=0），不触发。
+  - [低] tests/test_m5_4_e2e_purchase.py:209 test_e2e_proposal_then_apply_resolves 结束无 teardown 清理。
+    - 具体: 该测试是文件最后一个，跑完不再有下一个 `_setup()` 兜底；整文件运行后残留幽灵 open 任务 `task:20260729-e2e-stale`（task_states 当前窗 state=open、valid_until=NULL）+ 2 条 audit_log（stale_review proposed / stale_resolved applied）。
+    - 失败场景: 残留无 chunks，不再触发下个会话 conftest FK 崩溃；但该幽灵 open 任务对 propose_stale_tasks/digest 可见，且若 e2e 误对 live 库运行会污染生产记忆库。建议测试结束后（或 tearDown）也调用 _setup()。
+- 测试:
+  - 环境: 全量 pytest 仍被既有 conftest session fixture（usearch index load 原生 abort）阻断——本机既有问题，parent commit 上同样复现，与本次提交无关。沿用上轮工作区方案: `scripts/init_db.py` 全新临时库 + `MNELO_MEMORY_DIR`/`MNELO_MEMORY_SEARCH_BACKEND=usearch` 隔离运行。
+  - test_m29_review_fixes.py —— **3/3 通过**。
+  - test_m5_4_e2e_purchase.py —— **3/3 通过**。
+  - 修复验证（关键场景）: 跑完上述 6 测后，在同一库上开启新 pytest 会话（触发 autouse `_clean_test_data_session`）跑 test_m5_2_stale_proposal.py —— **10/10 通过，不再崩溃**（修复前该场景正是 FK constraint failed 崩溃点）；第二遍重跑 test_m5_4 + test_m29 —— **6/6 通过**。
