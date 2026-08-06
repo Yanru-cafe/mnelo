@@ -2,7 +2,7 @@
 
 > **mnelo** = μνήμη + λόγος (希腊语 记忆 + 推理). 5-字符缩写, 跟 Hermes Agent 平行 — Hermes 是 messenger, mnelo 是他的 memory layer.
 
-部署约 5 分钟。**单 SQLite 文件、macOS launchd 守护, MCP 协议 via SSE**.
+部署约 5 分钟。**单 SQLite 文件、macOS launchd / Linux systemd 守护, MCP 协议 via SSE**.
 
 ---
 
@@ -11,7 +11,7 @@
 | 项 | 最小 | 推荐 |
 |---|---|---|
 | Python | 3.9+ | 3.11+ (实测) |
-| OS | macOS / Linux | macOS 14+ (launchd 守护) |
+| OS | macOS / Linux | macOS 14+ (launchd) · systemd 发行版 (Linux) |
 | 磁盘 | 100 MB | 1 GB (留 growth 余量) |
 | 内存 | 4 GB | 8 GB (bge-small-zh embedder ~200 MB RSS + Python + mcp + SQLite overhead，总进程 RSS 实测 ~270 MB) |
 | 网络 | 仅首次拉模型 | 同上 |
@@ -177,7 +177,65 @@ launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
 **Token 配置**: 不在 plist 里 (plist 是 world-readable XML, 暴露 attack surface)。
 Token 走 `~/.config/mnelo/auth_token` (mode 600) 默认; 或手动 `export MNEOLO_AUTH_TOKEN=***` override。
 
-### 5.2 测试 SSE server
+### 5.2 systemd 守护 (Linux 推荐)
+
+`/etc/systemd/system/mnelo-mcp.service`:
+
+```ini
+[Unit]
+Description=mnelo MCP memory server (SSE)
+After=network.target
+
+[Service]
+Type=simple
+User=mnelo
+WorkingDirectory=/path/to/mnelo
+# ⚠️ MNELO_MEMORY_SEARCH_BACKEND 必须显式 usearch — 无 AVX2 机 auto 链
+# 主进程 import zvec 直接 SIGILL 崩进程 (见 §2.2). systemd 环境干净, 别赌 auto.
+Environment=MNELO_MEMORY_DIR=/path/to/mnelo-data
+Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
+# 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
+ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086
+# usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/mnelo-mcp.log
+StandardError=append:/var/log/mnelo-mcp.err
+
+[Install]
+WantedBy=multi-user.target
+```
+
+启用 / 管理:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mnelo-mcp      # 开机自启 + 立即启动
+sudo systemctl status mnelo-mcp            # Active: active (running)
+journalctl -u mnelo-mcp -f                 # 实时日志
+journalctl -u mnelo-mcp -e                 # 末尾 20 行
+```
+
+要点:
+
+- **`--host 127.0.0.1` 只绑本机** — 公网 VPS 上经 SSH 访问即可, 不要绑 `0.0.0.0` (见 §12 安全 / OPERATIONS §VPS security)。
+- **`Restart=always`** — 本机 (无 AVX2) usearch 偶发原生崩溃 (`free(): corrupted unsorted chunks`), 崩溃即自动拉起; 若反复崩 (启动循环) 查 §10 故障排查 (多为索引损坏, 需 `rebuild_index.py --fresh`)。
+- **`User=mnelo` 建议专用系统用户** — 最小权限跑 daemon (见 §12 安全 / 多用户)。
+- 系统级 vs 用户级: 上面是系统 unit (`/etc/systemd/system/` + `WantedBy=multi-user.target`)。单用户机器也可用 user unit (`~/.config/systemd/user/` + `WantedBy=default.target`, 配 `systemctl --user`), 但 user unit 在 SSH 登出后可能不随会话存活 — 服务器场景优先系统 unit。
+
+**备用: 无 systemd (容器 / 裸机 / 临时环境)** — `setsid nohup` 后台 (无开机自启、无崩溃自拉起):
+
+```bash
+cd /path/to/mnelo
+MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
+  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
+  >> /tmp/mnelo-server.log 2>&1 &
+ss -tlnp | grep 8086      # 确认监听
+```
+
+要开机自启需另配 cron `@reboot` 或外部进程管理器 (supervisor / Docker restart policy)。
+
+### 5.3 测试 SSE server
 
 ```bash
 curl -sS http://127.0.0.1:8086/sse -m 1 | head
@@ -345,9 +403,21 @@ export MNELO_MEMORY_WARM_UP_EMBEDDER=false   # 启动不预热 (省 500ms)
 ### 9.1 重启
 
 ```bash
+# macOS (launchd)
 launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
 sleep 3
 lsof -tiTCP:8086 -sTCP:LISTEN | xargs -I{} ps -p {}
+
+# Linux (systemd, 见 §5.2)
+sudo systemctl restart mnelo-mcp
+sleep 3
+ss -tlnp | grep 8086
+
+# 无 systemd (setsid nohup, 备用方式) — kill 旧进程后重新 nohup 启动
+pkill -f "mcp_server.py --transport sse" && sleep 2
+MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
+  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
+  >> /tmp/mnelo-server.log 2>&1 &
 ```
 
 ### 9.2 备份

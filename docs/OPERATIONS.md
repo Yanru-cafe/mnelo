@@ -138,10 +138,9 @@ bash scripts/install.sh
 # Choose:
 #   1) memory_dir = /var/lib/mnelo (or /home/mnelo)
 #   2) backend = 'usearch' (don't rely on auto chain — most KVM1 lack AVX2)
-#   3) launchd equivalent for Linux (currently macOS-only — for VPS
-#      without macOS launchd, use cron + manual launchctl-style restart,
-#      or run mnelo as a systemd unit you write yourself; mnelo doesn't
-#      ship a systemd unit yet — see RUNBOOK.md 'Linux deployment' note)
+#   3) Linux service: systemd unit example in RUNBOOK.md §5.2
+#      (mnelo doesn't ship a unit file — copy the template; setsid nohup
+#      fallback for container / no-systemd hosts, also in §5.2)
 #   4) backup schedule = local snapshot dir on same VPS (option 1)
 
 # Verify
