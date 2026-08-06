@@ -34,20 +34,13 @@ from memory import Memory  # noqa: E402
 import task_states as ts  # noqa: E402
 
 
-def _commit_or_print(mem, result_json: bool = True):
-    """Helper: 事务包裹 task_states 调用, 失败抛 TaskLoopError."""
-    # task_states 不自动 commit; 调用方负责.
-    # 这里走 context manager 自动 commit / rollback.
-    pass
-
-
 def cmd_create(args, mem):
     if args.kind == "task":
         r = ts.task_create(
             mem._conn,
             name=args.name,
             loop_id=args.loop,
-            priority=args.priority or 3,
+            priority=args.priority if args.priority is not None else 3,
             now=args.now,
         )
     elif args.kind == "loop":
@@ -55,9 +48,9 @@ def cmd_create(args, mem):
             mem._conn,
             name=args.name,
             trigger=args.trigger,
-            interval_hours=args.interval_hours or 24,
+            interval_hours=args.interval_hours if args.interval_hours is not None else 24,
             enabled=not args.disabled,
-            priority=args.priority or 3,
+            priority=args.priority if args.priority is not None else 3,
             now=args.now,
         )
     else:
@@ -89,7 +82,7 @@ def cmd_list(args, mem):
             state=args.state,
             loop_id=args.loop,
             asof=args.asof,
-            limit=args.limit or 50,
+            limit=args.limit if args.limit is not None else 50,
         )
     elif args.kind == "loop":
         r = ts.list_loops(
@@ -97,7 +90,7 @@ def cmd_list(args, mem):
             enabled_only=args.enabled_only,
             state=args.state,
             asof=args.asof,
-            limit=args.limit or 50,
+            limit=args.limit if args.limit is not None else 50,
         )
     else:
         raise SystemExit(f"unknown --kind {args.kind}")
@@ -181,7 +174,13 @@ def main():
     args = parser.parse_args()
     mem = Memory()
     try:
-        args.func(args, mem)
+        try:
+            args.func(args, mem)
+        except TaskLoopError as e:
+            # [CLI-R4 8/6 review-pass] 友好错误输出, non-zero 退出.
+            # 不裸 Traceback; Claude Code / 终端用户都能解析.
+            print(f"[{e.code}] {e.message}", file=sys.stderr)
+            sys.exit(1)
     finally:
         mem.close()
 
