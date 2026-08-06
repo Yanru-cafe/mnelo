@@ -269,3 +269,50 @@
   - 全量 pytest 仍被既有 conftest session fixture（`_clean_test_data_session` → `memory.Memory()` → usearch index `load` 原生 abort：`Aborted`/`free(): corrupted unsorted chunks`）阻断。已确认该崩溃在 base（131afca）与 new（0d0fd1b）上、以及全新 DB/索引下均复现——既有环境问题（usearch native 在本 Linux 机不稳定，对应提交描述「测试环境 SIGSEGV 兜底」），**非本提交引入**。本提交未触 conftest / search_index / memory。
   - 已绕过 conftest 做静态契约验证（等价 M20/M21/M22 三条静态断言，全部通过）：cron/两测试文件 `ast.parse` 语法编译通过；cron 源码无 `timezone.utc`、含 naive `datetime.now().isoformat`；plist 含 `MNELO_MEMORY_DIR`+`__LIVE_ROOT__`；测试 env 含 `MNELO_MEMORY_DIR`+`_latest_digest_path`。
   - 提交声称 104/104 pass 在本机不可直接复现（usearch native 崩溃阻断任何构造 `memory.Memory()` 的路径），但全部改动点经静态核实与 M20 行为实测与提交描述一致，未发现高/中危问题。
+
+## 2026-08-06 17:10 审查 2e0d5fb..dfa8cba
+- 范围: 2e0d5fb..dfa8cba（共 3 个提交）
+- 提交:
+  - d1b5a81 feat(m5.2): L2 stuck_task Proposal + apply/list helpers (10/10 pass)
+  - 81b49c4 fix(lint): M27 review-pass cleanup — 删 timezone import 残留
+  - dfa8cba feat(m5.3): D11 TTL 豁免 — task/loop 不被 L2 decay 自动删 (10/10 pass)
+- 结论: 发现 2 个中等问题 + 1 个低危
+- 发现（按严重度）:
+
+  **[中] forget_task / forget_loop 未实现「已软删即抛错」契约（task_states.py:1466 / :1559）**
+  - 问题: 两函数 docstring 声明 "TaskLoopError: ... 已经是 valid_until IS NOT NULL"（task_states.py:1454），
+    但代码只检查 `row` 是否存在，未检查 `row[0]`（valid_until 列）。`# row[0] is valid_until column`
+    注释表明本应检查却漏掉。
+  - 失败场景: 对同一 task/loop 连续调用两次 `forget_task`。第二次不抛错、静默返回
+    `rows_invalidated=0`，并再写一条 `forced_forget` audit_log 行，其 `before_json.status_before`
+    仍伪造为 "active"——审计痕迹失真（本应只有一条删除记录）。已用实际调用复现。
+  - 建议: 补 `if row[0] is not None: raise TaskLoopError(...已软删, code="TaskAlreadyForgotten")`。
+
+  **[中] propose_stale_tasks 去重不会对「已 apply 但仍 stale」的 task 再次提议（task_states.py:1207-1212）**
+  - 问题: 去重查询按 `pass_name='stuck_task' AND status='proposed' AND ref_id=?` 判断"已有 pending Proposal"。
+    而 audit_log 是 append-only，`apply_stale_proposal` 只新增 `stale_resolved/applied` 行、**不翻转原 Proposal 行**
+    status，原行永远保持 `status='proposed'`。因此"pending"检查实际等价于"曾被提议过"。
+  - 失败场景: 某 stale task 被提议 → agent 评估后 apply（如 applied_action='ignored_will_revisit'），
+    task 仍停留在原 stale 状态 → 之后每轮 `propose_stale_tasks` 都命中旧的 `status='proposed'` 行而跳过，
+    该 task 永不再被上浮，stuck_task 检测对这类 task 静默失效。已用实际调用复现
+    （apply 后二次 propose：proposed=0、skipped_existing>0）。
+  - 建议: 去重改为排除已有 `action_type='stale_resolved' AND status='applied'` 的 ref_id，
+    或 apply 时把原 Proposal 行 status 置为 'applied'，让"pending"语义名实相符。
+
+  **[低] memory.forget() D11 拦截代码与 docstring 不符、含死代码（memory.py:685-700）**
+  - 问题: docstring 声称"显式 confirm_forget=True 才接受"，但方法签名没有 `confirm_forget` 参数，
+    实际是 task/loop 一律抛 ValueError；`confirm_forget = False  # 占位` 是无效死代码。
+  - 影响: 功能上安全（已核实无既有调用方传 task/loop kind；D11 就是禁止 L2 自动删 task/loop），
+    但误导后续维护者以为存在 confirm 放行路径。
+  - 建议: 删除占位死代码，docstring 改为"一律拦截，显式删除走 task_states.forget_task / forget_loop"。
+
+- 测试:
+  - 环境: 全量 pytest 被既有 conftest session fixture（usearch index `load` 原生 abort）与
+    zvec 在无 AVX2 CPU 上的 SIGILL 阻断。本轮找到可复现路径：
+    `scripts/init_db.py` 初始化全新 memory.db + 设 `MNELO_MEMORY_SEARCH_BACKEND=usearch`（避开 zvec SIGILL），
+    conftest session 清理不再 load 既有索引。
+  - 新增测试: test_m5_2_stale_proposal.py + test_m5_3_d11_forget.py —— **20/20 通过**。
+  - 关联回归: test_task_states_{transition,create,concurrent,loop_tick}.py + m5_2/m5_3 —— **37/37 通过**。
+  - 未跑: test_m5_1_cron_tick.py 需仓库目录预置 memory.db（工作树缺失，环境问题，与本次改动无关；
+    本次对 cron 脚本仅删 timezone import，已静态确认无残留引用）。
+  - 本次两个发现均为测试未覆盖的边界（double-forget、apply 后再提议），已实测复现。
