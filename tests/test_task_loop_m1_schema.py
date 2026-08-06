@@ -99,6 +99,12 @@ def _setup_task_test_fixture(m):
     )
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm2-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm3-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm7-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:20260806-m3-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:tlm7-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:20260806-m3-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE '%m3-probe%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:耗材-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm5-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:tlm5-%'")
     # entities has FKs from relations (source_id/target_id). Disable FK enforcement
@@ -110,7 +116,7 @@ def _setup_task_test_fixture(m):
             "OR id LIKE 'loop:test-%' "
             "OR id IN ('task:20260806-restock-1', 'loop:consumables-stock') "
             "OR id LIKE 'task:tlm2-%' "
-            "OR id LIKE 'task:tlm3-%' \n            OR id LIKE 'task:tlm5-%' \n            OR id LIKE 'loop:tlm5-%'"
+            "OR id LIKE 'task:tlm3-%' \n            OR id LIKE 'task:tlm7-%' \n            OR id LIKE 'task:20260806-m3-%' \n            OR id LIKE 'loop:tlm7-%' \n            OR id LIKE 'task:tlm5-%' \n            OR id LIKE 'loop:tlm5-%'"
         )
     finally:
         m._conn.execute("PRAGMA foreign_keys = ON")

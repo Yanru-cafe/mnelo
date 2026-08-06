@@ -32,11 +32,18 @@ def _setup(m):
     try:
         m._conn.execute(
             "DELETE FROM task_states WHERE task_id LIKE 'task:tlm2-%' "
-            "OR task_id LIKE 'task:tlm3-%'"
+            "OR task_id LIKE 'task:tlm3-%' "
+            "OR task_id LIKE 'task:tlm7-%' "
+            "OR task_id LIKE 'task:20260806-m3-%' "
+            "OR task_id LIKE 'loop:tlm7-%'"
         )
         m._conn.execute(
             "DELETE FROM entities WHERE id LIKE 'task:tlm2-%' "
-            "OR id LIKE 'task:tlm3-%'"
+            "OR id LIKE 'task:tlm3-%' "
+            "OR id LIKE 'task:tlm7-%' "
+            "OR id LIKE 'task:20260806-m3-%' "
+            "OR id LIKE 'loop:tlm3-%' "
+            "OR id LIKE 'loop:tlm7-%'"
         )
     finally:
         m._conn.execute("PRAGMA foreign_keys = ON")
