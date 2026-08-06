@@ -235,6 +235,124 @@ def transition(
 
 
 
+
+class LoopNotFoundError(TaskLoopError):
+    """loop_id 不存在或 valid_until 已设."""
+
+
+def loop_tick(
+    conn: Any,
+    *,
+    loop_id: str,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Mechanically compute loop tick verdict (DESIGN §4.3).
+
+    Args:
+        conn: open sqlite3.Connection.
+        loop_id: entities.id (kind='loop').
+        now: optional timestamp override (default datetime.now local).
+
+    Returns:
+        dict {loop_id, verdict, active_task_id?, active_state?, last_cycle_done_at?, interval_hours?, enabled?}.
+
+    Verdict (DESIGN §4.3 step 1-5):
+      - dormant:        not enabled
+      - waiting:        active_id 存在且 active_state ∉ {done, cancelled}
+      - due:            last_cycle_done_at is None (first run) OR
+                        elapsed >= interval_hours
+      - not_due:        没 active_id 且 last 距今 < interval_hours
+
+    Note: 跟 transition() 不同, loop_tick 不写 task_states — 仅返回 verdict.
+    tick 判定不落行 (DESIGN §4.3 strict). 仅生命周期事件 (create/disable/pause)
+    落行, M5 完整.
+    """
+    # 1. 定位 loop entity
+    cur = conn.execute(
+        "SELECT id, properties_json FROM entities "
+        "WHERE id = ? AND kind = 'loop' AND valid_until IS NULL",
+        (loop_id,),
+    ).fetchone()
+    if cur is None:
+        raise LoopNotFoundError(
+            f"loop_id '{loop_id}' 不存在或已软删",
+            field="loop_id",
+        )
+    _, props_json = cur
+    if not props_json:
+        raise LoopNotFoundError(
+            f"loop '{loop_id}' properties_json 为空",
+            field="loop_id",
+        )
+    try:
+        cfg = json.loads(props_json)
+    except json.JSONDecodeError as e:
+        raise LoopNotFoundError(
+            f"loop '{loop_id}' properties_json 解析失败: {e}",
+            field="loop_id",
+        )
+
+    enabled = bool(cfg.get("enabled", True))
+    interval_hours = cfg.get("interval_hours", 24)
+    active_task_id = cfg.get("active_task_id")
+    last_cycle_done_at = cfg.get("last_cycle_done_at")
+
+    out: Dict[str, Any] = {
+        "loop_id": loop_id,
+        "enabled": enabled,
+        "interval_hours": interval_hours,
+        "active_task_id": active_task_id,
+        "last_cycle_done_at": last_cycle_done_at,
+    }
+
+    # 2. step 1 — not enabled — dormant
+    if not enabled:
+        out["verdict"] = "dormant"
+        return out
+
+    # 3. step 2 — active 在飞 — waiting
+    active_state: Optional[str] = None
+    if active_task_id:
+        active_row = conn.execute(
+            "SELECT state FROM task_states "
+            "WHERE task_id = ? AND valid_until IS NULL",
+            (active_task_id,),
+        ).fetchone()
+        if active_row is not None:
+            active_state = active_row[0]
+            if active_state not in ("done", "cancelled"):
+                out["verdict"] = "waiting"
+                out["active_state"] = active_state
+                return out
+
+    # 4. step 3 — last is None — first run
+    if last_cycle_done_at is None:
+        out["verdict"] = "due"
+        if active_state is not None:
+            out["active_state"] = active_state
+        return out
+
+    # 5. step 4-5 — elapsed vs interval
+    try:
+        from datetime import datetime as _dt
+        last_dt = _dt.fromisoformat(last_cycle_done_at)
+        now_dt = _dt.fromisoformat(now) if now else _dt.now()
+        elapsed_hours = (now_dt - last_dt).total_seconds() / 3600.0
+    except (ValueError, TypeError) as e:
+        raise LoopNotFoundError(
+            f"loop '{loop_id}' last_cycle_done_at 解析失败: {e}",
+            field="loop_id",
+        )
+
+    out["elapsed_hours"] = round(elapsed_hours, 4)
+    if elapsed_hours < interval_hours:
+        out["verdict"] = "not_due"
+    else:
+        out["verdict"] = "due"
+    return out
+
+
+
 def list_tasks(
     conn: Any,
     *,
