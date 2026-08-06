@@ -91,6 +91,9 @@ def _setup_task_test_fixture(m):
     - task:test-* / loop:test-* (test ids)
     - task:20260806-restock-1 / loop:consumables-stock (PII-test residual from prior session)
     """
+    # entities has FKs from relations (source_id/target_id). Disable FK enforcement
+    # for the whole fixture cleanup (other tests may have left dangling relations).
+    m._conn.execute("PRAGMA foreign_keys = OFF")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:test-%' OR task_id LIKE 'loop:test-%'")
     m._conn.execute(
         "DELETE FROM task_states WHERE task_id IN ("
@@ -107,19 +110,36 @@ def _setup_task_test_fixture(m):
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:耗材-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm5-%'")
     m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:tlm5-%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:rf%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:rf%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:20260806-rf%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:20260806-rf%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:20260806-t1%'")
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:20260806-t1%'")
     # entities has FKs from relations (source_id/target_id). Disable FK enforcement
     # just for the DELETE (other tests may have left dangling relations).
-    m._conn.execute("PRAGMA foreign_keys = OFF")
-    try:
-        m._conn.execute(
-            "DELETE FROM entities WHERE id LIKE 'task:test-%' "
-            "OR id LIKE 'loop:test-%' "
-            "OR id IN ('task:20260806-restock-1', 'loop:consumables-stock') "
-            "OR id LIKE 'task:tlm2-%' "
-            "OR id LIKE 'task:tlm3-%' \n            OR id LIKE 'task:tlm7-%' \n            OR id LIKE 'task:20260806-m3-%' \n            OR id LIKE 'loop:tlm7-%' \n            OR id LIKE 'task:tlm5-%' \n            OR id LIKE 'loop:tlm5-%'"
-        )
-    finally:
-        m._conn.execute("PRAGMA foreign_keys = ON")
+    m._conn.execute(
+        "DELETE FROM entities WHERE id LIKE 'task:test-%' "
+        "OR id LIKE 'loop:test-%' "
+        "OR id IN ('task:20260806-restock-1', 'loop:consumables-stock') "
+        "OR id LIKE 'task:tlm2-%' "
+        "OR id LIKE 'task:tlm3-%' "
+        "OR id LIKE 'task:tlm7-%' "
+        "OR id LIKE 'task:tlm8-%' "
+        "OR id LIKE 'task:20260806-m3-%' "
+        "OR id LIKE 'task:20260806-t8-%' "
+        "OR id LIKE 'loop:tlm3-%' "
+        "OR id LIKE 'loop:tlm7-%' "
+        "OR id LIKE 'loop:tlm8-%' "
+        "OR id LIKE 'loop:20260806-m3-%' "
+        "OR id LIKE 'loop:20260806-t8-%' "
+        "OR id LIKE 'task:tlm5-%' "
+        "OR id LIKE 'loop:tlm5-%' "
+        "OR id LIKE '%m3-probe%' "
+        "OR id LIKE '%t8-%' "
+        "OR id LIKE 'loop:耗材-%' OR id LIKE 'task:rf%' OR id LIKE 'loop:rf%' OR id LIKE 'task:20260806-rf%' OR id LIKE 'loop:20260806-rf%' OR id LIKE '%rf%-%' OR id LIKE 'task:20260806-t1%' OR id LIKE 'loop:20260806-t1%' "
+    )
+    m._conn.execute("PRAGMA foreign_keys = ON")
     m._conn.commit()
 
 
