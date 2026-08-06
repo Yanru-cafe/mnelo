@@ -1425,3 +1425,191 @@ def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, L
             refs[str(n)] = [l["loop_id"]]
 
     return text_lines, refs
+
+
+def forget_task(
+    conn: Any,
+    task_id: str,
+    *,
+    reason: str,
+    now: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """[8/6 M5.3 + DESIGN §10.2 D11] 显式软删 task (D11 TTL 豁免路径).
+
+    不走 L2 decay — 必须 agent/用户显式调用, 写 audit_log (pass_name='forced_forget')
+    留审计痕迹. 软删 entity + 关闭 task_states 当前行 + cascade.
+
+    Args:
+        conn: open sqlite3.Connection.
+        task_id: 要删的 task id.
+        reason: 必填 (D8 显式纠正门), 'transition_to_cancelled' / 'duplicate' / etc.
+        now: 时间参考 (默认 = 当前).
+        run_id: 自定义 run_id.
+
+    Returns:
+        {"task_id", "forgotten_at", "run_id", "rows_invalidated"}
+
+    Raises:
+        TaskLoopError: task_id 不存在 / 已经是 valid_until IS NOT NULL / reason 缺失.
+    """
+    import uuid as _uuid
+    if not reason:
+        raise TaskLoopError(
+            "forget_task 必须提供 reason (D8 显式纠正门)",
+            field="reason", code="ReasonRequiredError",
+        )
+    now_ts = now or _default_now()
+
+    # 1. 校验 task 存在 + 当前未软删
+    row = conn.execute(
+        "SELECT valid_until FROM entities WHERE id=? AND kind='task'",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        raise TaskLoopError(
+            f"task_id={task_id} 不存在或已软删",
+            field="task_id", code="TaskNotFoundError",
+        )
+    # row[0] is valid_until column
+
+    # 2. 关闭 task_states 当前行
+    invalidated = conn.execute(
+        """UPDATE task_states SET valid_until = ?
+           WHERE task_id=? AND valid_until IS NULL""",
+        (now_ts, task_id),
+    ).rowcount
+
+    # 3. 软删 entity
+    conn.execute(
+        """UPDATE entities SET valid_until = ?
+           WHERE id=? AND valid_until IS NULL""",
+        (now_ts, task_id),
+    )
+
+    # 4. cascade relations
+    rels = conn.execute(
+        """UPDATE relations SET valid_until = ?
+           WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
+        (now_ts, task_id, task_id),
+    ).rowcount
+
+    # 5. audit_log (M5.3 D11 留痕)
+    rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
+    conn.execute(
+        """INSERT INTO audit_log (
+            run_id, pass_name, action_type, ref_type, ref_id,
+            before_json, after_json, confidence, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            rid,
+            "forced_forget",
+            "explicit_softdelete",
+            "task",
+            task_id,
+            json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
+            json.dumps({"reason": reason, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
+            1.0,
+            "applied",  # 立即 applied — 这不是 Proposal, 是显式 delete
+            now_ts,
+        ),
+    )
+    conn.commit()
+    return {
+        "task_id": task_id,
+        "forgotten_at": now_ts,
+        "run_id": rid,
+        "rows_invalidated": invalidated,
+        "relations_cascade": rels,
+    }
+
+
+def forget_loop(
+    conn: Any,
+    loop_id: str,
+    *,
+    reason: str,
+    now: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """[8/6 M5.3 + DESIGN §10.2 D11] 显式软删 loop (D11 TTL 豁免路径).
+
+    跟 forget_task 类似, 但额外级联:
+      - 关闭 loop 的 task_states (enabled/dormant 当前行)
+      - 不级联 loop 内 task (task 由自己的生命周期管理, 不随 loop 删除)
+
+    Args:
+        conn: open sqlite3.Connection.
+        loop_id: 要删的 loop id.
+        reason: 必填 (D8).
+        now: 时间参考 (默认 = 当前).
+        run_id: 自定义 run_id.
+
+    Returns:
+        {"loop_id", "forgotten_at", "run_id", "rows_invalidated"}
+    """
+    import uuid as _uuid
+    if not reason:
+        raise TaskLoopError(
+            "forget_loop 必须提供 reason (D8 显式纠正门)",
+            field="reason", code="ReasonRequiredError",
+        )
+    now_ts = now or _default_now()
+    row = conn.execute(
+        "SELECT valid_until FROM entities WHERE id=? AND kind='loop'",
+        (loop_id,),
+    ).fetchone()
+    if not row:
+        raise TaskLoopError(
+            f"loop_id={loop_id} 不存在或已软删",
+            field="loop_id", code="LoopNotFoundError",
+        )
+
+    # 关闭 task_states 当前行 (loop 用 task_states 记录 enabled/dormant)
+    invalidated = conn.execute(
+        """UPDATE task_states SET valid_until = ?
+           WHERE task_id=? AND valid_until IS NULL""",
+        (now_ts, loop_id),
+    ).rowcount
+
+    # 软删 entity
+    conn.execute(
+        """UPDATE entities SET valid_until = ?
+           WHERE id=? AND valid_until IS NULL""",
+        (now_ts, loop_id),
+    )
+
+    # cascade relations
+    rels = conn.execute(
+        """UPDATE relations SET valid_until = ?
+           WHERE (source_id=? OR target_id=?) AND valid_until IS NULL""",
+        (now_ts, loop_id, loop_id),
+    ).rowcount
+
+    rid = run_id or f"forced_forget-{now_ts}-{_uuid.uuid4().hex[:8]}"
+    conn.execute(
+        """INSERT INTO audit_log (
+            run_id, pass_name, action_type, ref_type, ref_id,
+            before_json, after_json, confidence, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            rid,
+            "forced_forget",
+            "explicit_softdelete",
+            "loop",
+            loop_id,
+            json.dumps({"status_before": "active", "rows_invalidated": invalidated}, ensure_ascii=False),
+            json.dumps({"reason": reason, "forgotten_at": now_ts, "relations_cascade": rels}, ensure_ascii=False),
+            1.0,
+            "applied",
+            now_ts,
+        ),
+    )
+    conn.commit()
+    return {
+        "loop_id": loop_id,
+        "forgotten_at": now_ts,
+        "run_id": rid,
+        "rows_invalidated": invalidated,
+        "relations_cascade": rels,
+    }

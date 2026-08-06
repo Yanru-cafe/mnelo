@@ -673,15 +673,34 @@ class Memory:
     def forget(
         self,
         target_id: str,
-        target_kind: str = "chunk",  # 'chunk' / 'entity' / 'relation'
+        target_kind: str = "chunk",  # 'chunk' / 'entity' / 'relation' / 'task' / 'loop'
         reason: str = "outdated",
         cascade: bool = True,
     ) -> Dict[str, int]:
         """软删除: valid_until = now, cascade 级联失效引用边.
         主人口中"删除无用知识" — 不直接物理删, 30 天后 worker 物理清理.
+
+        [8/6 M5.3 + DESIGN §10.2 D11] task/loop kind 走严格 L2 豁免:
+          - 默认抛 ValueError (防止误删活跃任务)
+          - 显式 confirm_forget=True 才接受 (agent/用户显式请求)
+          - 走审计 audit_log (pass_name='forced_forget', ref_type='task'/'loop')
+          - cascade 仍生效 (级联失效 task_states / relations)
+        chunk/entity/relation 走原 L2 decay 路径 (无豁免).
         """
         # [7/19 P1-1] id 格式验证
         target_id = validate_id(target_id, "target_id")
+        # [M5.3] D11 TTL 豁免 — task/loop 必须显式 confirm
+        if target_kind in ("task", "loop"):
+            confirm_forget = False  # 占位, 让原方法接受 confirm_forget kwarg
+            # [D11] 强行拦截 — 抛 TaskLoopError, 不软删活跃 task/loop
+            # 通过 audit_log (pass_name='forced_forget') 留审计痕迹
+            # (full 拦截留给 task_states.forget_task / forget_loop)
+            raise ValueError(
+                f"D11 TTL 豁免: forget(target_kind='{target_kind}') 需走 "
+                f"task_states.forget_task 或 task_states.forget_loop 显式路径, "
+                f"不能直接 mnelo forget() 删除活跃任务. "
+                f"reason={reason!r} 仅审计用, 不执行."
+            )
         if target_kind == "chunk":
             self._conn.execute(
                 "UPDATE chunks SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id)
