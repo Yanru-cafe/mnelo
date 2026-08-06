@@ -540,3 +540,14 @@
 - 测试: `TestZvecAvx2Gate` 4 用例 — CPU 探测返回 bool/None；无 AVX2 不 import 返回 False (此测试本机无 fake 注入，若走了 import 直接 SIGILL 崩测试进程即防回归)；AVX2 路径 import fake zvec；探测不了回退 import。
 - 附带修复: `TestZvecBackendWithFake.setUp` 原 `zvec_available = lambda: True` 永久改写模块属性不恢复，污染后续测试类 (TestZvecAvx2Gate 的 mock 因此失效) → 改用 `mock.patch.object` + tearDown 恢复。
 - 验证: test_search_index.py 17/17 pass；真实场景 (无 config.toml 临时库 + auto 链，此前 dumped core) → `zvec_available()=False`、zvec 未 import、auto 实际走 usearch/f16，不再崩；M38 + usearch 回归 16/16 pass。
+
+## 2026-08-06 22:50 完善 RUNBOOK.md Linux 服务管理
+
+- 背景: OPERATIONS.md VPS 章节一直引用 "RUNBOOK.md 'Linux deployment' note"，但 RUNBOOK 只有 macOS launchd (§5.1)，Linux 部分是空白。用户要求完善。
+- 改动:
+  - RUNBOOK.md §5.2 新增 **systemd 守护 (Linux 推荐)**: 完整 `mnelo-mcp.service` unit (Restart=always 应对 usearch 无 AVX2 偶发原生崩溃、`--host 127.0.0.1` 安全绑定、`MNELO_MEMORY_SEARCH_BACKEND=usearch` 显式环境变量呼应 §2.2 SIGILL 坑、User 最小权限); systemctl enable/status/journalctl 命令; 系统级 vs 用户级 unit 取舍。
+  - RUNBOOK.md §5.2 备用: `setsid nohup` 后台方式 (本机实测部署方式, 无开机自启/自拉起, 需 cron @reboot 或 supervisor)。
+  - RUNBOOK.md §9.1 重启: 补 Linux systemctl restart + nohup 重启命令。
+  - RUNBOOK.md 标题/§1 系统要求: 改为 "macOS launchd / Linux systemd"。
+  - OPERATIONS.md VPS 部署步骤 3: 引用更新为 "systemd unit 模板见 RUNBOOK §5.2"。
+- 原 §5.2 测试 SSE 顺延为 §5.3 (无外部交叉引用破坏, 已 grep 验证)。
