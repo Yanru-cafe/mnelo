@@ -41,11 +41,27 @@ def _setup():
     try:
         mem._conn.execute(
             "DELETE FROM task_states WHERE task_id LIKE 'task:rf%' "
-            "OR task_id LIKE 'loop:rf%'"
+            "OR task_id LIKE 'loop:rf%' "
+            "OR task_id LIKE 'loop:rf11%' "
+            "OR task_id LIKE 'loop:rf12%' "
+            "OR task_id LIKE 'loop:rf13%' "
+            "OR task_id LIKE 'loop:rf14%' "
+            "OR task_id LIKE 'task:rf11%' "
+            "OR task_id LIKE 'task:20260806-rf%' "
+            "OR task_id LIKE 'loop:20260806-rf%' "
+            "OR task_id LIKE 'loop:rf13l%'"
         )
         mem._conn.execute(
             "DELETE FROM entities WHERE id LIKE 'task:rf%' "
-            "OR id LIKE 'loop:rf%'"
+            "OR id LIKE 'loop:rf%' "
+            "OR id LIKE 'loop:rf11%' "
+            "OR id LIKE 'loop:rf12%' "
+            "OR id LIKE 'loop:rf13%' "
+            "OR id LIKE 'loop:rf14%' "
+            "OR id LIKE 'task:rf11%' "
+            "OR id LIKE 'task:20260806-rf%' "
+            "OR id LIKE 'loop:20260806-rf%' "
+            "OR id LIKE 'loop:rf13l%'"
         )
     finally:
         mem._conn.execute("PRAGMA foreign_keys = ON")
@@ -234,7 +250,7 @@ def test_rf4_module_docstring_intact():
 
 def test_rf5_concurrent_test_present_with_caveat():
     """test_task_states_concurrent.py 仍存在, docstring 标 '顺序模拟'."""
-    concurrent_test = Path("/Users/apple/.hermes/memory/tests/test_task_states_concurrent.py")
+    concurrent_test = _REPO / "tests" / "test_task_states_concurrent.py"
     assert concurrent_test.exists()
     text = concurrent_test.read_text()
     # docstring 自认没真并发
@@ -263,8 +279,221 @@ def test_rf7_list_typing_imported():
     try:
         from typing import List
         # 验证 task_states 源码 'List' 出现
-        text = Path("/Users/apple/.hermes/memory/task_states.py").read_text()
+        text = (_REPO / "task_states.py").read_text()
         assert "from typing import List" in text or ", List" in text, \
             "typing.List 导入未在 task_states.py"
     except ImportError:
         raise AssertionError("typing.List import 失败")
+
+
+
+# === RF8 [高]: MCP 事务回滚 ===
+
+def test_rf8_rollback_on_task_create_double_spawn():
+    """并发 task_create 同 loop, 后到者应被 rollback 不留孤儿行."""
+    from memory import Memory
+    m = Memory()
+    try:
+        # 建 loop
+        ts_mod.loop_create(
+            m._conn, name="rf8-rollback", trigger="x",
+            now="2026-08-06T09:00",
+        )
+        m._conn.commit()  # commit loop separately
+        # 第一个 task_create 应成功
+        r1 = ts_mod.task_create(
+            m._conn, name="first", loop_id="loop:rf8-rollback",
+            now="2026-08-06T10:00",
+        )
+        m._conn.commit()
+        active_id = r1["task_id"]
+        # 第二个 task_create 同 loop 应抛 (RF3 raise TaskLoopError; RF8 兜底 rollback)
+        raised = False
+        try:
+            ts_mod.task_create(
+                m._conn, name="second", loop_id="loop:rf8-rollback",
+                now="2026-08-06T10:05",
+            )
+        except Exception:
+            raised = True
+            m._conn.rollback()  # 模拟 MCP RF8 行为 — 失败路径 rollback
+        assert raised, "expected double-spawn reject"
+
+        # 校验: 第一个 task entity + state 窗 仍在 (前 commit), 第二个不留
+        n_active = m._conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE id=?",
+            (active_id,),
+        ).fetchone()[0]
+        assert n_active == 1, f"first task entity lost: {n_active}"
+
+        # 第二个 task entity 不应存在 (rollback 清掉)
+        n_second = m._conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE id LIKE 'task:20260806-second%'",
+        ).fetchone()[0]
+        assert n_second == 0, f"orphan task entity left after rollback: {n_second}"
+    finally:
+        m.close()
+
+
+# === RF11 [低]: now override 秒级零长 — 严格递增强制 ===
+
+def test_rf11_now_override_seconds_strict_increasing():
+    """两次 transition 同秒级 now, 第二窗 valid_from > 旧 valid_until (1ms 推进)."""
+    from memory import Memory
+    m = Memory()
+    try:
+        # 建 task
+        m._conn.execute(
+            "INSERT INTO entities (id, kind, name) VALUES (?, ?, ?)",
+            ("task:rf11-sec", "task", "rf11"),
+        )
+        m._conn.execute(
+            "INSERT INTO task_states (task_id, state, valid_from, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("task:rf11-sec", "open", "2026-08-06T10:00:00.000", "2026-08-06T10:00:00.000"),
+        )
+        m._conn.commit()
+
+        # 两 transition 同秒级 now
+        ts_mod.transition(
+            m._conn, task_id="task:rf11-sec", to_state="in_progress",
+            reason="A", now="2026-08-06T10:00:05",  # 秒级
+        )
+        ts_mod.transition(
+            m._conn, task_id="task:rf11-sec", to_state="waiting",
+            reason="B", now="2026-08-06T10:00:05",  # 同样秒级
+        )
+
+        # 校验窗长度 > 0
+        wins = [
+            tuple(r)
+            for r in m._conn.execute(
+                "SELECT state, valid_from, valid_until FROM task_states "
+                "WHERE task_id='task:rf11-sec' ORDER BY id",
+            )
+        ]
+        # 3 窗: open [10:00:00, ?), in_progress [?, ?), waiting [?, NULL)
+        for w in wins:
+            if w[2] is not None:  # not the open-ended final
+                assert w[1] != w[2], f"zero-length window: {w}"
+                # 严格递增 (字符串比较 ISO 8601 时)
+                assert w[1] < w[2], f"non-strictly-increasing: {w}"
+    finally:
+        m.close()
+
+
+# === RF12 [低]: loop_update interval_hours 校验 ===
+
+def test_rf12_loop_update_interval_hours_reject_zero():
+    """loop_update(interval_hours=0) 应抛 InvalidIntervalError."""
+    from memory import Memory
+    m = Memory()
+    try:
+        ts_mod.loop_create(
+            m._conn, name="rf12", trigger="x",
+            now="2026-08-06T09:00",
+        )
+        try:
+            ts_mod.loop_update(m._conn, loop_id="loop:rf12", interval_hours=0)
+        except ts_mod.TaskLoopError as e:
+            assert e.code == "InvalidIntervalError"
+        else:
+            raise AssertionError("expected InvalidIntervalError")
+    finally:
+        m.close()
+
+
+def test_rf12_loop_update_interval_hours_reject_negative():
+    """loop_update(interval_hours=-1) 应抛."""
+    from memory import Memory
+    m = Memory()
+    try:
+        ts_mod.loop_create(
+            m._conn, name="rf12b", trigger="x",
+            now="2026-08-06T09:00",
+        )
+        try:
+            ts_mod.loop_update(m._conn, loop_id="loop:rf12b", interval_hours=-1)
+        except ts_mod.TaskLoopError as e:
+            assert e.code == "InvalidIntervalError"
+        else:
+            raise AssertionError("expected InvalidIntervalError")
+    finally:
+        m.close()
+
+
+# === RF13 [低]: loop_update / list_loops 过滤 valid_until IS NULL ===
+
+def test_rf13_loop_update_soft_deleted_loop_rejected():
+    """loop_update 对软删 loop 应报 LoopNotFoundError."""
+    from memory import Memory
+    m = Memory()
+    try:
+        # 软删 loop (valid_until 设)
+        m._conn.execute(
+            "INSERT INTO entities (id, kind, name, properties_json, valid_from, valid_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("loop:rf13-soft", "loop", "soft", "{}", "2026-08-06T09:00", "2026-08-06T10:00"),
+        )
+        m._conn.commit()
+        try:
+            ts_mod.loop_update(m._conn, loop_id="loop:rf13-soft", trigger="x")
+        except ts_mod.LoopNotFoundError:
+            pass
+        else:
+            raise AssertionError("expected LoopNotFoundError for soft-deleted loop")
+    finally:
+        m.close()
+
+
+def test_rf13_list_loops_excludes_soft_deleted():
+    """list_loops 不应列软删 loop (RF13 8/6)."""
+    from memory import Memory
+    m = Memory()
+    try:
+        # 用时间戳 microseconds 命名, 保证跨测试唯一
+        import time
+        prefix = "loop:rf13l" + str(int(time.time() * 1_000_000))[-10:]
+        active_id = prefix + "-a"
+        soft_id = prefix + "-s"
+
+        m._conn.execute(
+            "INSERT INTO entities (id, kind, name, properties_json) VALUES (?, ?, ?, ?)",
+            (active_id, "loop", "rf13-active", "{}"),
+        )
+        m._conn.execute(
+            "INSERT INTO entities (id, kind, name, properties_json, valid_from, valid_until) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (soft_id, "loop", "rf13-soft", "{}", "2026-08-06T09:00", "2026-08-06T10:00"),
+        )
+        m._conn.commit()
+        result = ts_mod.list_loops(m._conn)
+        ids = [l["loop_id"] for l in result["loops"]]
+        assert active_id in ids, f"active loop missing: {ids}"
+        assert soft_id not in ids, f"soft-deleted loop leaked: {ids}"
+    finally:
+        m.close()
+
+
+# === RF14 [低]: loop_update enabled CAS ===
+
+def test_rf14_loop_update_enabled_uses_cas():
+    """loop_update enabled CAS 关旧 + 开新, 状态窗正确推进."""
+    from memory import Memory
+    m = mem_mod.Memory()
+    try:
+        loop_r = ts_mod.loop_create(
+            m._conn, name="rf14", trigger="x",
+            enabled=True, now="2026-08-06T09:00",
+        )
+        lid = loop_r["loop_id"]
+        ts_mod.loop_update(m._conn, loop_id=lid, enabled=False, now="2026-08-06T10:00")
+
+        # 校验 current_state = dormant
+        cur = m._conn.execute(
+            "SELECT state FROM task_states WHERE task_id=? AND valid_until IS NULL",
+            (lid,),
+        ).fetchone()
+        assert cur[0] == "dormant", f"expected dormant, got {cur[0]}"
+    finally:
+        m.close()
