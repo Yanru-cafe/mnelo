@@ -246,6 +246,53 @@ class TestZvecBackendWithFake(unittest.TestCase):
         self.assertEqual(_deserialize_f32(struct.pack("2f", 1.5, -2.0)), [1.5, -2.0])
 
 
+class TestUsearchF16Assertion(unittest.TestCase):
+    """[8/6 f16 断言] UsearchIndex 加载磁盘索引时强制 f16 契约.
+
+    背景: f32 文件 load 进 f16 Index 后 dtype 静默变 F32, 后续 add 写 f16 →
+    混合精度文件 → 原生堆损坏 (free(): corrupted unsorted chunks).
+    断言把静默损坏变成启动期快速失败 (search_index.py:417-427).
+    用空索引文件构造 (省 .add — 本机无 AVX2, usearch add 偶发 SIGSEGV).
+    """
+
+    def _build_empty(self, dtype: str, p: Path) -> None:
+        import usearch.index as ui
+
+        idx = ui.Index(ndim=512, metric="cos", dtype=dtype)
+        idx.save(str(p))
+
+    def test_f16_index_loads_ok(self):
+        """f16 文件 → 正常加载, dtype 保持 F16."""
+        import tempfile
+
+        from search_index import UsearchIndex
+        from usearch.index import ScalarKind
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self._build_empty("f16", td / "usearch.index")
+            idx = UsearchIndex(td / "memory.db", 512)
+            try:
+                self.assertEqual(idx._index.dtype, ScalarKind.F16)
+                self.assertEqual(idx._index.size, 0)
+            finally:
+                idx.close()
+
+    def test_f32_index_raises(self):
+        """f32 文件 → RuntimeError, 提示用 f16 重建."""
+        import tempfile
+
+        from search_index import UsearchIndex
+
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self._build_empty("f32", td / "usearch.index")
+            with self.assertRaises(RuntimeError) as ctx:
+                UsearchIndex(td / "memory.db", 512)
+            self.assertIn("f16", str(ctx.exception))
+            self.assertIn("rebuild_index.py", str(ctx.exception))
+
+
 class TestFactory(unittest.TestCase):
     """[8/6 plan §12] build_search_index 后端选择 + 必选二选一 (sqlite_vec 已出局)."""
 

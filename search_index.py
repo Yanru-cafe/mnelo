@@ -412,7 +412,7 @@ class UsearchIndex(SearchIndex):
         self._conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # usearch 索引: 已存在则 load, 否则新建
-        from usearch.index import Index
+        from usearch.index import Index, ScalarKind
         self._index = Index(ndim=dim, metric="cos", dtype="f16")
         # [8/6 M38 harden] 运行时断言 - 必须 f16, 防未来 PR 不慎改 dtype.
         # usearch 2.x dtype 在 Index.dtype 属性上返 ScalarKind 枚举 (eg
@@ -432,6 +432,15 @@ class UsearchIndex(SearchIndex):
             )
         if self._index_path.exists():
             self._index.load(self._index_path)  # load 是实例方法
+            # [8/6 f16 断言] 磁盘文件若是 f32, load 后 Index 静默转 F32 模式,
+            # 后续 add 写 f16 → 混合精度文件 → 原生堆损坏 (free(): corrupted unsorted chunks).
+            # f16 是永久契约 — live 索引必须显式 f16 重建.
+            if self._index.dtype != ScalarKind.F16:
+                raise RuntimeError(
+                    f"[usearch] live 索引 {self._index_path} 精度 {self._index.dtype} ≠ f16, "
+                    "违反 f16 契约 (混合精度触发原生堆损坏). "
+                    "请重建: scripts/rebuild_index.py --backend usearch --fresh"
+                )
 
     @property
     def name(self) -> str:

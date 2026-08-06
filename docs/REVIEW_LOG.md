@@ -513,3 +513,12 @@
 - 验证:
   - 正常路径: check_mcp_alive() = (True, 1197572, 1122) ✓
   - 模拟 lsof 输出非数字 pid_str → (False, None, None)，不崩 ✓（此前版本会崩溃）
+
+## 2026-08-06 22:00 f16 契约运行时断言（并行会话审计报告评估）
+
+- 背景: 并行审查会话报告 live usearch.index "1.2K / loaded size 0 (空)"，建议加运行时断言 + 重建索引。
+- 评估结论: **报告前提在本机不成立**。实测 live 索引 = 20172 字节 / 17 向量 / dtype=F16 / ndim=512（health_check 交叉确认 vectors 17）；报告修复命令带 `launchctl stop ai.hermes.gateway`（macOS），非本机场景；其 "magic=0100000000040000" 与实际文件头 "11000000 00040000" 不符。**无需重建。**
+- 采纳的加固: search_index.py:417-427 加运行时断言——磁盘索引 load 后 `dtype != ScalarKind.F16` 立即抛 RuntimeError（提示 `rebuild_index.py --backend usearch --fresh`）。实测依据: f32 文件 load 进 f16 Index 后 `.dtype` 静默变 `ScalarKind.F32`，后续 add 写 f16 → 混合精度文件 → 原生堆损坏（`free(): corrupted unsorted chunks`，即本机 21:13 崩溃根因一类）。断言把静默损坏变成启动期快速失败，落实 f16 永久契约。
+- 测试: tests/test_search_index.py 新增 `TestUsearchF16Assertion`（2 用例，用空索引文件构造，避开本机 usearch add 偶发 SIGSEGV）— f16 加载通过 / f32 触发 RuntimeError。
+- 验证: test_search_index.py 13/13 pass（隔离临时库 + init_db.py）。
+- 备注: MCP server（PID 1197572）仍在跑旧代码，断言在下次自然重启生效；live 索引本就 f16，重启亦安全。本轮改动不触发自动审查（审查 cron 23713671 已暂停）。
