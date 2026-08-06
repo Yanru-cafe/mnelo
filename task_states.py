@@ -121,9 +121,9 @@ def transition(
         conn: open sqlite3.Connection (FK on, WAL mode ready, transaction open).
         task_id: entities.id (kind='task' or kind='loop').
         to_state: 6 task states + 3 loop states.
-        reason: required; 含 actor 痕迹 (D8 强制).
+        reason: required; 含 actor 痕迹 (D8 强制). 恒必填, 不依赖 force.
         evidence_chunk_id: optional FK to chunks.id.
-        force: bypass allowed graph (要求 reason).
+        force: bypass allowed graph; reason 仍必填 (D8 纠正门需审计痕迹).
         now: optional timestamp override.
 
     Returns:
