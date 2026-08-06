@@ -454,18 +454,36 @@ _TASK_TOOL_REGISTRY = {
 
 
 def _handle_task_simple(mem, name: str, args: Dict) -> str:
-    """[8/6 M3] Dispatch task/loop tool to task_states module function.
+    """[8/6 M3 + 8/6 review RF8 高] Dispatch task/loop tool to task_states module function.
 
-    task_states 模块函数收 (conn, ...) 不收 Memory, 自己会 commit.
-    result 已是 dict (task_states.task_create returns {task_id, current_state, ...}),
-    不再做 id_field 嵌套包装 — 直接序列化整个 result.
+    事务包裹: 用 try/except/rollback 路径包裹所有 task_states.* 调用.
+    失败抛 TaskLoopError / IntegrityError / ProgrammingError 时显式 rollback,
+    防 RF3 双 spawn UPDATE 0 行抛错后, 前面 INSERT 的 entity + 状态窗变成孤儿行.
+
+    调用方走 `with mem._conn:` 自动事务; 但因为 Memory class 的 conn 默认在
+    autocommit (sqlite3 默认), 这里显式手动 BEGIN/COMMIT/ROLLBACK 包裹.
+
+    Returns:
+        result JSON. 失败时返回 {"error": ..., "type": ...} 而不 raise.
     """
     import task_states as _ts
 
     attr_name, _id_field = _TASK_TOOL_REGISTRY[name]
     func = getattr(_ts, attr_name)
-    result = func(mem._conn, **args)
-    mem._conn.commit()  # 跟 _handle_simple 同一 commit 边界
+
+    # [RF8 8/6 修订] Python sqlite3 默认 implicit transaction; 不显式 BEGIN.
+    # 失败路径 rollback, 成功路径 commit (跟 _handle_simple 一致).
+    try:
+        result = func(mem._conn, **args)
+        mem._conn.commit()
+    except Exception as e:
+        mem._conn.rollback()
+        logger.warning(f"_handle_task_simple {name} rolled back: {type(e).__name__}: {e}")
+        return json.dumps(
+            {"error": str(e), "type": type(e).__name__, "tool": name},
+            ensure_ascii=False,
+        )
+
     return json.dumps(result, ensure_ascii=False, default=str)
 
 

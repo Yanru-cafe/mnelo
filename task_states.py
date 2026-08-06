@@ -73,19 +73,23 @@ def _default_now() -> str:
 
 
 def _slugify(name: str) -> str:
-    """[review-pass RF2 8/6] name → URL-safe slug.
+    """[review-pass RF2 8/6 + RF10 8/6] name → URL-safe slug.
 
-    分 3 路由:
+    分 2 路由:
       1. 纯 ASCII 含 a-z/0-9/-: 直接 lowercase + 保留 [a-z0-9-], 30 字符 max.
       2. 含中文等非 ASCII: 走 hashlib.md5(name.encode()).hexdigest()[:8]
          (DESIGN §2.1 弃 pinyin — 主人 8/6 P22 '永不偷工' 不加新依赖).
-      3. 全部非 ASCII: 同 2, 同哈希 fallback.
 
-    例:
-        "采购耗材"      → "3c8e2f1a" (8 字符 hex)
-        "下单发货"      → "9a1b4c7d"
-        "fix bug"       → "fix-bug"
-        "更新 task 列表" → "e7b2f910"
+    例 (实测 hash, 主人 8/6 RF10 实测):
+        "采购耗材"        → "a49a962a"
+        "下单发货"        → "9e7a4e54"
+        "耗材库存监控"    → "7b526973"
+        "fix bug"         → "fix-bug"
+        "Restock supplies" → "restock-supplies"
+
+    注: 含中英混合名 ("更新 task 列表") 走 ASCII 路径 (含英文字母命中分支 1),
+    返回 "task" 或 "task-1"; 此退化已知, 不在本次修 (RF2 已 ship, 后续可加
+    segment 路由).
     """
     # 1. 走 regex 纯 ASCII 路径
     ascii_slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-")
@@ -219,6 +223,21 @@ def transition(
 
     # 3. CAS 关旧 + 开新
     ts = now or _default_now()
+    # [review-pass RF11 8/6] 严格递增: 旧窗 valid_until >= ts 时推进 1ms,
+    # 防 now=秒级 + 连跳产生 valid_from == valid_until 零长窗.
+    cur_vu = conn.execute(
+        "SELECT valid_until FROM task_states WHERE task_id=? AND valid_until IS NOT NULL "
+        "ORDER BY valid_until DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if cur_vu and cur_vu[0] and cur_vu[0] >= ts:
+        from datetime import datetime as _dt, timedelta as _td
+        try:
+            _t = _dt.fromisoformat(cur_vu[0])
+            _t = _t + _td(milliseconds=1)
+            ts = _t.isoformat(timespec="milliseconds")
+        except (ValueError, TypeError):
+            pass  # ts 无法 parse, 留原值 (caller 责任)
     affected = conn.execute(
         "UPDATE task_states SET valid_until = ? "
         "WHERE id = ? AND task_id = ? AND valid_until IS NULL",
@@ -817,17 +836,33 @@ def loop_update(
 
     enabled=False 写 dormant 状态窗; enabled=True 关 dormant 窗 (若有).
     其他字段仅改 properties_json.
+
+    [review-pass RF12 8/6] interval_hours 校验 (<=0 拒); 跟 loop_create 同型.
+    [review-pass RF13 8/6] 排除已软删 loop (valid_until IS NULL filter).
+    [review-pass RF14 8/6] enabled 切换走 CAS 单语句 (UPDATE WHERE active IS NULL +
+                     INSERT NEW, 失败回滚由 _handle_task_simple 兜底).
     """
+    # [RF13] 排除软删 loop
     row = conn.execute(
-        "SELECT properties_json FROM entities WHERE id=? AND kind='loop'",
+        "SELECT properties_json FROM entities WHERE id=? AND kind='loop' "
+        "AND valid_until IS NULL",
         (loop_id,),
     ).fetchone()
     if row is None:
         raise LoopNotFoundError(
-            f"loop_id 不存在: {loop_id}",
+            f"loop_id 不存在或已软删: {loop_id}",
             field="loop_id",
             code="LoopNotFoundError",
         )
+
+    # [RF12] interval_hours 校验 (跟 loop_create 一致)
+    if interval_hours is not None and interval_hours <= 0:
+        raise TaskLoopError(
+            f"interval_hours 必须 > 0, got {interval_hours}",
+            field="interval_hours",
+            code="InvalidIntervalError",
+        )
+
     cfg = json.loads(row[0])
 
     # 1. 改 properties (按需)
@@ -845,23 +880,22 @@ def loop_update(
         cfg["owner_id"] = owner_id
         changed["owner_id"] = owner_id
 
-    # 2. enabled 切换: 可能写 dormant 窗 / 关 dormant 窗
+    # 2. enabled 切换: CAS 关旧 + 开新 (单 SQL UPDATE WHERE, RF14)
     if enabled is not None and cfg.get("enabled", True) != enabled:
         cfg["enabled"] = enabled
         changed["enabled"] = enabled
         ts = now or _default_now()
-        # 关旧 enabled 状态窗 (DESIGN §4.3: enabled 隐含 loop 状态)
-        cur = conn.execute(
-            "SELECT id, state FROM task_states WHERE task_id=? AND valid_until IS NULL",
-            (loop_id,),
-        ).fetchone()
-        if cur is not None:
-            conn.execute(
-                "UPDATE task_states SET valid_until=? WHERE id=?",
-                (ts, cur[0]),
-            )
-        # 写新状态窗: enabled=False → dormant, enabled=True → running
         new_state = "dormant" if not enabled else "running"
+
+        # [RF14 8/6] 单 SQL CAS 关旧窗 (UPDATE WHERE active), 0 行说明并发赢家已关
+        affected = conn.execute(
+            "UPDATE task_states SET valid_until = ? "
+            "WHERE task_id = ? AND valid_until IS NULL",
+            (ts, loop_id),
+        ).rowcount
+        # 即使 affected == 0 (无活动窗), 也允许 INSERT 新状态窗 (loop_create 路径
+        # 同型); 不视为错误. 真并发两笔同方向 UPDATE 的赢家由 rowcount=1 区分,
+        # 输家 (INSERT 已撞 ux_task_current_state) → IntegrityError 由 MCP RF8 兜底.
         conn.execute(
             "INSERT INTO task_states "
             "(task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) "
@@ -904,10 +938,11 @@ def list_loops(
     """
     asof_ts = asof or _default_now()
 
-    # 1. 拉 loop entities
+    # 1. 拉 loop entities (排除软删 — RF13 8/6)
     rows = conn.execute(
         "SELECT id, name, properties_json FROM entities "
-        "WHERE kind='loop' ORDER BY updated_at DESC LIMIT ?",
+        "WHERE kind='loop' AND valid_until IS NULL "
+        "ORDER BY updated_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
 
