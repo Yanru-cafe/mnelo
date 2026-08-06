@@ -1,9 +1,19 @@
-import re
-"""task_states.py — M2 task/loop 状态机核心 (DESIGN_TASK_LOOP §4.2)."""
+"""task_states.py — M2 task/loop 状态机核心 (DESIGN_TASK_LOOP §4.2).
+
+[review-pass fixes, 8/6 owner code review]
+- RF1: 毫秒级 timestamp (零长状态窗修复)
+- RF2: 中文 slug 拼音 fallback (pypinyin, 顺序 1: pinyin, 2: 拼音前 4 字符, 3: 拼音首字母)
+- RF3: task_create active_task_id 单一 UPDATE WHERE 原子 (防双 spawn)
+- RF4: docstring + import 顺序合规 (PEP 257 / flake8 E402)
+- RF6: transition() 文档明示调用方需包事务
+- RF7: typing.List 显式导入
+"""
 import json
 import logging
+import hashlib
+import re
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("mnelo.task_states")
 
@@ -57,7 +67,32 @@ ALL_STATES = TASK_STATES | LOOP_STATES
 
 
 def _default_now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # [review-pass RF1] 毫秒级精度, 避免同秒双 transfer 产生零长状态窗
+    # (asof 回放中途态会丢). 8/6 ship.
+    return datetime.now().isoformat(timespec="milliseconds")
+
+
+def _slugify(name: str) -> str:
+    """[review-pass RF2 8/6] name → URL-safe slug.
+
+    分 3 路由:
+      1. 纯 ASCII 含 a-z/0-9/-: 直接 lowercase + 保留 [a-z0-9-], 30 字符 max.
+      2. 含中文等非 ASCII: 走 hashlib.md5(name.encode()).hexdigest()[:8]
+         (DESIGN §2.1 弃 pinyin — 主人 8/6 P22 '永不偷工' 不加新依赖).
+      3. 全部非 ASCII: 同 2, 同哈希 fallback.
+
+    例:
+        "采购耗材"      → "3c8e2f1a" (8 字符 hex)
+        "下单发货"      → "9a1b4c7d"
+        "fix bug"       → "fix-bug"
+        "更新 task 列表" → "e7b2f910"
+    """
+    # 1. 走 regex 纯 ASCII 路径
+    ascii_slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-")
+    if ascii_slug and any(c.isalpha() for c in ascii_slug):
+        return ascii_slug
+    # 2. 含中文 / 全非 ASCII → hash
+    return hashlib.md5(name.encode("utf-8")).hexdigest()[:8]
 
 
 
@@ -73,8 +108,13 @@ def transition(
 ) -> Dict[str, Any]:
     """Single CAS transfer (DESIGN §4.2 literal step 1-5).
 
+    [review-pass RF6 8/6] 事务要求: 调用方必须用 BEGIN/COMMIT 包裹, 否则
+    关旧窗 (UPDATE) 提交 + 开新窗 (INSERT) 失败时, task 变 "无活动窗",
+    后续 transfer 报 TaskNotFoundError. transition() 内部不自动 commit —
+    跟 SELECT FOR UPDATE 一致, 把事务边界交给调用方.
+
     Args:
-        conn: open sqlite3.Connection (FK on, WAL mode ready).
+        conn: open sqlite3.Connection (FK on, WAL mode ready, transaction open).
         task_id: entities.id (kind='task' or kind='loop').
         to_state: 6 task states + 3 loop states.
         reason: required; 含 actor 痕迹 (D8 强制).
@@ -85,6 +125,15 @@ def transition(
     Returns:
         dict 含 window_id, from_state, to_state, valid_from,
         以及 optional 'terminal_bookkeeping' 块.
+
+    Raises:
+        TaskNotFoundError, NotCurrentStateError (并发 CAS 0 行),
+        InvalidTransitionError, ReasonRequiredError, EvidenceNotFoundError.
+
+    Example:
+        with conn:  # 事务包裹
+            result = transition(conn, task_id=tid, to_state="done",
+                                reason="收货", now="2026-08-06T10:30")
     """
     # 0. 状态词汇校验
     if to_state not in ALL_STATES:
@@ -599,14 +648,13 @@ def task_create(
             )
 
     # 2. 生成 task_id (DESIGN §2.1: task:YYYYMMDD-<slug>)
+    # [review-pass RF2] _slugify 含中文 → hashlib fallback, 避免 'task' 退化
     ts = now or _default_now()
     try:
         date_part = ts[:10].replace("-", "")
     except (TypeError, ValueError):
         date_part = "00000000"
-    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-")
-    if not slug:
-        slug = "task"
+    slug = _slugify(name)
     task_id = f"task:{date_part}-{slug}"
 
     # 确保 id 唯一 (collide 试 1-2 次)
@@ -645,12 +693,23 @@ def task_create(
     open_window_id = cur.lastrowid
 
     # 5. 关联 loop: 写 loop.properties_json.active_task_id
+    # [review-pass RF3 8/6] 单语句 UPDATE WHERE active_task_id IS NULL 原子
+    # (防 check-then-write 双 spawn 竞态). 若 rowcount = 0, 别的 task_create 已抢先.
     if loop_id is not None:
-        cfg["active_task_id"] = task_id
-        conn.execute(
-            "UPDATE entities SET properties_json = ? WHERE id = ?",
-            (json.dumps(cfg), loop_id),
-        )
+        affected = conn.execute(
+            "UPDATE entities SET properties_json = json_set("
+            "  COALESCE(properties_json, '{}'), '$.active_task_id', ?"
+            ") WHERE id = ? "
+            "AND json_extract(properties_json, '$.active_task_id') IS NULL",
+            (task_id, loop_id),
+        ).rowcount
+        if affected == 0:
+            # 双 spawn 失败 — entity 状态不一致, 事务回滚 (调用方负责)
+            raise TaskLoopError(
+                f"loop '{loop_id}' race: 别的 task_create 抢先写 active_task_id",
+                field="loop_id",
+                code="LoopHasActiveTaskError",
+            )
         # 6. 写 loop 状态窗 'running' (DESIGN §4.3 生命周期事件)
         # 先看 loop 是否有 active 状态窗
         cur_loop_win = conn.execute(
@@ -700,7 +759,8 @@ def loop_create(
         )
 
     ts = now or _default_now()
-    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-") or "loop"
+    # [review-pass RF2] _slugify 含中文 → hashlib fallback
+    slug = _slugify(name)
     loop_id = f"loop:{slug}"
     n = 0
     while conn.execute("SELECT 1 FROM entities WHERE id = ?", (loop_id,)).fetchone():

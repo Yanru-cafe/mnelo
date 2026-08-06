@@ -34,16 +34,22 @@ def _setup(m):
             "DELETE FROM task_states WHERE task_id LIKE 'task:tlm2-%' "
             "OR task_id LIKE 'task:tlm3-%' "
             "OR task_id LIKE 'task:tlm7-%' "
+            "OR task_id LIKE 'task:tlm8-%' "
             "OR task_id LIKE 'task:20260806-m3-%' "
-            "OR task_id LIKE 'loop:tlm7-%'"
+            "OR task_id LIKE 'task:20260806-t8-%' "
+            "OR task_id LIKE 'loop:tlm7-%' "
+            "OR task_id LIKE 'loop:tlm8-%' OR task_id LIKE 'task:rf%' OR task_id LIKE 'loop:rf%' OR task_id LIKE 'task:20260806-rf%' OR task_id LIKE 'loop:20260806-rf%' OR task_id LIKE 'task:20260806-t1%' OR task_id LIKE 'loop:20260806-t1%'"
         )
         m._conn.execute(
             "DELETE FROM entities WHERE id LIKE 'task:tlm2-%' "
             "OR id LIKE 'task:tlm3-%' "
             "OR id LIKE 'task:tlm7-%' "
+            "OR id LIKE 'task:tlm8-%' "
             "OR id LIKE 'task:20260806-m3-%' "
+            "OR id LIKE 'task:20260806-t8-%' "
             "OR id LIKE 'loop:tlm3-%' "
-            "OR id LIKE 'loop:tlm7-%'"
+            "OR id LIKE 'loop:tlm7-%' "
+            "OR id LIKE 'loop:tlm8-%' OR id LIKE 'task:rf%' OR id LIKE 'loop:rf%' OR id LIKE 'task:20260806-rf%' OR id LIKE 'loop:20260806-rf%' OR id LIKE 'task:20260806-t1%' OR id LIKE 'loop:20260806-t1%'"
         )
     finally:
         m._conn.execute("PRAGMA foreign_keys = ON")
