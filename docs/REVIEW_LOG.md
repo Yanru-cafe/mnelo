@@ -402,3 +402,28 @@
   - test_m29_review_fixes.py —— **3/3 通过**。
   - test_m5_4_e2e_purchase.py —— **3/3 通过**。
   - 修复验证（关键场景）: 跑完上述 6 测后，在同一库上开启新 pytest 会话（触发 autouse `_clean_test_data_session`）跑 test_m5_2_stale_proposal.py —— **10/10 通过，不再崩溃**（修复前该场景正是 FK constraint failed 崩溃点）；第二遍重跑 test_m5_4 + test_m29 —— **6/6 通过**。
+
+## 2026-08-06 18:16 审查 f95dae2..1a38589
+- 范围: f95dae2..1a38589（共 2 个提交）
+- 提交:
+  - 747b26e feat(m30): 3 多角度优化 — race/validation/digest contract (34/34 pass)
+  - 1a38589 fix(review): M31 review-pass 整改 — 2 低危修复 (17/17 pass)
+- 结论: 发现 4 个问题（1 中 + 3 低）。M30 三个优化点（BEGIN IMMEDIATE 事务化、threshold 校验、digest 截断）功能正确、均有测试且本文件单独通过；但**新增 test_m30_optimization.py 的 `_setup` 清理前缀不匹配，每次运行泄漏 2 条 ghost open task 进共享库，会破坏既有 test_m4_digest_block4.py**（与上轮 M29/M31 修的 e2e 泄漏同类，建议本轮一并修复）。
+- 发现: 按严重度列出
+  - [中] tests/test_m30_optimization.py:30-31 `_setup()` 清理前缀与生成 id 不匹配 → 每轮泄漏，且破坏 test_m4_digest_block4.py。
+    - 具体: 清理用 `task_id LIKE 'task:m30-%'` / `id LIKE 'task:m30-%'`；但 `_create_stale_task` 走 `task_create(now=10 天前)`，id 生成式为 `task:YYYYMMDD-<slug>`（task_states.py:102 `f"task:{date_part}-{slug}"`），实际 id 如 `task:20260727-m30-race-dup`——日期前缀夹在 `task:` 与 `m30` 之间，`task:m30-%` 永不命中。audit_log 清理（L32 用 `task:%m30-%`）命中，故只漏 task_states + entities 两表。
+    - 失败场景: 单会话内 m30→m4 顺序运行（pytest 默认收集序），泄漏的 ghost open task 使 test_m4_digest_block4 的 `counts.active_tasks == 2` 断言失败——**实测: test_m4_digest_block4 单独在全新库 6/6 通过；m30→m4 同会话 3/6 失败**。反复运行同 id 撞名累加 `-2/-3` 变体；若对 live 库运行则污染生产 task_states/entities。修复: task_states/entities 清理改 `task:%m30-%`（对齐 audit_log 模式）。
+  - [低] task_states.py:1134-1148 M30.2 校验插入到 docstring 之前 → `propose_stale_tasks.__doc__` 为 None。
+    - 具体: `if not isinstance(stale_days_threshold, int)...` 抛错块位于函数体首句，其后的 `"""..."""` 不再是函数 docstring，降级为死字符串字面量。实测 `propose_stale_tasks.__doc__ is None` → True。
+    - 失败场景: 破坏 help()/内省/任何基于 `__doc__` 的工具与文档生成；新 contributor 读不到参数说明。修复: 把 docstring 移到校验语句之前（docstring 必须是函数体第一条语句）。
+  - [低] task_states.py:1483 render_digest_block4 截断用 `text_lines[-1].endswith("...")` 反推，可被名字以 "..." 结尾的 task 欺骗。
+    - 具体: active task 循环截断后 append `"..."` 作哨兵，dormant loop 段用 `if not text_lines[-1].endswith("...")` 判断是否已截断。若最后一个 active task 的渲染行恰以 "..." 结尾（如任务名 `pending...`），即便 block4 远未到 2000 字符也会误判已截断 → dormant loop 块被静默丢弃。
+    - 失败场景: digest 缺失 dormant loop 信息，agent 上下文看不到未闭环 loop；属信息丢失而非数据损坏。修复: 在截断处显式置 bool（如 `truncated = True`），不要从末行内容反推。
+  - [低] tests/test_m30_optimization.py M30.1 标题称"并发安全"，但测试实为同连接顺序双 apply。
+    - 具体: 两次 `apply_stale_proposal` 在同一连接上串行执行，只验证幂等（第二次抛 ProposalAlreadyResolved），未创建真实并发（双连接/双线程）。
+    - 失败场景: BEGIN IMMEDIATE 的序列化行为与并发第二个写者拿锁时 `database is locked` 的上抛路径完全未被覆盖，race fix 的核心主张无测试背书。建议加双线程（或双连接）并发 apply 用例，断言恰好一行 stale_resolved。
+- 测试:
+  - 环境: 全量 pytest 仍被既有 conftest session fixture（usearch index load 原生 abort）阻断——本机既有问题，parent commit 上同样复现，与本次提交无关。沿用上轮工作区方案: `scripts/init_db.py` 全新临时库 + `MNELO_MEMORY_DIR`/`MNELO_MEMORY_SEARCH_BACKEND=usearch` 隔离运行。
+  - test_m30_optimization.py + test_m5_4_e2e_purchase.py —— **7/7 通过**。
+  - test_m28_review_fixes.py + test_m5_2_stale_proposal.py —— **13/13 通过**。
+  - 归因验证（跨文件泄漏）: test_m4_digest_block4.py 单独在全新库 —— **6/6 通过**；m30→m4 同会话 —— m30 5/5 + m4 3/6（泄漏致 count 断言失败）；m28→m4 同会话 —— 同为 3/6 失败（m28 泄漏为既有问题，不在本次范围，但证明 test_m4 的 count 断言对跨文件残留普遍脆弱）。
