@@ -32,22 +32,24 @@ sys.path.insert(0, str(_REPO))
 
 
 def _run_in_subprocess(snippet: str, env_extra: dict = None, fmt: dict = None) -> str:
-    """[M19 8/6 review-pass fix] Run Python snippet in subprocess with usearch backend.
+    """[M19 + M25 8/6 review-pass fix] Run Python snippet in subprocess with usearch backend.
 
-    自动注入 {repo} 占位符 = 当前仓库路径. 调用方不用再硬编码 /Users/apple/.hermes/memory.
-    fmt 参数对 snippet 做 str.format(**fmt) 注入其他占位符 (tid, idx, lid, name 等).
+    双重 DB 路径固化:
+      {repo} 占位符 → str(_REPO) (snippet 系统路径)
+      MNELO_MEMORY_DIR env → str(_REPO) (子进程 memory.Memory() 解析 DB)
+    两者必须同源, 否则 _setup 清 DB 跟子进程写 DB 不匹配, M17 修复承诺失败.
     """
-    # [M19 portability] 子进程 snippet 含 {repo} 时自动替换 — 干净 checkout / Linux / CI 都
-    # 能跑, 不依赖作者本机路径.
     full_fmt = {"repo": str(_REPO)}
     if fmt:
         full_fmt.update(fmt)
-    # 用 format_map: 同时替换 {repo} 和其他占位符, 不抛 KeyError (缺失占位符保留原文).
     snippet = snippet.format_map(_SafeFormatDict(full_fmt))
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(Path.home()),
         "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
+        # [M25 fix] 子进程拿不到父进程 env, 显式注入 MNELO_MEMORY_DIR (= _REPO),
+        # 跟 _setup sqlite3.connect 路径同源. 默认回落 ~/.hermes/memory 已废弃.
+        "MNELO_MEMORY_DIR": str(_REPO),
     }
     if env_extra:
         env.update(env_extra)
@@ -90,22 +92,18 @@ class _SafeFormatDict(dict):
 
 
 def _setup():
-    """[M17 8/6 review-pass fix] Clean fixtures using same DB the subprocesses use.
+    """[M17 + M26 8/6 review-pass fix] Clean fixtures — 跟子进程用同一 DB 路径.
 
-    Use config.resolve_db_path() — respects MNELO_MEMORY_DIR env var, 跟子进程
-    memory.Memory() 走同一路径解析. 不再硬编码 _REPO/memory.db, 干净 checkout
-    + 显式 env 都能找到正确 DB.
+    直接用 str(_REPO) + "memory.db" 而非 config.resolve_db_path() — 后者会读
+    父进程 MNELO_MEMORY_DIR, 但子进程收不到 (env 不继承), 两者解析不同. 现在
+    子进程通过 _run_in_subprocess 显式接收 MNELO_MEMORY_DIR=_REPO, _setup 也
+    直连 _REPO/memory.db, 路径 100% 同源.
 
-    兼容处理: 干净 checkout 上 DB 可能不存在, sqlite3.connect 会创建空文件,
-    但 DELETE 会抛 'no such table' 错. 这种情况静默跳过 (DB 本身无 step14-%
-    数据).
+    兼容: 干净 checkout 上 DB 可能不存在, sqlite3.connect 会创建空文件, DELETE
+    抛 'no such table' 静默跳过, 并删 0 字节 DB 防污染.
     """
     import sqlite3
-    try:
-        import config  # type: ignore[import-not-found]
-        db_path = config.resolve_db_path()
-    except (ImportError, AttributeError, OSError):
-        db_path = _REPO / "memory.db"
+    db_path = _REPO / "memory.db"
     try:
         c = sqlite3.connect(str(db_path), timeout=10)
         c.execute("PRAGMA foreign_keys = OFF")
@@ -125,11 +123,8 @@ def _setup():
         c.commit()
         c.close()
     except sqlite3.OperationalError as e:
-        # [M17 fix] 干净 checkout: DB 不存在表 schema, DELETE 抛错. 无 step14 数据,
-        # 静默跳过 (test 在干净环境会失败, 但不应留下 0 字节 DB).
         if "no such table" not in str(e):
             raise
-        # 删空 DB 文件 (无 schema 的 0 字节文件), 防污染 repo
         if db_path.exists() and db_path.stat().st_size == 0:
             db_path.unlink()
 

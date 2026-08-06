@@ -18,9 +18,10 @@ spawn (memory_task_create). 不直接调 task_create.
     3. digest 候选 (写到 ~/.hermes/cron/output/loop_tick/<date>.json 给人/agent 看)
   退出: 0=正常 / 1=异常
 
-[隔离保证]
-  subprocess mcp_memory (多 MCP instance 并行 tick 互不冲突). 走 MCP 不直接调
-  task_states.* 防 SQL 写入冲突.
+[实现选择]
+  同进程 memory.Memory() + task_states.* 直连 SQLite. 不起 MCP server 端口.
+  隔离靠 SQLite WAL (single writer) + busy_timeout=30s, 跟其他 cron (backup 等)
+  互不阻塞. 跟 subprocess MCP 隔离 (多进程端口) 不是同一回事, cron 不需要.
 """
 import argparse
 import json
@@ -40,7 +41,7 @@ _LOCK_PATH = Path("/tmp/mnelo_loop_tick_cron.lock")
 
 
 def _log(msg: str) -> None:
-    ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    ts = datetime.now().isoformat(timespec="seconds")
     print(f"[{ts}] mnelo_loop_tick_cron: {msg}", flush=True)
 
 
@@ -158,7 +159,10 @@ def _run(args) -> int:
     due_loops = []
     not_due_loops = []
     error_loops = []
-    now_ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    # [M20 8/6 review-pass fix] 用 naive local ISO 字符串, 跟 task_states._default_now()
+    # 写入格式一致. 原用 timezone.utc (aware) 会让 loop_tick 内部 naive-aware
+    # datetime 相减抛 TypeError, 导致 cron 稳态下检不出 due loop.
+    now_ts = datetime.now().isoformat(timespec="milliseconds")
 
     for loop in loops:
         loop_id = loop.get("loop_id")
@@ -205,7 +209,8 @@ def _run(args) -> int:
     if not args.dry_run:
         # 4a. 写 digest 候选
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # [M20 fix] naive local 日期, 跟 storage 一致, 避免 cron 跨日不一致
+        today = datetime.now().strftime("%Y-%m-%d")
         out_path = args.output_dir / f"{today}.json"
         # 累加同日多 tick
         existing = []
