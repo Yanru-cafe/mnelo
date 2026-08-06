@@ -1138,6 +1138,13 @@ def propose_stale_tasks(
     stale_days_threshold: int = 7,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    # [M30 fix] 输入校验 — stale_days_threshold 必须正整数. 负数 / 0 / 非 int
+    # 会让所有 task 触发 stale 或永不触发, 后果严重. 早抛错优于静默.
+    if not isinstance(stale_days_threshold, int) or stale_days_threshold < 1:
+        raise TaskLoopError(
+            f"stale_days_threshold 必须正整数, got {stale_days_threshold!r}",
+            field="stale_days_threshold", code="InvalidThreshold",
+        )
     """[8/6 M5.2 + DESIGN §4.4 Proposal 模式] 扫描 stale task, 写 audit_log Proposal.
 
     走 audit_log 现有表 (pass_name='stuck_task', status='proposed'). 跟 M5.1
@@ -1301,58 +1308,71 @@ def apply_stale_proposal(
         {"proposal_id": int, "status": "applied", "ref_id": str, "applied_action": str}
     """
     now_ts = now or _default_now()
-    row = conn.execute(
-        "SELECT id, pass_name, status, ref_id FROM audit_log WHERE id=?",
-        (proposal_id,),
-    ).fetchone()
-    if not row:
-        raise TaskLoopError(
-            f"proposal_id={proposal_id} 不存在",
-            field="proposal_id", code="ProposalNotFound",
+    # [M30 fix] race condition — 旧实现 check + insert 分两步, 两 agent 并发
+    # apply 同 proposal_id 都过 check + 双写 audit_log (UNIQUE run_id 不同不冲突).
+    # 修: SQLite WAL + 显式 BEGIN IMMEDIATE 拿写锁, 整个 check+insert 原子化.
+    # 应用层幂等性: 仍保留 stale_resolved/applied 行检测 (重复 apply 显式报错).
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT id, pass_name, status, ref_id FROM audit_log WHERE id=?",
+            (proposal_id,),
+        ).fetchone()
+        if not row:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"proposal_id={proposal_id} 不存在",
+                field="proposal_id", code="ProposalNotFound",
+            )
+        if row[1] != "stuck_task":
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"proposal_id={proposal_id} 不是 stuck_task Proposal (pass_name={row[1]})",
+                field="proposal_id", code="ProposalMismatch",
+            )
+        # [M5.2 fix] 校验是否已 applied — 同 ref_id 已有 stale_resolved 行
+        resolved = conn.execute(
+            """SELECT id FROM audit_log
+               WHERE pass_name='stuck_task' AND action_type='stale_resolved'
+                 AND ref_id=? AND status='applied'""",
+            (row[3],),
+        ).fetchone()
+        if resolved:
+            conn.execute("ROLLBACK")
+            raise TaskLoopError(
+                f"ref_id={row[3]} 已被 applied (resolved_id={resolved[0]}), 不能重复",
+                field="proposal_id", code="ProposalAlreadyResolved",
+            )
+        # [M5.2 fix] UNIQUE(run_id, pass_name, action_type, ref_id, status) 约束
+        # run_id 跟原 Proposal 不同 (含 proposal_id 区分), status='applied' 跟原
+        # 'proposed' 自然错开. 整个 check+insert 在 BEGIN IMMEDIATE 事务里, 并发
+        # apply 会被 SQLite 序列化, 第二个拿到锁时 resolved check 命中失败抛错.
+        conn.execute(
+            """INSERT INTO audit_log (
+                run_id, pass_name, action_type, ref_type, ref_id,
+                before_json, after_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                f"resolved-{now_ts}-{proposal_id}",
+                "stuck_task",
+                "stale_resolved",
+                "task",
+                row[3],
+                json.dumps({"original_proposal_id": proposal_id, "status": "proposed"}, ensure_ascii=False),
+                json.dumps({"applied_action": applied_action, "resolved_at": now_ts}, ensure_ascii=False),
+                1.0,
+                "applied",
+                now_ts,
+            ),
         )
-    if row[1] != "stuck_task":
-        raise TaskLoopError(
-            f"proposal_id={proposal_id} 不是 stuck_task Proposal (pass_name={row[1]})",
-            field="proposal_id", code="ProposalMismatch",
-        )
-    # [M5.2 fix] 校验是否已 applied — 检查原 proposal_id 是否有 stale_resolved 行
-    # (新 audit_log row 在 apply 时写入, run_id 含 proposal_id).
-    resolved = conn.execute(
-        """SELECT id FROM audit_log
-           WHERE pass_name='stuck_task' AND action_type='stale_resolved'
-             AND ref_id=? AND status='applied'""",
-        (row[3],),
-    ).fetchone()
-    if resolved:
-        raise TaskLoopError(
-            f"ref_id={row[3]} 已被 applied (resolved_id={resolved[0]}), 不能重复",
-            field="proposal_id", code="ProposalAlreadyResolved",
-        )
-    # Update: status=applied, after_json += applied_action metadata
-    # 用新 row 记录 applied 决策 (避免覆盖原 Proposal)
-    # 实务上 audit_log append-only — 写一条新行 trace applied
-    # [M5.2 fix] UNIQUE(run_id, pass_name, action_type, ref_id, status) 约束
-    # 不让 run_id 跟原 Proposal 同 — 用 resolved_<timestamp> 区分. status='applied'
-    # 跟前面 status='proposed' 自然错开, 不冲突.
-    conn.execute(
-        """INSERT INTO audit_log (
-            run_id, pass_name, action_type, ref_type, ref_id,
-            before_json, after_json, confidence, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            f"resolved-{now_ts}-{proposal_id}",  # 新 run_id, 关联原 proposal_id
-            "stuck_task",
-            "stale_resolved",
-            "task",
-            row[3],
-            json.dumps({"original_proposal_id": proposal_id, "status": "proposed"}, ensure_ascii=False),
-            json.dumps({"applied_action": applied_action, "resolved_at": now_ts}, ensure_ascii=False),
-            1.0,
-            "applied",
-            now_ts,
-        ),
-    )
-    conn.commit()
+        conn.execute("COMMIT")
+    except Exception:
+        # 兜底: 任何异常回滚 (BEGIN IMMEDIATE 没 COMMIT 必须 ROLLBACK, 否则 SQLite 锁死)
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
     return {
         "proposal_id": proposal_id,
         "status": "applied",
@@ -1424,11 +1444,20 @@ def list_stale_proposals(
 
 
 
+# [M30.3 fix] digest block 4 输出上限 — DESIGN §4.4 + README 契约: digest
+# 500-2000 字符. block 4 是 digest 一部分, 单独应 ≤2000 chars. 大量 stale
+# task 会让 block 4 撑爆 digest 注入 agent 上下文, 必须截断.
+DIGEST_BLOCK4_MAX_CHARS = 2000
+
+
 def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, List[str]]]:
-    """[8/6 M4] 把 list_active_tasks_and_loops 结果渲染成 digest 行.
+    """[8/6 M4 + M30] 把 list_active_tasks_and_loops 结果渲染成 digest 行.
 
     返回:
         (text_lines, line_refs) — 跟 _build_digest 其他 block 同型.
+
+    M30 fix: 输出总长 ≤2000 字符 (DIGEST_BLOCK4_MAX_CHARS). 超出截断 + "..."
+    后缀, 避免 digest 撑爆 agent context window.
     """
     text_lines: List[str] = []
     refs: Dict[str, List[str]] = {}
@@ -1444,16 +1473,25 @@ def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, L
         line = f"  - [{t['state']}] {t['name']} (age={t['age_days']}d{stale_mark})"
         text_lines.append(line)
         refs[str(n)] = [t["task_id"]]
+        # 累计长度检测 + 截断 (留 3 char 给 "...")
+        if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
+            text_lines.append("...")
+            break
 
     if active_block["counts"]["dormant_loops"]:
-        n += 1
-        text_lines.append(f"dormant loop ({active_block['counts']['dormant_loops']}):")
-        refs[str(n)] = []
-        for l in active_block["dormant_loops"]:
+        # 截断后 skip dormant loops (block 4 容量有限)
+        if not text_lines[-1].endswith("..."):
             n += 1
-            line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
-            text_lines.append(line)
-            refs[str(n)] = [l["loop_id"]]
+            text_lines.append(f"dormant loop ({active_block['counts']['dormant_loops']}):")
+            refs[str(n)] = []
+            for l in active_block["dormant_loops"]:
+                if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
+                    text_lines.append("...")
+                    break
+                n += 1
+                line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
+                text_lines.append(line)
+                refs[str(n)] = [l["loop_id"]]
 
     return text_lines, refs
 
