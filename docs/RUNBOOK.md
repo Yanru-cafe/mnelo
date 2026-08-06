@@ -179,7 +179,18 @@ Token 走 `~/.config/mnelo/auth_token` (mode 600) 默认; 或手动 `export MNEO
 
 ### 5.2 systemd 守护 (Linux 推荐)
 
-`/etc/systemd/system/mnelo-mcp.service`:
+`scripts/install.sh` 第 6 步在 Linux 上自动装 systemd unit
+（模板: `scripts/systemd/mnelo-mcp.service`）：
+
+- **root** 跑 install.sh → 系统级 `/etc/systemd/system/mnelo-mcp.service`
+  （`WantedBy=multi-user.target`, `User=<当前用户>`）。
+- **非 root** 跑 → 用户级 `~/.config/systemd/user/mnelo-mcp.service`
+  （`WantedBy=default.target`, 无 `User=`），并尝试 `loginctl enable-linger`
+  让服务在 SSH 登出后继续跑（失败会 warn — 需 root 手动
+  `sudo loginctl enable-linger <user>`）。
+
+安装产物即下方 unit（占位符 `LIVE_ROOT`/`VENV_PY`/`USER_LINE`/`WANTED_BY`
+由 install.sh 用 sed 渲染）。手动安装可照抄:
 
 ```ini
 [Unit]
@@ -189,22 +200,26 @@ After=network.target
 [Service]
 Type=simple
 User=mnelo
-WorkingDirectory=/path/to/mnelo
+WorkingDirectory=/path/to/mnelo-data
 # ⚠️ MNELO_MEMORY_SEARCH_BACKEND 必须显式 usearch — 无 AVX2 机 auto 链
 # 主进程 import zvec 直接 SIGILL 崩进程 (见 §2.2). systemd 环境干净, 别赌 auto.
 Environment=MNELO_MEMORY_DIR=/path/to/mnelo-data
 Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
 # 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
-ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086
+Environment=MNELO_MEMORY_SERVER_PORT=8086
+ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport sse --host 127.0.0.1
 # usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
 Restart=always
 RestartSec=3
-StandardOutput=append:/var/log/mnelo-mcp.log
-StandardError=append:/var/log/mnelo-mcp.err
+StandardOutput=append:/path/to/mnelo-data/logs/mnelo.mcp.log
+StandardError=append:/path/to/mnelo-data/logs/mnelo.mcp.error.log
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> 模板里 `StandardOutput`/`StandardError` 用 install.sh 建的
+> `<LIVE_ROOT>/logs/` 目录（与 launchd plist、backup cron 一致）。
 
 启用 / 管理:
 

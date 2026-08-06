@@ -11,7 +11,8 @@
 #   3. pip install -r requirements.txt
 #   4. (可选) 下载 bge-small-zh-v1.5 模型 (~92 MB, 避免首次 recall 冷启动)
 #   5. python scripts/init_db.py
-#   6. 装 plist (macOS launchd) + launchctl load
+#   6. 装服务守护: macOS → launchd plist + launchctl load
+#      Linux → systemd unit (root 系统级 / 非 root 用户级 + linger)
 #   7. 跑 health_check.py 验证
 #
 # 设计原则:
@@ -120,7 +121,7 @@ else
     log "token 已存在: $TOKEN_FILE"
 fi
 
-# ---- 10. plist (macOS) ----
+# ---- 10. 服务安装: macOS → launchd plist / Linux → systemd unit ----
 if [ "$(uname -s)" = "Darwin" ]; then
     if [ -f "$PLIST_SRC" ]; then
         log "装 launchd plist: $PLIST_DST"
@@ -142,7 +143,61 @@ if [ "$(uname -s)" = "Darwin" ]; then
         warn "plist 模板不存在: $PLIST_SRC (跳过 launchd 装)"
     fi
 else
-    log "非 macOS, 跳过 launchd (手动跑: MNELO_HOME=$MNELO_HOME $VENV_PY $LIVE_ROOT/mcp_server.py --transport sse)"
+    # Linux: systemd unit (有 systemd) — 自动守护 + 崩溃自拉起 + 开机自启
+    if command -v systemctl >/dev/null 2>&1; then
+        SYSTEMD_SRC="$REPO_ROOT/scripts/systemd/mnelo-mcp.service"
+        if [ -f "$SYSTEMD_SRC" ]; then
+            if [ "$(id -u)" -eq 0 ]; then
+                # root → 系统级 unit (随系统自启, 服务独立于登录会话)
+                SD_DST="/etc/systemd/system/mnelo-mcp.service"
+                SD_SCOPE="system"
+                SD_CTL="systemctl"
+                WANTED_BY="multi-user.target"
+                USER_LINE="User=$(id -un)"
+            else
+                # 非 root → 用户级 unit + linger (SSH 登出后服务仍存活)
+                SD_DST="$HOME/.config/systemd/user/mnelo-mcp.service"
+                SD_SCOPE="user"
+                SD_CTL="systemctl --user"
+                WANTED_BY="default.target"
+                USER_LINE="# User= (user unit 不允许指定 — 自动以当前用户跑)"
+            fi
+            log "装 systemd unit: $SD_DST ($SD_SCOPE scope)"
+            mkdir -p "$(dirname "$SD_DST")"
+            sed -e "s|__LIVE_ROOT__|$LIVE_ROOT|g" \
+                -e "s|__VENV_PY__|$VENV_PY|g" \
+                -e "s|__MNELO_HOME__|$MNELO_HOME|g" \
+                -e "s|__USER_LINE__|$USER_LINE|g" \
+                -e "s|__WANTED_BY__|$WANTED_BY|g" \
+                "$SYSTEMD_SRC" > "$SD_DST"
+            chmod 644 "$SD_DST"
+
+            # 用户级 unit 要连 user manager — SSH 非登录 shell 里 XDG_RUNTIME_DIR 可能没设
+            if [ "$SD_SCOPE" = "user" ]; then
+                export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+            fi
+            $SD_CTL daemon-reload 2>/dev/null || true
+            if $SD_CTL enable --now mnelo-mcp 2>/dev/null; then
+                ok "systemd unit 已装 + 启动 ($SD_SCOPE)"
+                log "管理: $SD_CTL status mnelo-mcp  / 日志: journalctl -u mnelo-mcp -f"
+            else
+                warn "unit 文件已写: $SD_DST — 但 systemctl 不可用/失败, 稍后手动: $SD_CTL enable --now mnelo-mcp"
+            fi
+
+            # 用户级: enable-linger 让服务在登出后继续跑 (需 root 执行)
+            if [ "$SD_SCOPE" = "user" ]; then
+                if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+                    ok "linger 已启用 — SSH 登出后服务仍存活"
+                else
+                    warn "loginctl enable-linger 失败 — 用户服务在登出后可能停止; 用 root 跑: sudo loginctl enable-linger $(id -un)"
+                fi
+            fi
+        else
+            warn "systemd 模板不存在: $SYSTEMD_SRC (跳过; 手动跑见 docs/RUNBOOK.md §5.2)"
+        fi
+    else
+        log "无 systemctl (非 systemd 发行版) — 手动跑: MNELO_MEMORY_DIR=$LIVE_ROOT $VENV_PY $LIVE_ROOT/mcp_server.py --transport sse"
+    fi
 fi
 
 # ---- 11. health check ----
