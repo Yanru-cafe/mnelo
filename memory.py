@@ -321,6 +321,87 @@ class Memory:
             )
             logger.info("[H-1 审计] meta flags l2_audit_log_ready=1 + l2_h1_migrated ensured")
 
+        # [8/6 v0.2 M1 schema] task_states + state_transitions + seed 默认转移矩阵
+        # 主人 DESIGN_TASK_LOOP.md §3 拍板. 不变量:
+        #   1. 同一 task 同时最多 1 个当前状态行 (ux_task_current_state partial UNIQUE)
+        #   2. state ∈ task (6) / loop (3) 词汇集 (CHECK 约束)
+        #   3. kind IN ('task','loop') 排除 L2 TTL/decay (D11 硬规则, M5 落地)
+        # M1 仅 schema + 不变量 + seed; M2 行为 + M3 API + M4 digest + M5 cron tick 后续.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (state IN (
+                    'open','in_progress','waiting','blocked','done','cancelled',
+                    'running','dormant','paused'
+                )),
+                valid_from TEXT NOT NULL,
+                valid_until TEXT,
+                reason TEXT,
+                evidence_chunk_id TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES entities(id),
+                FOREIGN KEY (evidence_chunk_id) REFERENCES chunks(id)
+            )
+        """)
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_task_current_state "
+            "ON task_states(task_id) WHERE valid_until IS NULL"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_states_open "
+            "ON task_states(state) WHERE valid_until IS NULL "
+            "AND state NOT IN ('done','cancelled','dormant','paused')"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_task_states_task_valid "
+            "ON task_states(task_id, valid_from, valid_until)"
+        )
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS state_transitions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL DEFAULT 'default',
+                from_state TEXT NOT NULL,
+                to_state TEXT NOT NULL,
+                UNIQUE(scope, from_state, to_state)
+            )
+        """)
+        # Seed 默认转移矩阵 (DESIGN §3.2). INSERT OR IGNORE — 幂等.
+        default_transitions = [
+            ('default', 'open',        'in_progress'),
+            ('default', 'open',        'done'),
+            ('default', 'open',        'cancelled'),
+            ('default', 'in_progress', 'waiting'),
+            ('default', 'in_progress', 'blocked'),
+            ('default', 'in_progress', 'done'),
+            ('default', 'in_progress', 'cancelled'),
+            ('default', 'waiting',     'in_progress'),
+            ('default', 'waiting',     'done'),
+            ('default', 'waiting',     'cancelled'),
+            ('default', 'blocked',     'in_progress'),
+            ('default', 'blocked',     'waiting'),
+            ('default', 'blocked',     'done'),
+            ('default', 'blocked',     'cancelled'),
+            ('default', 'done',        'open'),  # reopen 逃生门 (D8)
+        ]
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO state_transitions (scope, from_state, to_state) VALUES (?, ?, ?)",
+            default_transitions,
+        )
+        # schema_version bump (1.0 → 1.1) — 实战标记 M1 落地
+        existing_version = self._conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+        if not existing_version or existing_version[0] != "1.1":
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '1.1')"
+            )
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('task_loop_m1_migrated', ?)",
+                (now(),),
+            )
+            logger.info("[M1 v0.2] task_states + state_transitions + seed ensured; schema_version → 1.1")
+
         self._conn.commit()
 
     def close(self) -> None:
