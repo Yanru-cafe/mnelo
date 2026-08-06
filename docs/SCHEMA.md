@@ -1,7 +1,7 @@
 # 自建知识图谱记忆系统 — Schema 设计文档
 
 > **项目代号**: `mnelo` (HM, 后简称 hm_)
-> **位置**: `~/.hermes/memory/`
+> **位置**: `$MNELO_MEMORY_DIR/`
 > **目的**: 替换频繁出问题的 Mnemosyne, 主人口中 7/17 拍板 (本地 0 预算 + 知识图谱)
 > **版本**: v1.0 draft — 等主人口中 review
 
@@ -559,7 +559,7 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 
 | 步骤 | 内容 | 文件 | 时间 |
 |---|---|---|---|
-| 1 | schema.sql 落地 (上面 6 张表) | `~/.hermes/memory/schema.sql` | 5 分钟 |
+| 1 | schema.sql 落地 (上面 6 张表) | `$MNELO_MEMORY_DIR/schema.sql` | 5 分钟 |
 | 2 | memory.db 初始化 + 触发器 | `scripts/init_db.py` | 15 分钟 |
 | 3 | embedder.py (复用 bge-small-zh-v1.5, 复用 venv) | `embedder.py` | 30 分钟 |
 | 4 | memory.py 核心 6 API | `memory.py` | 2-3 小时 |
@@ -578,7 +578,7 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 : 主人口中拍板"接口不保留原名" — 但中如果 trinity_daily 还在调 `mnemosyne_remember`, 过渡期需要 shim:
 
 ```python
-# ~/.hermes/memory/api/mnemosyne_shim.py
+# $MNELO_MEMORY_DIR/api/mnemosyne_shim.py
 # 过渡期: 把 mnemosyne_* 调用映射到 hm_*
 def mnemosyne_remember(content, **kwargs):
     return memory_remember(content=content, source='mnemosyne-shim', **kwargs)

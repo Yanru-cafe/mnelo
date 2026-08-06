@@ -1,9 +1,9 @@
 # H-1 schema 设计（3 项前置：user_confirmed / processed_at / audit_log）
 
 > **来源**：hermes 设计草案 + deepseek-v4-flash cross-check（2026-08-04）。
-> **背景**：8/4 实战数据评估 + v0.12 DESIGN 落地后，TASKS_L2_HYGIENE H0（audit_log + Proposal/Policy/Applier 基建）之前必须建的 3 个 schema 前置（v0.12 §1.1.1 表）。
+> **背景**：8/4 实际数据评估 + v0.12 DESIGN 落地后，TASKS_L2_HYGIENE H0（audit_log + Proposal/Policy/Applier 基建）之前必须建的 3 个 schema 前置（v0.12 §1.1.1 表）。
 > **状态**：草案已评审，deepseek cross-check 结论见 §0；**schema-only，不含业务逻辑**（H0 才引入 Proposal/Policy/Applier + 工具）。
-> **配套文档**：DESIGN v0.12（§1.1.1/§1.2.1）、TASKS_L2_HYGIENE v0.2（H0-H8）、v0.3 实战数据报告。
+> **配套文档**：DESIGN v0.12（§1.1.1/§1.2.1）、TASKS_L2_HYGIENE v0.2（H0-H8）、v0.3 实际数据报告。
 
 ---
 
@@ -49,12 +49,12 @@ CREATE INDEX idx_entities_user_confirmed ON entities(user_confirmed) WHERE user_
 | 类型 | INTEGER 0/1 | SQLite 无原生 BOOL；0=未确认, 1=确认 |
 | 默认值 | **NOT NULL DEFAULT 0** | 默认不护，显式选择（Q1 verdict） |
 | 索引 | **partial index `WHERE user_confirmed = 1`**（C） | 查"找保护项排除"；避免低选择性全索引 |
-| master 用户实体 | 实战 0 个；**不自动 init，等主人手动**（Q6 verdict） | 保护未激活直到主人确认；§1.4 显式选择 |
+| master 用户实体 | 实际 0 个；**不自动 init，等主人手动**（Q6 verdict） | 保护未激活直到主人确认；§1.4 显式选择 |
 | API 影响 | **H-1 阶段不加**（schema-only，Q7 verdict）；H0 随 memory_remember 加 `user_confirmed: Optional[bool]=None` | 拆 commit 方便回滚 |
 | migration 顺序 | 1/3 第一个建 | idempotent ALTER（f1bc1bf 模式） |
 | trigger | 无 | 只是 §3.7 L2 查询过滤条件 |
 
-### 1.3 实战影响
+### 1.3 实际影响
 - 4498 entities 全获 user_confirmed=0；主人确认的实体可 set 1
 - 14 天无显式确认——L2 H3/H4 默认不会误伤（全部可被 L2 改，直到主人确认）
 
@@ -84,7 +84,7 @@ CREATE INDEX idx_entities_processed_at ON entities(processed_at);
 | watermark 存储 | `meta` 表（`l2.last_run.hygiene`），不新建 l2_watermark 表 | 单一事实源 |
 | trigger | 无 | watermark 是 L2 pass 显式维护 |
 
-### 2.3 实战影响
+### 2.3 实际影响
 - 4344 chunks + 4498 entities 全获 processed_at=NULL（L2 未落地，语义一致）
 - H0/H5 落地后 L2 可增量跑（按 processed_at 排序）
 
@@ -135,7 +135,7 @@ CREATE INDEX idx_audit_log_created ON audit_log(created_at);
 - **定案**：audit_log.created_at 由 **L2 代码用 memory.py `now()` 写入**（与库内 Python 写入路径统一）；不依赖 SQLite DEFAULT
 - 或：全表统一改用 SQLite 默认——但存量表已混，**最小改动 = 新表跟 Python 写入一致**
 
-### 3.4 实战影响
+### 3.4 实际影响
 - audit_log 0 行（L2 未落地）；唯一风险 = UNIQUE 过严（re-apply 边界，§5.2 测试兜底）
 
 ---
@@ -211,7 +211,7 @@ def _migrate_schema(self) -> None:
 - **schema-only，不引入业务逻辑**——风险低，仅 ALTER + CREATE
 - **run_purge_worker 不动**（4bd654d）——H-1 不影响 purge 行为
 - **memory_type 不动**（f1bc1bf）
-- **实战现状**：0 个 user_confirmed=1 / 0 个 processed_at NOT NULL / 0 行 audit_log——H-1 后旧数据默认 0/NULL/空表，语义一致
+- **实际现状**：0 个 user_confirmed=1 / 0 个 processed_at NOT NULL / 0 行 audit_log——H-1 后旧数据默认 0/NULL/空表，语义一致
 - **表数**：11 → 12 表（audit_log）+ 2 列（user_confirmed, processed_at×2）
 
 ---

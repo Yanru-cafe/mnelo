@@ -270,7 +270,7 @@ class Memory:
 
         # [H-1 §3] audit_log 表 (Q3/Q4 verdict: 单表 + status; Q5 verdict: 显式 revert_sql; B 修正: created_at 不依赖 SQLite DEFAULT)
         # [审计 §3 注释] UNIQUE 缺 created_at, 极小概率同 microsecond 同 run_id 同 ref 同 status 撞
-        # — 实战 8/4 评估认为可接受 (race condition 需要 L2 病态重入, 主人 §5.6 护栏会拦)
+        # — 实际 8/4 评估认为可接受 (race condition 需要 L2 病态重入, 主人 §5.6 护栏会拦)
         # 未来如要更严, UNIQUE 加 created_at: UNIQUE(run_id, pass_name, action_type, ref_id, status, created_at)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
@@ -1471,7 +1471,7 @@ class Memory:
     ) -> Dict[str, int]:
         """[8/4 fix] Purge worker — 30 天延迟清的真正实现 (deepseek 提议 + hermes 评审).
 
-        修 v0.5.12 实战发现的 2 个 bug:
+        修 v0.5.12 实际发现的 2 个 bug:
         - bug 1: forget() 后 purged_queue.done 永远 0 — 30 天延迟清 半完成
         - bug 2: 100% target_id 命名错位 (placeholder id) — 即使加 worker 也清不动
 
@@ -1593,7 +1593,7 @@ class Memory:
     # [H-0 + H-1 8/4] L2 自主层基础设施 (DESIGN §5.7-5.9 + TASKS_L2_HYGIENE v0.2)
     # ============================================================
 
-    # L2 配置项默认值 (跟 DESIGN §5.7 config 模板一致; 实战读 meta 表)
+    # L2 配置项默认值 (跟 DESIGN §5.7 config 模板一致; 实际读 meta 表)
     _L2_DEFAULTS: Dict[str, Any] = {
         "enabled": False,         # 主人 §5.7: 全局默认 false, 显式开启
         "dry_run": True,          # 主人 §5.7: 全局默认 dry-run
@@ -1602,15 +1602,15 @@ class Memory:
     }
 
     # TTL 规则按 memory_type (TASKS_L2_HYGIENE H3 §3 + DESIGN §3.0.5)
-    # 实战分布 (8/4 v0.2): fact 95.4% / procedure 3.4% / ephemeral 1.2%
+    # 实际分布 (8/4 v0.2): fact 95.4% / procedure 3.4% / ephemeral 1.2%
     _MEMORY_TYPE_TTL_DAYS: Dict[str, Optional[int]] = {
-        # ephemeral 7d: 实战 1.2% (草稿/临时, 主人 §3.0.5 + LLM 草稿衰减)
+        # ephemeral 7d: 实际 1.2% (草稿/临时, 主人 §3.0.5 + LLM 草稿衰减)
         "ephemeral": 7,
-        # fact 365d: 实战 95.4% (事实/对话, 主人 §3.0.5 默认)
+        # fact 365d: 实际 95.4% (事实/对话, 主人 §3.0.5 默认)
         "fact": 365,
-        # preference 180d: 主人偏好 (实战 1 个, 但 schema 必备)
+        # preference 180d: 主人偏好 (实际 1 个, 但 schema 必备)
         "preference": 180,
-        # episode 730d: 实战事件 (2年)
+        # episode 730d: 实际事件 (2年)
         "episode": 730,
         # decision 730d: 决策
         "decision": 730,
@@ -1806,13 +1806,13 @@ class Memory:
             if passes is None:
                 passes = ["hygiene"]  # 默认只跑 hygiene (§6.5 工具收敛原则)
 
-            # 4.5 实战 GC audit_log (调 _run_audit_gc, 实战 v0.2 TASKS §3 L2 hygiene GC)
-            # 实战 fix 8/4 audit #5 — 1yr 估算 150MB 不受控增长
+            # 4.5 实际 GC audit_log (调 _run_audit_gc, 实际 v0.2 TASKS §3 L2 hygiene GC)
+            # 实际 fix 8/4 audit #5 — 1yr 估算 150MB 不受控增长
             gc_enabled = self._l2_get("l2.gc.enabled", True)  # 默认 enabled
             gc_stats = {"applied_removed": 0, "skipped_removed": 0, "proposed_removed": 0}
             if gc_enabled and not dry_run:
                 gc_stats = self._run_audit_gc()
-            # dry_run 时也跑 (实战只 reports, 不真删)
+            # dry_run 时也跑 (实际只 reports, 不真删)
             elif gc_enabled and dry_run:
                 gc_stats = self._run_audit_gc(dry_run=True)
 
@@ -1830,7 +1830,7 @@ class Memory:
                 "skipped": 0,
                 "failed": 0,
                 "watermark_updated": [],
-                "gc_stats": gc_stats,  # [H-3 audit #5] audit_log GC 实战
+                "gc_stats": gc_stats,  # [H-3 audit #5] audit_log GC 实际
             }
 
             for pname in passes:
@@ -1890,9 +1890,9 @@ class Memory:
     ) -> Dict:
         """[H-1 + H-3 8/4] hygiene pass — P1 §5.6 + DESIGN §5.9 + TASKS_L2_HYGIENE H3.
 
-        严格 §5.9 语义 (8/4 实战):
+        严格 §5.9 语义 (8/4 实际):
           - Phase 1: importance decay 候选 (0.1-0.3 区间) — 真跑时 UPDATE chunks.importance
-          - Phase 2: TTL 候选 (按 memory_type, 实战 ephemeral 7d 52 chunks) — 真跑 + confirm_destructive=True 才 soft-delete
+          - Phase 2: TTL 候选 (按 memory_type, 实际 ephemeral 7d 52 chunks) — 真跑 + confirm_destructive=True 才 soft-delete
           - dry_run=True: 全 proposed (不 apply, 不真改数据)
           - dry_run=False + confirm_destructive=True (Phase 2): 真 soft-delete
           - 每 proposal 一事务 (§5.9 "细粒度事务")
@@ -1919,7 +1919,7 @@ class Memory:
         ts = now()
 
         # ============================================================
-        # Phase 1: importance decay (实战 8/4 ~2259 候选, cap 50/批)
+        # Phase 1: importance decay (实际 8/4 ~2259 候选, cap 50/批)
         # ============================================================
         decay_candidates = self._exec_clean(
             """SELECT id, memory_type, importance, content, timestamp
@@ -2012,7 +2012,7 @@ class Memory:
 
         # ============================================================
         # Phase 2: TTL 候选 (按 memory_type)
-        # [H-3 8/4 实战] ephemeral 7d 52 chunks / fact 365d 0 / ...
+        # [H-3 8/4 实际] ephemeral 7d 52 chunks / fact 365d 0 / ...
         # 真 apply 需 confirm_destructive=True (§5.9.2 "purge 是破坏性操作")
         # ============================================================
         for mtype, ttl_days in self._MEMORY_TYPE_TTL_DAYS.items():
@@ -2173,17 +2173,17 @@ class Memory:
         revert_sql: str,
         ts: str,
     ) -> bool:
-        """[H-3 §5.9 实战] 真 UPDATE chunks.importance + 写 audit_log applied 行.
+        """[H-3 §5.9 实际] 真 UPDATE chunks.importance + 写 audit_log applied 行.
 
         Returns True on success, False on failure (skipped + 错误记入 audit_log).
         """
         try:
             # 1. 真改数据 (用 _exec_clean 保证 # 注释不报错)
             # [8/4 audit #3 fix] atomic UPDATE CAS (compare-and-swap) importance guard:
-            #   SELECT-then-UPDATE 实战 race 窗口; §5.9.1 '每提案一事务'
-            #   实战 atomic CAS: WHERE importance = before.importance 实战 SELECT 实战 value
-            #   Client 2 UPDATE 后 importance 已变 → CAS 实战 fail (rowcount=0) → _mark_skipped
-            #   实战 (v0.2): 用 = (CAS) 而不是 < (range scan) 让 race 实战 fail-safe
+            #   SELECT-then-UPDATE race 窗口; §5.9.1 '每提案一事务'
+            #   atomic CAS: WHERE importance = before.importance SELECT value
+            #   Client 2 UPDATE 后 importance 已变 → CAS fail (rowcount=0) → _mark_skipped
+            #   实际 (v0.2): 用 = (CAS) 而不是 < (range scan) 让 race fail-safe
             cur = self._exec_clean(
                 """UPDATE chunks SET importance = ?
                    WHERE id = ? AND valid_until IS NULL
@@ -2222,7 +2222,7 @@ class Memory:
             # 软删除 + queue 入队 + audit_log skipped = 操作员被骗).
             self._conn.rollback()
             # [§5.9.1] 失败标 skipped + 错误记入
-            # [8/4 audit #6+8 fix] action_type 跟 applied 行一致 (实战是 'decay_importance', 不是 'failed')
+            # [8/4 audit #6+8 fix] action_type 跟 applied 行一致 (实际是 'decay_importance', 不是 'failed')
             self._mark_skipped(
                 run_id=run_id,
                 chunk_id=chunk_id,
@@ -2242,7 +2242,7 @@ class Memory:
         revert_sql: str,
         ts: str,
     ) -> bool:
-        """[H-3 §5.9 实战] TTL 过期 soft-delete (UPDATE valid_until + INSERT purged_queue) + 写 audit_log applied 行.
+        """[H-3 §5.9 实际] TTL 过期 soft-delete (UPDATE valid_until + INSERT purged_queue) + 写 audit_log applied 行.
 
         [§5.9 设计意图] soft-delete = UPDATE valid_until (软写, 可回滚);
         物理删 = 30 天后 run_purge_worker 自动清 (commit 4bd654d).
@@ -2261,7 +2261,7 @@ class Memory:
 
             # 2. INSERT purged_queue (30 天延迟物理清, 跟 DESIGN §3.8 一致)
             # [fix 8/4 audit #4] 用 Python now() + timedelta 而不是 SQLite 'now', '+30 days',
-            #    实战避免 T+ ISO vs 空格秒混用 (v0.3 报告 §0 nuance B)
+            #    实际避免 T+ ISO vs 空格秒混用 (v0.3 报告 §0 nuance B)
             from datetime import timedelta as _td
             purged_at_iso = (datetime.now() + _td(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
             self._exec_clean(
@@ -2307,14 +2307,14 @@ class Memory:
         chunk_id: str,
         ts: str,
         reason: str,
-        action_type: str = "failed",  # [8/4 audit #6+8 fix] 默认 'failed' 兼容旧调用; 调用方传 action 实战 跟 applied 一致
+        action_type: str = "failed",  # [8/4 audit #6+8 fix] 默认 'failed' 兼容旧调用; 调用方传 action 跟 applied 一致
     ) -> None:
         """[§5.9.1] 失败 proposal 标 skipped + 错误记入 audit_log (append-only).
 
         Args:
-            action_type: 实战 passed-in action ('decay_importance' / 'ttl_soft_delete' / 'failed')
-                实战: §5.9.1 '失败 proposal 标 skipped' 不应改原 action_type
-                实战: 默认 'failed' 兼容旧调用 (L0/L1 阶段)
+            action_type: 实际 passed-in action ('decay_importance' / 'ttl_soft_delete' / 'failed')
+                实际: §5.9.1 '失败 proposal 标 skipped' 不应改原 action_type
+                实际: 默认 'failed' 兼容旧调用 (L0/L1 阶段)
         """
         try:
             self._conn.execute("""
@@ -2737,19 +2737,19 @@ class Memory:
     _AUDIT_GC_PROPOSED_DAYS = 7  # 仅当 ref_id 已 applied 才清 proposed
 
     def _run_audit_gc(self, dry_run: bool = False) -> Dict[str, int]:
-        """[H-3 audit #5 8/4] audit_log GC 实战 v0.2 TASKS §3 L2 hygiene.
+        """[H-3 audit #5 8/4] audit_log GC 实际 v0.2 TASKS §3 L2 hygiene.
 
-        实战策略:
-          - applied + created_at < now-90d → DELETE (实战 90 天审计 trace)
+        实际策略:
+          - applied + created_at < now-90d → DELETE (实际 90 天审计 trace)
           - skipped + created_at < now-30d → DELETE (skipped 不持久)
           - proposed + created_at < now-7d AND 同一 ref_id 已 applied → DELETE
-            (实战: applied 留下, proposed 占位清掉)
-          - reverted 不动 (实战 v0.5 §5.9.1 "被 undo 实战保留")
+            (实际: applied 留下, proposed 占位清掉)
+          - reverted 不动 (实际 v0.5 §5.9.1 "被 undo 实际保留")
 
         Returns:
             {applied_removed, skipped_removed, proposed_removed}
 
-        实战每 runs (8/4 实测 ~13445 行累积, 实战若 GC 开, 删 ~30% = 实战 减少 ~4000 行).
+        实际每 runs (8/4 实测 ~13445 行累积, 实际若 GC 开, 删 ~30% = 实际 减少 ~4000 行).
         """
         from datetime import timedelta as _td
         now = datetime.now()
@@ -2783,7 +2783,7 @@ class Memory:
             ).fetchone()[0]  # type: ignore[arg-type]
             return stats
 
-        # 真删 — 实战 §5.9 "每事务细粒度", GC 实战 one DELETE per status
+        # 真删 — 实际 §5.9 "每事务细粒度", GC 实际 one DELETE per status
         try:
             cur = self._exec_clean(
                 """DELETE FROM audit_log
@@ -2883,7 +2883,7 @@ class Memory:
             self._conn.commit()
             return new_id
         except Exception as e:
-            logger.warning(f"[rebuild_digest] 实战 错误: {e}")
+            logger.warning(f"[rebuild_digest] 实际 错误: {e}")
             return None
 
     def get_digest(self, ref: Optional[str] = None) -> Dict[str, Any]:
@@ -2967,7 +2967,7 @@ class Memory:
     def _build_digest(self) -> Tuple[str, Dict[str, List[str]], bool]:
         """[G2 8/4] TASKS_L2_DIGEST §3.2 — 三块 + line_refs.
 
-        实战 纯规则 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 实战 无 LLM (§0 v0.2 拍板: deterministic).
+        纯规则, 无 LLM (§0 v0.2 拍板: deterministic).
         Returns:
             (text, line_refs, truncated)
         """
@@ -2990,7 +2990,7 @@ class Memory:
                 block1_lines.append(f"身份: {val}")
                 block1_refs[str(n)] = [f["id"]]
         except Exception as e:
-            logger.debug(f"[build_digest] identity 块 1 实战 错误: {e}")
+            logger.debug(f"[build_digest] identity 块 1 实际 错误: {e}")
 
         block2_lines = []
         block2_chunk_ids = []
@@ -3009,7 +3009,7 @@ class Memory:
                 block2_lines.append(f"{c['memory_type']}: {head}")
                 block2_chunk_ids.append(c["id"])
         except Exception as e:
-            logger.debug(f"[build_digest] chunks 块 2 实战 错误: {e}")
+            logger.debug(f"[build_digest] chunks 块 2 实际 错误: {e}")
 
         block3_lines = []
         block3_chunk_ids = []
@@ -3023,7 +3023,7 @@ class Memory:
                 block3_lines.append(f"近期: {head}")
                 block3_chunk_ids.append(s["id"])
         except Exception as e:
-            logger.debug(f"[build_digest] chunks 块 3 实战 错误: {e}")
+            logger.debug(f"[build_digest] chunks 块 3 实际 错误: {e}")
 
         all_lines = block1_lines + block2_lines + block3_lines
         full_text = "\n".join(all_lines)

@@ -196,8 +196,7 @@ mnelo 是**通用 agent 记忆系统**——Hermes、Claude Code、Cursor 或任
 
 ```toml
 # 建议安装位置: 任何显眼、贴近工作区的目录 (如 $HOME/mnelo-data)。
-# 通过 MNELO_MEMORY_DIR 改路径; 对任何 MCP 客户端都生效：
-[digest]
+# 通过 MNELO_MEMORY_DIR 改路径; 对任何 MCP 客户端都生效：[digest]
 inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 ```
 
@@ -213,9 +212,8 @@ inject_on_initialize = true   # 摘要随 MCP initialize 响应送达
 如果你是 AI agent（Claude Code、Cursor…），在给你的用户安装 mnelo 时，按以下操作步骤：
 
 **1. 选择安装目录（LIVE_ROOT）——给出建议，让用户选用或自定。**
-- **推荐** **显眼、贴近工作区** 的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。`$HOME` 下的隐藏点目录（如 `~/.hermes/memory`）也能用，但容易在 dotfiles 里被淹没。
-- 别放在刚 clone 的仓库里（记忆数据不是源代码）。
-- 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
+- **推荐** **显眼、贴近工作区** 的目录——如 `$HOME/mnelo-data`、`$HOME/.local/share/mnelo`，或 `<你的工作区>/mnelo-data`。`$HOME` 下的隐藏点目录也能用，但容易在 dotfiles 里被淹没。
+- 别放在刚 clone 的仓库里（记忆数据不是源代码）。- 给出候选让用户选择或自定路径——**首次使用前定好**（DB、embedder 配置、向量索引都在这；之后再搬要 停服→迁移→重启）。
 - 用 env `MNELO_MEMORY_DIR` 指定（更细可用 `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`）。写进 shell profile（`~/.profile` / `~/.bashrc`）持久化，让脚本和 server 一致。想改 health_check 的报告目录，用 `MNELO_CRON_OUTPUT_DIR`（默认 `$MNELO_MEMORY_DIR/cron/output`，每次运行会重建）。
 
 **2. 按实际机器选择向量后端。**
@@ -401,7 +399,7 @@ SELECT key, value FROM meta WHERE key LIKE 'l2.%';
 - **每个动作落 `audit_log`**（`before/after` JSON + `revert_sql`）。用 `memory_audit_undo` 回滚。
 - **防重入**——`meta.l2.running=1` 期间阻断新一轮。
 
-### 实战数据
+### 实测数据
 
 一个线上实例（8/6）：累计 `audit_log` ~47 k 行，跨越多轮 L2 sweep。最近一次 `last_run_hygiene` 在快照前 1 小时，`audit_log_total=47408`。同实例 `hygiene` 跑完剩 `decay_floor_chunks=2259`（保存在 0.1）、`purge_backlog=2170`（等 destructive sweep）。
 
@@ -483,7 +481,6 @@ mnelo 和主流的 agent 记忆框架不在同一赛道。**Mem0 / Letta / Zep /
 ## 🔄 Repo ↔ live 同步（post-commit hook）
 
 mnelo 有每个 `.py` / `.sql` 文件的两份：仓库（clone 到的任意目录）和 live server 目录（通过 `MNELO_MEMORY_DIR` 设置；默认 `~/mnelo-data`）。仓库自带 **post-commit 钩子**把改动同步到 live、备份旧版、并跑 `health_check.py`：
-
 ```bash
 cd <你的 clone 目录> && git config core.hooksPath .githooks
 ```

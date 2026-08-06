@@ -280,7 +280,7 @@ TOOLS = [
                 "dry_run": {"type": "boolean", "default": True},
                 "confirm_destructive": {
                     "type": "boolean",
-                    "description": "[§5.9.2] TTL/Purge 实战需显式 True (默认 false 安全). decay_importance 不需.",
+                    "description": "[§5.9.2] TTL/Purge 实际需显式 True (默认 false 安全). decay_importance 不需.",
                     "default": False,
                 },
             },

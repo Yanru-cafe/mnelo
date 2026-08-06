@@ -222,7 +222,7 @@ class ZvecIndex(SearchIndex):
                 memory_type = memory_type or (row["memory_type"] if hasattr(row, "keys") else row[1]) or "fact"
                 source = source or (row["source"] if hasattr(row, "keys") else row[2]) or ""
         # [8/6 fix] zvec 0.6 doc id 必须 [A-Za-z0-9_-]; 但 mnelo chunk_id 含 ':' / 中文.
-        # 实战方案: 用 chunks.rowid (int) 当 zvec doc id — 稳定 + 唯一 + 不丢信息.
+        # 实际方案: 用 chunks.rowid (int) 当 zvec doc id — 稳定 + 唯一 + 不丢信息.
         # knn() / remove() / contains() / cleanup_orphans() 都通过 rowid join 翻译.
         if conn is not None:
             row = conn.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()
@@ -560,7 +560,7 @@ def zvec_available() -> bool:
     必现 BlockingIOError (Errno 35 = EAGAIN, 不是 pipe 阻塞而是 fork syscall
     期间 kernel 返 EAGAIN). 子进程检测在这环境下不可靠.
 
-    实战方案: 改在主进程直接 try-import zvec. 老 CPU (Ivy Bridge 之前) import
+    实际方案: 改在主进程直接 try-import zvec. 老 CPU (Ivy Bridge 之前) import
     zvec 崩溃的假设本机 (M2 MacBook, AVX2+) 不适用 — 本机 0 风险. 旧 CPU 用户
     应走 usearch 后端 (factory 自动降级).
     """

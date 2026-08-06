@@ -56,7 +56,7 @@ python3 -c "from fastembed import TextEmbedding; t = TextEmbedding('BAAI/bge-sma
 ## 3. 文件布局
 
 ```
-~/.hermes/memory/
+$MNELO_MEMORY_DIR/
 ├── memory.py                 # 核心 Memory class (CRU + 4 路召回)
 ├── mcp_server.py             # MCP server entry (SSE)
 ├── config.py                 # 配置加载 (env + toml)
@@ -90,9 +90,9 @@ python3 -c "from fastembed import TextEmbedding; t = TextEmbedding('BAAI/bge-sma
 ## 4. 初始化数据库 (首次)
 
 ```bash
-cd ~/.hermes/memory
+cd $MNELO_MEMORY_DIR
 python3 scripts/init_db.py
-# 输出: 初始化 db @ ~/.hermes/memory/memory.db
+# 输出: 初始化 db @ $MNELO_MEMORY_DIR/memory.db
 ```
 
 schema 自动建 11 tables: `chunks`, `entities`, `relations`, `vectors` (sqlite-vec), `recall_log`, `purged_queue`, `meta`, `vectors_*` (sqlite-vec 内部)。
@@ -114,8 +114,8 @@ schema 自动建 11 tables: `chunks`, `entities`, `relations`, `vectors` (sqlite
     <string>ai.mnelo.mcp</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/you/hermes-agent/venv/bin/python3</string>
-        <string>/Users/you/.hermes/memory/mcp_server.py</string>
+        <string>/path/to/agent-venv/bin/python3</string>
+        <string>/path/to/mnelo/mcp_server.py</string>
         <string>--transport</string>
         <string>sse</string>
         <string>--host</string>
@@ -126,11 +126,11 @@ schema 自动建 11 tables: `chunks`, `entities`, `relations`, `vectors` (sqlite
     <key>EnvironmentVariables</key>
     <dict>
         <key>MNELO_HOME</key>
-        <string>/Users/you/.hermes</string>
+        <string>/path/to/agent-home</string>
         <key>MNELO_MEMORY_SERVER_PORT</key>
         <string>8086</string>
         <key>VIRTUAL_ENV</key>
-        <string>/Users/you/hermes-agent/venv</string>
+        <string>/path/to/agent-venv</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -173,7 +173,7 @@ curl -sS http://127.0.0.1:8086/sse -m 1 | head
 
 ```python
 import sys
-sys.path.insert(0, '/Users/you/.hermes/memory/api')
+sys.path.insert(0, '$MNELO_MEMORY_DIR/api')
 
 from mnelo_client import MneloClient
 
@@ -204,11 +204,11 @@ Hermes 通过 platform connectors (Telegram / Discord / WeChat) 收发消息, �
 | `memory_graph_query` | BFS 遍历实体图 |
 | `memory_stats` | DB / recall_log / kind 分布 |
 
-接法 — 把 `~/.hermes/memory/api/mnelo_client.py` 软链到 hermes-agent 的 plugin 目录:
+接法 — 把 `$MNELO_MEMORY_DIR/api/mnelo_client.py` 软链到 hermes-agent 的 plugin 目录:
 
 ```bash
 mkdir -p ~/.hermes/plugins/mnelo
-ln -sf ~/.hermes/memory/api/mnelo_client.py \
+ln -sf $MNELO_MEMORY_DIR/api/mnelo_client.py \
        ~/.hermes/plugins/mnelo/__init__.py
 ```
 
@@ -231,7 +231,7 @@ mcp_servers:
 
 ```python
 import sys
-sys.path.insert(0, '/Users/you/.hermes/memory/api')
+sys.path.insert(0, '$MNELO_MEMORY_DIR/api')
 from mnelo_client import MneloClient
 
 c = MneloClient()
@@ -304,7 +304,7 @@ mnelo daily check — 2026-07-18 17:25:04 BJT
 
 ---
 
-## 8. 配置 (`~/.hermes/memory/config.toml`)
+## 8. 配置 (`$MNELO_MEMORY_DIR/config.toml`)
 
 ```toml
 [main]
@@ -346,7 +346,7 @@ dr-backup 加 cron 后 (见 `~/.hermes/scripts/dr-backup.sh`) 自动 rsync 到 N
 如果从老 Mnemosyne 迁移, vec0 rowid 可能 60-70% 错位. 一次性修复:
 
 ```bash
-cd ~/.hermes/memory
+cd $MNELO_MEMORY_DIR
 python3 scripts/repair_vectors.py  # dry-run 默认
 python3 scripts/repair_vectors.py --apply   # 写入 (1591 条历史, ~2 sec)
 ```
@@ -358,7 +358,7 @@ python3 scripts/repair_vectors.py --apply   # 写入 (1591 条历史, ~2 sec)
 实时看 recall 流:
 
 ```bash
-sqlite3 ~/.hermes/memory/memory.db \
+sqlite3 $MNELO_MEMORY_DIR/memory.db \
   "SELECT id, query, latency_ms, created_at FROM recall_log ORDER BY id DESC LIMIT 20"
 ```
 
@@ -389,7 +389,7 @@ cat /tmp/mnelo-mcp.err | tail -50
 
 ```bash
 # 手动 PASSIVE checkpoint (非阻塞, ~1 sec)
-sqlite3 ~/.hermes/memory/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
+sqlite3 $MNELO_MEMORY_DIR/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
 # 后 WAL 从 5.7M 缩回 <1M
 ```
 
@@ -433,7 +433,7 @@ sqlite3 ~/.hermes/memory/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
 跑这个 command 一行验证所有:
 
 ```bash
-cd ~/.hermes/memory && \
+cd $MNELO_MEMORY_DIR && \
 /Users/you/hermes-agent/venv/bin/python3 -m pytest tests/ -q
 # 预期: 50 passed in ~3s
 ```
@@ -446,10 +446,10 @@ cd ~/.hermes/memory && \
 
 ```bash
 # 1. 备份 db
-sqlite3 ~/.hermes/memory/memory.db ".backup ~/memory.backup.db"
+sqlite3 $MNELO_MEMORY_DIR/memory.db ".backup ~/memory.backup.db"
 
 # 2. 拉新代码 (git)
-cd ~/.hermes/memory && git pull
+cd $MNELO_MEMORY_DIR && git pull
 
 # 3. 跑迁移 (如果有 schema 变)
 python3 scripts/migrate.py latest

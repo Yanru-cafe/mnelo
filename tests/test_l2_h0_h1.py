@@ -83,7 +83,7 @@ class TestAuditLogQuery(unittest.TestCase):
             self.assertEqual(r["pass_name"], "hygiene")
 
     def test_03_list_audit_filter_by_status(self):
-        """[§5.7] status='proposed' 过滤 (H-1 实战全 hygiene 是 proposed)"""
+        """[§5.7] status='proposed' 过滤 (H-1 实际全 hygiene 是 proposed)"""
         rows = self.mem.list_audit(pass_name="hygiene", status="proposed", limit=100)
         for r in rows:
             self.assertEqual(r["status"], "proposed")
@@ -132,7 +132,7 @@ class TestHygienePass(unittest.TestCase):
         ph = r["proposals"]["hygiene"]
         decay = [p for p in ph if p["action"] == "decay_importance"]
         self.assertGreater(len(decay), 0,
-            "实战 8/4 ≈2259 候选 0.1-0.3, 应有 decay proposal")
+            "实际 8/4 ≈2259 候选 0.1-0.3, 应有 decay proposal")
 
     def test_02_decay_proposal_shape(self):
         """[§5.7] decay proposal 形状: before/after/ref_id/action/reason"""
@@ -148,7 +148,7 @@ class TestHygienePass(unittest.TestCase):
             self.assertIn("after", p)
             # before.importance > after.importance (decay)
             self.assertGreater(p["before"]["importance"], p["after"]["importance"])
-            # after >= 0 (decay 不能为负; 实战 8/4 已 reduce 到 floor 0.05 → 再减 = 0)
+            # after >= 0 (decay 不能为负; 实际 8/4 已 reduce 到 floor 0.05 → 再减 = 0)
             self.assertGreaterEqual(p["after"]["importance"], 0)
 
     def test_03_ttl_candidate_reports_5_types(self):
@@ -162,13 +162,13 @@ class TestHygienePass(unittest.TestCase):
             f"5 TTL reports (procedure 永久不报告), 实际: {len(ttl)}")
 
     def test_04_ttl_ephemeral_finds_chunks(self):
-        """[实战 8/4] ephemeral 7d 实战有 52 chunk > 7 天 (P1a v0.2 升级后)"""
+        """[实际 8/4] ephemeral 7d 实际有 52 chunk > 7 天 (P1a v0.2 升级后)"""
         r = self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         ph = r["proposals"]["hygiene"]
         ttl_eph = [p for p in ph if p["action"] == "ttl_candidate_report"
                    and p["before"]["memory_type"] == "ephemeral"]
         self.assertEqual(len(ttl_eph), 1)
-        # 实战有数据 (P1a v0.2 1.2% ephemeral)
+        # 实际有数据 (P1a v0.2 1.2% ephemeral)
         # '52 chunks' or 'X chunks older than 7 days' 都行
         self.assertIn("7 days", ttl_eph[0]["reason"])
 
@@ -197,7 +197,7 @@ class TestHygienePass(unittest.TestCase):
 
     def test_07_dry_run_does_not_advance_last_run(self):
         """[§5.9.2] dry_run 不推进 l2.last_run.hygiene (但 dry_run 时间记录)
-        实战: dry_run 不应动 last_run watermark (因为没真 apply)"""
+        实际: dry_run 不应动 last_run watermark (因为没真 apply)"""
         # 多次跑 dry_run (间隔 10ms) — last_run 应保持不变 (None 或上次非 dry 的时间)
         self.mem._l2_set("l2.last_run.hygiene", "")  # 清空 reset
         before = self.mem._l2_get("l2.last_run.hygiene")
@@ -255,10 +255,10 @@ class TestStatsHygieneSubkey(unittest.TestCase):
             self.assertIn(field, s, f"hygiene 子键缺 {field}")
 
     def test_03_decay_candidates_count_positive(self):
-        """[实战 8/4] decay_candidates 实战 2259 (0.1-0.3 区间) > 0"""
+        """[实际 8/4] decay_candidates 实际 2259 (0.1-0.3 区间) > 0"""
         s = self.mem.stats()["hygiene"]
         self.assertGreater(s["decay_candidates"], 0,
-            f"实战 8/4 ≈2259 候选, 实际 {s['decay_candidates']}")
+            f"实际 8/4 ≈2259 候选, 实际 {s['decay_candidates']}")
 
     def test_04_purge_backlog_count_matches_purged_queue(self):
         """[§6.5] purge_backlog = purged_queue WHERE done=0 计数"""

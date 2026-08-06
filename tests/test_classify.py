@@ -159,7 +159,7 @@ class TestClassifyMatrix(unittest.TestCase):
         """[8/4 v0.2 fix] 今天建仓了 (无"我"主语) → None (v0.1 误判 episode)"""
         self.assertIsNone(
             classify_memory_type("今天建仓了 sh600089"),
-            "[8/4 v0.2 fix] 没有'我'主语应不分类, 实战: 用户对话上下文/引用",
+            "[8/4 v0.2 fix] 没有'我'主语应不分类, 实际: 用户对话上下文/引用",
         )
 
     def test_08_episode_traditional(self):
@@ -206,8 +206,8 @@ class TestClassifyMatrix(unittest.TestCase):
 
     def test_11_procedure_traditional(self):
         """[8/4 v0.2 fix] 記錄一下做週報的步驟 → 期望 None (v0.2 弱化动词型; 跟 v0.1 spec §5.2 验收冲突)
-        实战: 这种表达在主人 chunk 里频繁出现 (system note / 总结), v0.2 改 None 避免误伤
-        v0.1 spec §5.2 主人特意设计的演示 case, 实战极少出现这种"动词+周报" 模板"""
+        实际: 这种表达在主人 chunk 里频繁出现 (system note / 总结), v0.2 改 None 避免误伤
+        v0.1 spec §5.2 主人特意设计的演示 case, 实际极少出现这种"动词+周报" 模板"""
         result = classify_memory_type("記錄一下做週報的步驟")
         self.assertIn(result, [None, "procedure"],
             f"v0.2 期望 None (弱化动词型), 实际: {result}")
@@ -341,13 +341,13 @@ class TestClassifyPriorityAndEdge(unittest.TestCase):
 # ============================================================
 class TestMarkdownReferenceExclusion(unittest.TestCase):
     """[8/4 v0.2] markdown 引用块 ([USER]/[ASSISTANT]/[System note]) 不参与匹配.
-    实战: 主人 LLM agent 对话大量这类格式, v0.1 误伤"""
+    实际: 主人 LLM agent 对话大量这类格式, v0.1 误伤"""
 
     def test_01_user_quote_returns_none(self):
         """[USER] 引用块 → None (不分类)"""
         self.assertIsNone(
             classify_memory_type("[USER] 我今天建仓了 sh600089 100股"),
-            "[USER] 引用块应不分类 (实战: LLM 对话上下文)",
+            "[USER] 引用块应不分类 (实际: LLM 对话上下文)",
         )
 
     def test_02_assistant_quote_returns_none(self):

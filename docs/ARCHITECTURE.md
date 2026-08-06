@@ -1,12 +1,12 @@
 # mnelo 架构与知识图谱分析
 
 > **项目**: mnelo (mnelo)
-> **位置**: `~/.hermes/memory/`
+> **位置**: `$MNELO_MEMORY_DIR/`
 > **版本**: v1.2 (P0/P1/P2 审计后)
 > **分析日期**: 2026-07-18
 > **分析范围**: schema.sql (155 行) + memory.py (836 行) + mcp_server.py (410 行) + entity_resolve.py (243 行) + embedder.py (109 行)
 > **配套文档**: `SCHEMA.md` (设计), `ARCHITECTURE.md` (本文件, 分析), `RUNBOOK.md` (过程 + 替换模板), `AUDIT-REPORT.md` (7/18 小默审计报告)
-> **相关 skill**: `~/.hermes/skills/agent-memory-design/`
+> **相关 skill**: `agent-memory-design/`（原路径随 hermes 移除）
 > **要求**: "调研笔记 / 评估文档" 默认简体中文 (SOUL.md carve-out 2026-06-26)
 
 ---
@@ -16,7 +16,7 @@
 **mnelo** 是 Hermes Agent 的本地知识图谱记忆系统，2026-07-17 拍板自建、7/18 上线替换原 Mnemosyne。物理形态：
 
 ```
-~/.hermes/memory/
+$MNELO_MEMORY_DIR/
 ├── memory.db          # 19 MB (7/18), 4 核 + 3 辅 + 4 触发器 + vec0
 ├── memory.db-wal      # 4 MB WAL (PASSIVE checkpoint 30s 内)
 ├── schema.sql         # 155 行, 单文件 schema 源

@@ -35,7 +35,7 @@
 SQLite 原生**不支持** 单文件差异备份。WAL 模式下面是 "cp memory.db + cp memory.db-wal" 但：
 - WAL 一直在被 MCP 写入，差时间戳没意义
 - 恢复时要把 WAL replay，依赖 WAL 完整性
-- 实战中 WAL 损坏率高（电掉、重启有概率）
+- 实际中 WAL 损坏率高（电掉、重启有概率）
 
 **结论**：差异备复杂度高且易出错，**方案 C (周中+周日 全备) 落地**。
 
@@ -56,7 +56,7 @@ SQLite 原生**不支持** 单文件差异备份。WAL 模式下面是 "cp memor
 
 | 选项 | 路径 | 同步机制 | 适用 |
 |---|---|---|---|
-| 1. 本地默认 | `~/.hermes/memory/snapshots/` | 仅本地 | 默认 |
+| 1. 本地默认 | `$MNELO_MEMORY_DIR/snapshots/` | 仅本地 | 默认 |
 | 2. macbot-memory | `~/macbot-memory/work/mnelo-snapshots/` | 自动 rsync → NAS via dr-backup.sh | 推荐（已有基建） |
 | 3. GitHub repo (via dr-backup.sh) | `~/macbot-memory/work/mnelo-snapshots/` | 自动 rsync → git add → push → NAS | 已有 macbot-memory 仓库 + dr-backup 部署的用户 |
 | 4. 自定义 | 用户输入 | 看用户 | 高级用户 |
@@ -90,7 +90,7 @@ fi
 
 **输入**：config `[backup]` 段（snapshot_dir / schedule / retention）
 **流程**：
-1. 读 config → 缺省 fallback（snapshot_dir = `~/.hermes/memory/snapshots/`）
+1. 读 config → 缺省 fallback（snapshot_dir = `$MNELO_MEMORY_DIR/snapshots/`）
 2. `snapshots/YYYY-MM-DD-HHMMSS.db` 输出
 3. SQLite `connection.backup(target)` API（不是 `cp` —— DESIGN §3.8 警告）
 4. gzip → `.db.gz`
@@ -161,7 +161,7 @@ case "$enable_backup" in
     [Nn]*) ok "跳过备份配置" ;;
     *)
         echo "Snapshot location:"
-        echo "  1) ~/.hermes/memory/snapshots/  (local only)"
+        echo "  1) $MNELO_MEMORY_DIR/snapshots/  (local only)"
         echo "  2) ~/macbot-memory/work/mnelo-snapshots/  (auto-rsync to NAS via dr-backup.sh)"
         echo "  3) Custom path"
         read -p "Choice [1/2/3]: " loc_choice
@@ -175,7 +175,7 @@ esac
 ```toml
 [backup]
 enabled = true
-snapshot_dir = "~/.hermes/memory/snapshots"
+snapshot_dir = "$MNELO_MEMORY_DIR/snapshots"
 schedule = "wed+sun"  # wed+sun / daily / weekly
 retention = 30
 ```
@@ -226,7 +226,7 @@ retention = 30
 | 频率 | 周三 + 周日 03:00 | 错开 rg.maintenance；owner 习惯 |
 | 保留 | 30 份 (~4 周) | 1 个月回滚 + 不能引入额外 cron |
 | 备份位置 | 询问 3 选项 + 自定义 | owner 8/5 需求 |
-| 默认位置 | 选项 1（local ~/.hermes/memory/snapshots） | 零依赖；user 后可切换 |
+| 默认位置 | 选项 1（local $MNELO_MEMORY_DIR/snapshots） | 零依赖；user 后可切换 |
 | 哈希 | SHA256 | DESIGN §3.11.1 双层校验 |
 | 恢复原子性 | `mv tmpfile target` | 防写一半 |
 | 调度 | launchd plist | 已有 ai.mnelo.mcp 基建 |

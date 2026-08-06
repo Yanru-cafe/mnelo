@@ -1,7 +1,7 @@
 """
 classify.py — P1a 记忆类型规则分类器 (DESIGN §5.2).
 
-[8/4 实战驱动] v0.3 报告 §2: 4344/4344 chunks 100% fact (6 类系统空架子).
+[8/4 实际驱动] v0.3 报告 §2: 4344/4344 chunks 100% fact (6 类系统空架子).
 本模块**零 LLM** — P1a 规则分类, 给写路径/回填用; P1b (LLM 语义分类) 是后续阶段.
 
 接口契约 (TASKS_L2_EXTRACT §1.1):
@@ -110,7 +110,7 @@ def _normalize(text: str) -> str:
 # ========================================
 # [TASKS_L2_EXTRACT §2 + P1a v0.2 audit fix 8/4] 标记集
 # ========================================
-# [8/4 v0.2 实战审计 fix] 主人实战 4348 chunks 跑一遍发现 4 大误伤:
+# [8/4 v0.2 实际审计 fix] 主人实际 4348 chunks 跑一遍发现 4 大误伤:
 #   - procedure 16.3% 大部分是 system note / 报告格式 / 上下文 (主人对话 system prompt)
 #   - preference 5+ 误伤 (第三/二人称引用 + 标题含"我")
 #   - decision 6+ 误伤 (第三人称叙事: "The assistant decided" / "Memo 1: Task 6/15")
@@ -165,7 +165,7 @@ _MARKERS: Dict[str, Dict[str, List[str]]] = {
             "开了", "平了",
         ],
         # [8/4 v0.2 fix] EN: 拆 "I" + 时间 + 动作 各部分, substring 组合匹配
-        # (实战 "I bought 100 shares of sh600089 today" 中间有 token 间隔)
+        # (实际 "I bought 100 shares of sh600089 today" 中间有 token 间隔)
         "en_subject": ["i "],  # "i " 开头 (i 后空格)
         "en_time": [
             "today", "yesterday", "this morning", "last week", "this week",
