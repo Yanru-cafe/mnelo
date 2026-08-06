@@ -469,6 +469,7 @@ def list_tasks(
         where.append("ts.valid_from <= ?")
         params.append(asof)
         where.append("(ts.valid_until IS NULL OR ts.valid_until > ?)")
+        params.append(asof)  # [M5.4 e2e fix] asof 占位 + 参数绑定对齐
 
     if state is not None:
         if state not in ALL_STATES:
@@ -1356,7 +1357,11 @@ def list_stale_proposals(
     status: str = "proposed",
     limit: int = 50,
 ) -> Dict[str, Any]:
-    """[8/6 M5.2] 列 stuck_task Proposal (DESIGN §4.4 上浮).
+    """[8/6 M5.2 + 8/6 fix] 列 stuck_task Proposal (DESIGN §4.4 上浮).
+
+    [8/6 fix] status='proposed' 过滤排除已 resolved 的 Proposal (audit_log 中同
+    ref_id 有 stale_resolved 行) — 让 propose/apply 闭环后 list_stale_proposals
+    不再返回本 Proposal.
 
     Args:
         conn: open sqlite3.Connection.
@@ -1367,13 +1372,29 @@ def list_stale_proposals(
         {"proposals": [{"id", "run_id", "ref_id", "action_type",
                         "after_json", "status", "created_at"}], "count": int}
     """
-    rows = conn.execute(
-        """SELECT id, run_id, action_type, ref_id, after_json, status, created_at
-           FROM audit_log
-           WHERE pass_name='stuck_task' AND status=?
-           ORDER BY id DESC LIMIT ?""",
-        (status, limit),
-    ).fetchall()
+    if status == "proposed":
+        # 排除已 resolved (有 stale_resolved 行的 ref_id)
+        rows = conn.execute(
+            """SELECT id, run_id, action_type, ref_id, after_json, status, created_at
+               FROM audit_log
+               WHERE pass_name='stuck_task' AND action_type='stale_review'
+                 AND status='proposed'
+                 AND ref_id NOT IN (
+                     SELECT ref_id FROM audit_log
+                     WHERE pass_name='stuck_task' AND action_type='stale_resolved'
+                       AND status='applied'
+                 )
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, run_id, action_type, ref_id, after_json, status, created_at
+               FROM audit_log
+               WHERE pass_name='stuck_task' AND status=?
+               ORDER BY id DESC LIMIT ?""",
+            (status, limit),
+        ).fetchall()
     proposals = []
     for r in rows:
         try:
