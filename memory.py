@@ -680,21 +680,18 @@ class Memory:
         """软删除: valid_until = now, cascade 级联失效引用边.
         主人口中"删除无用知识" — 不直接物理删, 30 天后 worker 物理清理.
 
-        [8/6 M5.3 + DESIGN §10.2 D11] task/loop kind 走严格 L2 豁免:
-          - 默认抛 ValueError (防止误删活跃任务)
-          - 显式 confirm_forget=True 才接受 (agent/用户显式请求)
-          - 走审计 audit_log (pass_name='forced_forget', ref_type='task'/'loop')
-          - cascade 仍生效 (级联失效 task_states / relations)
+        [8/6 M5.3 + DESIGN §10.2 D11 + M28 fix] task/loop kind 一律拦截 (D11
+        核心不变量: mnelo 永不自动删活跃任务). 显式删除必须走
+        task_states.forget_task / task_states.forget_loop 显式路径,
+        写 audit_log (pass_name='forced_forget', ref_type='task'/'loop',
+        status='applied') 留痕.
         chunk/entity/relation 走原 L2 decay 路径 (无豁免).
         """
         # [7/19 P1-1] id 格式验证
         target_id = validate_id(target_id, "target_id")
-        # [M5.3] D11 TTL 豁免 — task/loop 必须显式 confirm
+        # [M5.3 + 8/6 M28 fix] D11 TTL 豁免 — task/loop 一律拦截, 强制显式路径.
+        # 设计核心: mnelo 永不自动删活跃任务. 显式删除走 task_states.forget_task / forget_loop.
         if target_kind in ("task", "loop"):
-            confirm_forget = False  # 占位, 让原方法接受 confirm_forget kwarg
-            # [D11] 强行拦截 — 抛 TaskLoopError, 不软删活跃 task/loop
-            # 通过 audit_log (pass_name='forced_forget') 留审计痕迹
-            # (full 拦截留给 task_states.forget_task / forget_loop)
             raise ValueError(
                 f"D11 TTL 豁免: forget(target_kind='{target_kind}') 需走 "
                 f"task_states.forget_task 或 task_states.forget_loop 显式路径, "

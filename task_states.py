@@ -1205,12 +1205,22 @@ def propose_stale_tasks(
             age_days = 0.0
         if age_days < threshold:
             continue
-        # 已有 pending Proposal? (status='proposed' 且 pass_name='stuck_task')
+        # [8/6 M28 fix] 去重 — 排除已有未 resolved 的 Proposal.
+        # 旧逻辑只查 status='proposed', 但 audit_log append-only 让原 Proposal
+        # 行永远 status='proposed', 第二次 propose 永远跳过.
+        # 修: 只跳过「曾被提议但未 resolved」的 (即 stale_resolved/applied 行不存在).
         existing = conn.execute(
             """SELECT id FROM audit_log
-               WHERE pass_name='stuck_task' AND status='proposed'
-                 AND ref_type='task' AND ref_id=?""",
-            (r[0],),
+               WHERE pass_name='stuck_task'
+                 AND ref_type='task' AND ref_id=?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM audit_log al2
+                     WHERE al2.pass_name='stuck_task'
+                       AND al2.action_type='stale_resolved'
+                       AND al2.status='applied'
+                       AND al2.ref_id=?
+                 )""",
+            (r[0], r[0]),
         ).fetchone()
         if existing:
             skipped += 1
@@ -1482,7 +1492,7 @@ def forget_task(
         )
     now_ts = now or _default_now()
 
-    # 1. 校验 task 存在 + 当前未软删
+    # 1. 校验 task 存在 + 当前未软删 (valid_until IS NULL)
     row = conn.execute(
         "SELECT valid_until FROM entities WHERE id=? AND kind='task'",
         (task_id,),
@@ -1492,7 +1502,12 @@ def forget_task(
             f"task_id={task_id} 不存在或已软删",
             field="task_id", code="TaskNotFoundError",
         )
-    # row[0] is valid_until column
+    # [8/6 M28 fix] row[0] 是 valid_until 列; 若已非 NULL, 重复 forget 应抛错.
+    if row[0] is not None:
+        raise TaskLoopError(
+            f"task_id={task_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
+            field="task_id", code="TaskAlreadyForgotten",
+        )
 
     # 2. 关闭 task_states 当前行
     invalidated = conn.execute(
@@ -1584,6 +1599,12 @@ def forget_loop(
         raise TaskLoopError(
             f"loop_id={loop_id} 不存在或已软删",
             field="loop_id", code="LoopNotFoundError",
+        )
+    # [8/6 M28 fix] 重复 forget 检测 — valid_until 已非 NULL 拒绝.
+    if row[0] is not None:
+        raise TaskLoopError(
+            f"loop_id={loop_id} 已于 {row[0]} 软删, 重复 forget 拒绝",
+            field="loop_id", code="LoopAlreadyForgotten",
         )
 
     # 关闭 task_states 当前行 (loop 用 task_states 记录 enabled/dormant)
