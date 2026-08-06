@@ -3106,7 +3106,20 @@ class Memory:
         except Exception as e:
             logger.debug(f"[build_digest] chunks 块 3 实际 错误: {e}")
 
-        all_lines = block1_lines + block2_lines + block3_lines
+        # [8/6 M4 digest 集成 §4.4] block4 — 未闭环 task + dormant loop
+        # 用 task_states.list_active_tasks_and_loops + render_digest_block4.
+        from task_states import list_active_tasks_and_loops as _ts_list_active, render_digest_block4 as _ts_render_b4
+        try:
+            active_block = _ts_list_active(
+                self._conn, now=None, stale_days_threshold=7, limit=50
+            )
+            block4_lines, block4_refs = _ts_render_b4(active_block)
+        except Exception as e:
+            logger.debug(f"[build_digest] block4 (active loops) 实际 错误: {e}")
+            block4_lines = []
+            block4_refs = {}
+
+        all_lines = block1_lines + block2_lines + block3_lines + block4_lines
         full_text = "\n".join(all_lines)
         truncated = len(full_text) > max_chars
         if truncated:
@@ -3120,6 +3133,10 @@ class Memory:
         for cid in block3_chunk_ids:
             cur_n += 1
             all_refs[str(cur_n)] = [cid]
+        # block4 refs 拼接
+        for k, v in block4_refs.items():
+            cur_n += 1
+            all_refs[str(cur_n)] = v
 
         return full_text, all_refs, truncated
 

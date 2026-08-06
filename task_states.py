@@ -13,7 +13,7 @@ import logging
 import hashlib
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("mnelo.task_states")
 
@@ -981,3 +981,174 @@ def list_loops(
 
     truncated = len(rows) == limit
     return {"loops": out, "count": len(out), "truncated": truncated}
+
+
+def list_active_tasks_and_loops(
+    conn: Any,
+    *,
+    now: Optional[str] = None,
+    stale_days_threshold: int = 7,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """[8/6 M4 digest 集成] 列出未闭环 task + dormant loop (DESIGN §4.4).
+
+    目的: digest「未闭环」块; 给 LLM / Claude Code 上下文恢复时, 知道哪些 task / loop
+    在自身生命周期里未结束, 应该被关注.
+
+    返回结构:
+        {
+            "active_tasks": [
+                {
+                    "task_id": str, "name": str, "state": str,
+                    "loop_id": Optional[str], "state_valid_from": str,
+                    "age_days": float,
+                    "is_stale": bool,
+                    "last_reason": Optional[str],
+                },
+            ],
+            "dormant_loops": [
+                {
+                    "loop_id": str, "name": str, "interval_hours": int,
+                    "current_state": str,
+                    "age_days": float,
+                    "last_cycle_done_at": Optional[str],
+                    "trigger": str,
+                },
+            ],
+            "counts": {"active_tasks": N, "dormant_loops": N, "stale_tasks": N},
+            "truncated": bool,
+        }
+
+    Args:
+        conn: open sqlite3.Connection.
+        now: 时间参考 (默认 = 当前).
+        stale_days_threshold: 算 stale (默认 7 天). active 超 7 天没 transition → stale.
+        limit: 各自分组上限 (默认 50).
+    """
+    from datetime import datetime as _dt
+
+    now_ts = now or _default_now()
+    try:
+        ref_now = _dt.fromisoformat(now_ts)
+    except (ValueError, TypeError):
+        ref_now = _dt.fromisoformat(_default_now())
+
+    # 1. active tasks (state NOT IN done/cancelled, valid_until IS NULL)
+    rows = conn.execute(
+        """SELECT t.task_id, t.state, t.valid_from, t.reason, t.evidence_chunk_id,
+                  e.name, e.properties_json
+           FROM task_states t
+           JOIN entities e ON e.id = t.task_id
+           WHERE t.valid_until IS NULL
+             AND t.state NOT IN ('done', 'cancelled')
+             AND e.kind = 'task'
+           ORDER BY t.valid_from ASC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    active_tasks = []
+    stale_count = 0
+    for r in rows:
+        try:
+            props = json.loads(r[5]) if r[5] else {}
+        except (TypeError, ValueError):
+            props = {}
+        try:
+            vf = _dt.fromisoformat(r[2])
+            age_days = (ref_now - vf).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            age_days = 0.0
+        is_stale = age_days >= stale_days_threshold
+        if is_stale:
+            stale_count += 1
+        active_tasks.append({
+            "task_id": r[0],
+            "name": r[5] if r[5] else None,
+            "state": r[1],
+            "state_valid_from": r[2],
+            "loop_id": props.get("loop_id"),
+            "age_days": round(age_days, 2),
+            "is_stale": is_stale,
+            "last_reason": r[3],
+        })
+
+    # 2. dormant loops (enabled=False, 当前状态=dormant, valid_until IS NULL)
+    rows2 = conn.execute(
+        """SELECT e.id, e.name, e.properties_json, t.state, t.valid_from
+           FROM entities e
+           LEFT JOIN task_states t ON t.task_id = e.id AND t.valid_until IS NULL
+           WHERE e.kind = 'loop' AND e.valid_until IS NULL
+           ORDER BY e.updated_at DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+
+    dormant_loops = []
+    for r in rows2:
+        try:
+            props = json.loads(r[2]) if r[2] else {}
+        except (TypeError, ValueError):
+            props = {}
+        enabled = props.get("enabled", True)
+        # 仅 dormant (enabled=False 或 current_state=dormant)
+        if enabled and r[3] != "dormant":
+            continue
+        try:
+            vf = _dt.fromisoformat(r[4]) if r[4] else _dt.fromisoformat("1970-01-01T00:00:00")
+            age_days = (ref_now - vf).total_seconds() / 86400.0
+        except (ValueError, TypeError):
+            age_days = 0.0
+        dormant_loops.append({
+            "loop_id": r[0],
+            "name": r[1],
+            "interval_hours": props.get("interval_hours"),
+            "current_state": r[3] or "dormant",
+            "age_days": round(age_days, 2),
+            "last_cycle_done_at": props.get("last_cycle_done_at"),
+            "trigger": props.get("trigger"),
+        })
+
+    truncated = len(rows) == limit or len(rows2) == limit
+    return {
+        "active_tasks": active_tasks,
+        "dormant_loops": dormant_loops,
+        "counts": {
+            "active_tasks": len(active_tasks),
+            "dormant_loops": len(dormant_loops),
+            "stale_tasks": stale_count,
+        },
+        "truncated": truncated,
+    }
+
+
+def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, List[str]]]:
+    """[8/6 M4] 把 list_active_tasks_and_loops 结果渲染成 digest 行.
+
+    返回:
+        (text_lines, line_refs) — 跟 _build_digest 其他 block 同型.
+    """
+    text_lines: List[str] = []
+    refs: Dict[str, List[str]] = {}
+    n = 0
+
+    n += 1
+    text_lines.append(f"未闭环 task ({active_block['counts']['active_tasks']}):")
+    refs[str(n)] = []
+
+    for t in active_block["active_tasks"]:
+        n += 1
+        stale_mark = " ⚠stale" if t["is_stale"] else ""
+        line = f"  - [{t['state']}] {t['name']} (age={t['age_days']}d{stale_mark})"
+        text_lines.append(line)
+        refs[str(n)] = [t["task_id"]]
+
+    if active_block["counts"]["dormant_loops"]:
+        n += 1
+        text_lines.append(f"dormant loop ({active_block['counts']['dormant_loops']}):")
+        refs[str(n)] = []
+        for l in active_block["dormant_loops"]:
+            n += 1
+            line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
+            text_lines.append(line)
+            refs[str(n)] = [l["loop_id"]]
+
+    return text_lines, refs
