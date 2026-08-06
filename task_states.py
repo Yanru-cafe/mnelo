@@ -796,3 +796,153 @@ def loop_create(
             (loop_id, "dormant", ts, "create disabled", ts),
         )
     return {"loop_id": loop_id, "enabled": enabled, "interval_hours": interval_hours}
+
+
+
+def loop_update(
+    conn: Any,
+    *,
+    loop_id: str,
+    enabled: Optional[bool] = None,
+    trigger: Optional[str] = None,
+    interval_hours: Optional[int] = None,
+    priority: Optional[int] = None,
+    owner_id: Optional[str] = None,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    """[8/6 M3 Step 12] 改 loop properties (DESIGN §5.1).
+
+    只改明确提供的字段 (None = 不改). 不会动 active_task_id 或 last_cycle_done_at
+    (那些由 transition() 终端簿记或 loop_tick 写). 
+
+    enabled=False 写 dormant 状态窗; enabled=True 关 dormant 窗 (若有).
+    其他字段仅改 properties_json.
+    """
+    row = conn.execute(
+        "SELECT properties_json FROM entities WHERE id=? AND kind='loop'",
+        (loop_id,),
+    ).fetchone()
+    if row is None:
+        raise LoopNotFoundError(
+            f"loop_id 不存在: {loop_id}",
+            field="loop_id",
+            code="LoopNotFoundError",
+        )
+    cfg = json.loads(row[0])
+
+    # 1. 改 properties (按需)
+    changed: Dict[str, Any] = {}
+    if trigger is not None:
+        cfg["trigger"] = trigger
+        changed["trigger"] = trigger
+    if interval_hours is not None:
+        cfg["interval_hours"] = interval_hours
+        changed["interval_hours"] = interval_hours
+    if priority is not None:
+        cfg["priority"] = priority
+        changed["priority"] = priority
+    if owner_id is not None:
+        cfg["owner_id"] = owner_id
+        changed["owner_id"] = owner_id
+
+    # 2. enabled 切换: 可能写 dormant 窗 / 关 dormant 窗
+    if enabled is not None and cfg.get("enabled", True) != enabled:
+        cfg["enabled"] = enabled
+        changed["enabled"] = enabled
+        ts = now or _default_now()
+        # 关旧 enabled 状态窗 (DESIGN §4.3: enabled 隐含 loop 状态)
+        cur = conn.execute(
+            "SELECT id, state FROM task_states WHERE task_id=? AND valid_until IS NULL",
+            (loop_id,),
+        ).fetchone()
+        if cur is not None:
+            conn.execute(
+                "UPDATE task_states SET valid_until=? WHERE id=?",
+                (ts, cur[0]),
+            )
+        # 写新状态窗: enabled=False → dormant, enabled=True → running
+        new_state = "dormant" if not enabled else "running"
+        conn.execute(
+            "INSERT INTO task_states "
+            "(task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) "
+            "VALUES (?, ?, ?, NULL, ?, NULL, ?)",
+            (loop_id, new_state, ts, f"loop_update: enabled={enabled}", ts),
+        )
+
+    # 3. 写回 properties_json
+    conn.execute(
+        "UPDATE entities SET properties_json=? WHERE id=?",
+        (json.dumps(cfg), loop_id),
+    )
+
+    return {
+        "loop_id": loop_id,
+        "changed": changed,
+        "enabled": cfg.get("enabled", True),
+        "interval_hours": cfg.get("interval_hours"),
+    }
+
+
+def list_loops(
+    conn: Any,
+    *,
+    enabled_only: bool = False,
+    state: Optional[str] = None,
+    asof: Optional[str] = None,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """[8/6 M3 Step 12] 列 loop entities + 当前状态 (DESIGN §5.1).
+
+    默认: 所有 loop + 各自 current_state.
+    enabled_only=True: 仅 enabled=True 的 loop (DESIGN §4.3).
+    state=... 过滤: 当前状态精确匹配 (e.g. 'running', 'dormant').
+    asof 时间切片 (默认 = 当前).
+    limit 上限.
+
+    返回: {loops: [{loop_id, name, enabled, interval_hours, current_state,
+                    active_task_id, last_cycle_done_at, trigger}], count, truncated}
+    """
+    asof_ts = asof or _default_now()
+
+    # 1. 拉 loop entities
+    rows = conn.execute(
+        "SELECT id, name, properties_json FROM entities "
+        "WHERE kind='loop' ORDER BY updated_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        try:
+            cfg = json.loads(r[2])
+        except (TypeError, ValueError):
+            cfg = {}
+        loop_enabled = cfg.get("enabled", True)
+        if enabled_only and not loop_enabled:
+            continue
+
+        # 2. asof 当前状态 (active 窗 or 默认 'dormant' if entity disabled)
+        win = conn.execute(
+            "SELECT state FROM task_states WHERE task_id=? "
+            "AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?) "
+            "ORDER BY valid_from DESC LIMIT 1",
+            (r[0], asof_ts, asof_ts),
+        ).fetchone()
+        current_state = win[0] if win else ("dormant" if not loop_enabled else None)
+
+        if state is not None and current_state != state:
+            continue
+
+        out.append({
+            "loop_id": r[0],
+            "name": r[1],
+            "enabled": loop_enabled,
+            "interval_hours": cfg.get("interval_hours"),
+            "current_state": current_state,
+            "active_task_id": cfg.get("active_task_id"),
+            "last_cycle_done_at": cfg.get("last_cycle_done_at"),
+            "trigger": cfg.get("trigger"),
+        })
+
+    truncated = len(rows) == limit
+    return {"loops": out, "count": len(out), "truncated": truncated}
