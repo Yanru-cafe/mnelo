@@ -53,7 +53,13 @@ def _setup():
             "OR task_id LIKE 'task:20260806-first%' OR task_id LIKE 'task:20260806-replay%' "
             "OR task_id LIKE 'task:20260806-second%' "
             "OR task_id LIKE 'task:20260806-cli%' "
-            "OR task_id LIKE 'task:tlm12-%'"
+            "OR task_id LIKE 'task:tlm12-%' "
+            "OR task_id LIKE 'task:%m5-%' "
+            "OR task_id LIKE 'task:%m28-%' "
+            "OR task_id LIKE 'task:%m29-%' "
+            "OR task_id LIKE 'task:%m30-%' "
+            "OR task_id LIKE 'task:%m32-%' "
+            "OR task_id LIKE 'task:%e2e-%'"
         )
         mem._conn.execute(
             "DELETE FROM entities WHERE id LIKE 'task:m4-%' "
@@ -70,7 +76,8 @@ def _setup():
             "OR id LIKE 'task:20260806-first%' OR id LIKE 'task:20260806-replay%' "
             "OR id LIKE 'task:20260806-second%' "
             "OR id LIKE 'task:20260806-cli%' "
-            "OR id LIKE 'task:tlm12-%' OR id LIKE 'task:step14-%' OR id LIKE 'loop:step14-%' OR id LIKE 'task:20260806-step14-%' OR id LIKE 'loop:20260806-step14-%'"
+            "OR id LIKE 'task:tlm12-%' OR id LIKE 'task:step14-%' OR id LIKE 'loop:step14-%' OR id LIKE 'task:20260806-step14-%' OR id LIKE 'loop:20260806-step14-%' "
+            "OR id LIKE 'task:%m5-%' OR id LIKE 'task:%m28-%' OR id LIKE 'task:%m29-%' OR id LIKE 'task:%m30-%' OR id LIKE 'task:%m32-%' OR id LIKE 'task:%e2e-%'"
         )
     finally:
         mem._conn.execute("PRAGMA foreign_keys = ON")

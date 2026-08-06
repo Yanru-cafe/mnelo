@@ -1138,25 +1138,21 @@ def propose_stale_tasks(
     stale_days_threshold: int = 7,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    # [M30 fix] 输入校验 — stale_days_threshold 必须正整数. 负数 / 0 / 非 int
-    # 会让所有 task 触发 stale 或永不触发, 后果严重. 早抛错优于静默.
-    if not isinstance(stale_days_threshold, int) or stale_days_threshold < 1:
-        raise TaskLoopError(
-            f"stale_days_threshold 必须正整数, got {stale_days_threshold!r}",
-            field="stale_days_threshold", code="InvalidThreshold",
-        )
-    """[8/6 M5.2 + DESIGN §4.4 Proposal 模式] 扫描 stale task, 写 audit_log Proposal.
+    """[8/6 M5.2 + DESIGN TASK_LOOP 4.4 + M30/M32] 扫描 stale task, 写 audit_log Proposal.
 
     走 audit_log 现有表 (pass_name='stuck_task', status='proposed'). 跟 M5.1
     loop_tick_cron 提议 due loop 同模式, 但 pass_name 不同, 便于 L2 audit
-    区分. mnelo 绝不自主转移任务 (D5) — Proposal 只做提议, 真正的 transition
+    区分. mnelo 绝不自主转移任务 (D5) - Proposal 只做提议, 真正的 transition
     必须由 agent/用户经 memory_task_transition 显式 apply.
 
-    收缩分桶 (DESIGN §4.4 D7):
-      open > 7d  → stale, 提议 review
-      waiting > 14d → stale, 提议 review
-      blocked > 3d → stale, 提议 review
-      in_progress 走 stale_days_threshold (默认 7d) 单桶
+    收缩分桶 (DESIGN TASK_LOOP 4.4 D7):
+      open > 7d       -> stale, 提议 review
+      waiting > 14d   -> stale, 提议 review
+      blocked > 3d    -> stale, 提议 review
+      in_progress     -> stale_days_threshold (默认 7d) 单桶
+
+    [M30 fix] 输入校验 - stale_days_threshold 必须正整数. 负数 / 0 / 非 int
+    会让所有 task 触发 stale 或永不触发, 后果严重. 早抛错优于静默.
 
     Args:
         conn: open sqlite3.Connection.
@@ -1167,12 +1163,18 @@ def propose_stale_tasks(
     Returns:
         {
             "run_id": str,
-            "scanned": int,    # 扫到的 active task 总数
-            "proposed": int,   # 写的 Proposal 数
-            "skipped_existing": int,  # 已有 pending Proposal 跳过
+            "scanned": int,
+            "proposed": int,
+            "skipped_existing": int,
             "proposals": [{"task_id", "state", "age_days", "threshold_days", "is_stale"}],
         }
     """
+    if not isinstance(stale_days_threshold, int) or stale_days_threshold < 1:
+        raise TaskLoopError(
+            f"stale_days_threshold 必须正整数, got {stale_days_threshold!r}",
+            field="stale_days_threshold", code="InvalidThreshold",
+        )
+
     import uuid as _uuid
     from datetime import datetime as _dt
 
@@ -1182,7 +1184,7 @@ def propose_stale_tasks(
     except (ValueError, TypeError):
         ref_now = _dt.fromisoformat(_default_now())
 
-    # 阈值桶 (DESIGN §4.4 D7)
+    # 阈值桶 (DESIGN TASK_LOOP 4.4 D7)
     thresholds = {
         "open": 7,
         "waiting": 14,
@@ -1212,10 +1214,7 @@ def propose_stale_tasks(
             age_days = 0.0
         if age_days < threshold:
             continue
-        # [8/6 M28 fix] 去重 — 排除已有未 resolved 的 Proposal.
-        # 旧逻辑只查 status='proposed', 但 audit_log append-only 让原 Proposal
-        # 行永远 status='proposed', 第二次 propose 永远跳过.
-        # 修: 只跳过「曾被提议但未 resolved」的 (即 stale_resolved/applied 行不存在).
+        # [8/6 M28 fix] 去重 - 排除已有未 resolved 的 Proposal.
         existing = conn.execute(
             """SELECT id FROM audit_log
                WHERE pass_name='stuck_task'
@@ -1252,10 +1251,10 @@ def propose_stale_tasks(
             (
                 rid,
                 "stuck_task",
-                "stale_review",       # action_type: 跟现有 enum 兼容
+                "stale_review",
                 "task",
                 p["task_id"],
-                None,                 # before_json: 不带前置
+                None,
                 json.dumps({
                     "state": p["state"],
                     "age_days": p["age_days"],
@@ -1267,7 +1266,7 @@ def propose_stale_tasks(
                         f"建议: transition 到 done / cancelled / 下一步, 或更新 reason."
                     ),
                 }, ensure_ascii=False),
-                0.7,                  # confidence: 机械 stale 判定中等
+                0.7,
                 "proposed",
                 now_ts,
             ),
@@ -1451,47 +1450,64 @@ DIGEST_BLOCK4_MAX_CHARS = 2000
 
 
 def render_digest_block4(active_block: Dict[str, Any]) -> Tuple[str, Dict[str, List[str]]]:
-    """[8/6 M4 + M30] 把 list_active_tasks_and_loops 结果渲染成 digest 行.
+    """[8/6 M4 + M30 + M32.3] 把 list_active_tasks_and_loops 结果渲染成 digest 行.
 
     返回:
-        (text_lines, line_refs) — 跟 _build_digest 其他 block 同型.
+        (text_lines, line_refs) - 跟 _build_digest 其他 block 同型.
 
-    M30 fix: 输出总长 ≤2000 字符 (DIGEST_BLOCK4_MAX_CHARS). 超出截断 + "..."
+    M30 fix: 输出总长 <=2000 字符 (DIGEST_BLOCK4_MAX_CHARS). 超出截断 + "..."
     后缀, 避免 digest 撑爆 agent context window.
+
+    M32.3 fix: 用显式 truncated flag 判断是否已截断, 不要从末行 endswith("...")
+    反推 - 任务名以 "..." 结尾会误判已截断, 静默丢失 dormant loop 块.
     """
     text_lines: List[str] = []
     refs: Dict[str, List[str]] = {}
     n = 0
+    truncated = False  # [M32.3 fix] 显式标记
 
     n += 1
     text_lines.append(f"未闭环 task ({active_block['counts']['active_tasks']}):")
     refs[str(n)] = []
 
     for t in active_block["active_tasks"]:
+        if truncated:
+            # 已截断, 剩余 task 不渲染 (block 4 容量用尽)
+            break
         n += 1
         stale_mark = " ⚠stale" if t["is_stale"] else ""
-        line = f"  - [{t['state']}] {t['name']} (age={t['age_days']}d{stale_mark})"
+        # [M32.3 fix] 截断长 task name 到 60 chars (防单行撑爆). 完整 name 在
+        # memory.list_tasks 可见, digest 只给 hook 摘要. 加 "..." 标记.
+        name = t["name"]
+        if len(name) > 60:
+            name = name[:57] + "..."
+        line = f"  - [{t['state']}] {name} (age={t['age_days']}d{stale_mark})"
         text_lines.append(line)
         refs[str(n)] = [t["task_id"]]
-        # 累计长度检测 + 截断 (留 3 char 给 "...")
-        if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
+        # 累计长度检测 + 截断. 真 joined 长 = sum(len(s)) + n - 1.
+        # 加 "..." (4 chars: 3 + 1 separator) 触发.
+        current = sum(len(s) for s in text_lines) + len(text_lines) - 1
+        # 下次循环 append 1 line (含 sep) → current + len(line) + 1.
+        # 阈值: current + 4 + 80 > 2000 → 保守触发 (80 char 是 truncate 后 name 行最大).
+        if current + 4 + 80 > DIGEST_BLOCK4_MAX_CHARS:
             text_lines.append("...")
+            truncated = True
             break
 
-    if active_block["counts"]["dormant_loops"]:
-        # 截断后 skip dormant loops (block 4 容量有限)
-        if not text_lines[-1].endswith("..."):
+    if active_block["counts"]["dormant_loops"] and not truncated:
+        n += 1
+        text_lines.append(f"dormant loop ({active_block['counts']['dormant_loops']}):")
+        refs[str(n)] = []
+        for l in active_block["dormant_loops"]:
+            if truncated:
+                break
             n += 1
-            text_lines.append(f"dormant loop ({active_block['counts']['dormant_loops']}):")
-            refs[str(n)] = []
-            for l in active_block["dormant_loops"]:
-                if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
-                    text_lines.append("...")
-                    break
-                n += 1
-                line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
-                text_lines.append(line)
-                refs[str(n)] = [l["loop_id"]]
+            line = f"  - {l['name']} (interval={l.get('interval_hours')}h)"
+            text_lines.append(line)
+            refs[str(n)] = [l["loop_id"]]
+            if sum(len(s) + 1 for s in text_lines) > DIGEST_BLOCK4_MAX_CHARS - 3:
+                text_lines.append("...")
+                truncated = True
 
     return text_lines, refs
 
