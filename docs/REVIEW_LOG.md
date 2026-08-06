@@ -427,3 +427,25 @@
   - test_m30_optimization.py + test_m5_4_e2e_purchase.py —— **7/7 通过**。
   - test_m28_review_fixes.py + test_m5_2_stale_proposal.py —— **13/13 通过**。
   - 归因验证（跨文件泄漏）: test_m4_digest_block4.py 单独在全新库 —— **6/6 通过**；m30→m4 同会话 —— m30 5/5 + m4 3/6（泄漏致 count 断言失败）；m28→m4 同会话 —— 同为 3/6 失败（m28 泄漏为既有问题，不在本次范围，但证明 test_m4 的 count 断言对跨文件残留普遍脆弱）。
+
+## 2026-08-06 19:15 审查 7a62ec0..f2bf621
+- 范围: 7a62ec0..f2bf621（共 3 个提交）
+- 提交:
+  - b655a7d fix(review): M32 review-pass 整改 — 1 中 + 3 低 (56/56 pass)
+  - af56cd5 feat(m33): 多角度持续优化 — forget race + reason validation (42/42 pass)
+  - f2bf621 feat(m34): list_stale_proposals status + limit 白名单校验 (68/68 pass)
+- 结论: 通过（发现 2 个低危）。M32 整改正确（fixture 前缀日期通配符、docstring 归位、digest 显式 truncated flag、M32.4 双连接真并发测试）；M33 BEGIN IMMEDIATE 原子化 + reason 强校验、M34 status/limit 白名单实现干净。跨文件泄漏场景实测修复。
+- 发现: 按严重度列出
+  - [低] task_states.py:1569/1690 — forget_task/forget_loop 的 reason 非 str 类型抛未处理 AttributeError。
+    - 具体: `reason_clean = reason.strip() if reason else ""`；truthy 非 str（如 int 12345）→ `.strip()` AttributeError，未收敛到 TaskLoopError。M34 给 limit 加了 isinstance 守卫，M33 reason 校验未加，两批「API 边界」风格不一致。
+    - 失败场景: 调用方误传非字符串 reason → 崩 AttributeError（无 code 字段）而非可预期的 TaskLoopError（ReasonRequiredError / ReasonTooShortError）。
+  - [低] task_states.py:1533 — render_digest_block4 dormant loop 段仍用旧长度公式。
+    - 具体: dormant loop 段 `sum(len(s) + 1 for s in text_lines) > 2000-3` 沿用旧公式；task 段（1514）已换 `sum(len(s))+n-1` + 显式 truncated flag，且追加的 "..." 不参与长度核算。与 M32.3 声明的精确长度计算修复不一致。
+    - 失败场景: 极端长 dormant loop name 时 digest 尾段贴 2000 边界、截断判定与 task 段不一致。
+- 测试:
+  - 环境: 全量 pytest 仍被既有 conftest session fixture（usearch index load 原生 abort）阻断——本机既有问题，parent commit 上同样复现，与本次提交无关。沿用隔离方案: scripts/init_db.py 全新临时库 + MNELO_MEMORY_DIR/MNELO_MEMORY_SEARCH_BACKEND=usearch 运行。
+  - test_m34 + test_m33 + test_m30（含 M32.4 双连接并发 apply）—— 17/17 通过
+  - test_m30 → test_m4 同会话（M32.1 跨文件泄漏验证，修复前 3/6 失败）—— 11/11 通过
+  - test_m5_3_d11_forget（reason 长度回归）—— 10/10 通过
+  - docstring 核实: propose_stale_tasks / apply_stale_proposal __doc__ 均非空
+  - reason 边界实测: int → AttributeError（即发现 1）；纯空白 → ReasonRequiredError 正常
