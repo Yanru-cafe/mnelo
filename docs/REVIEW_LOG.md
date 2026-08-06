@@ -355,3 +355,29 @@
   - list_tasks(asof) 修复直接验证: asof 单查 / asof+state / 默认路径均正常（修复前会抛绑定数错误）。
   - 未跑: test_asof_replay.py 在 setUpClass 的 memory.remember → usearch index.add 处原生段错误
     （本机既有环境问题；本提交未触及 search_index / memory.remember 路径，与此改动无关）。
+
+## 2026-08-06 17:35 审查 6bbbcd0..3d3bbb2
+- 范围: 6bbbcd0..3d3bbb2（共 1 个提交）
+- 提交:
+  - 3d3bbb2 fix(review): M28 review-pass 整改 (27/27 pass)
+- 结论: 通过（无新增问题）—— 本提交修复了上轮审查的两个发现，并有对应测试覆盖
+- 审查维度小结:
+  - propose_stale_tasks 去重修复（task_states.py L1208-1226）: 旧逻辑只查 status='proposed'，
+    audit_log append-only 使原 Proposal 行永远 'proposed'，apply 后第二次 propose 永远被跳过
+    （stuck_task 检测静默失效）。新逻辑用 `NOT EXISTS(stale_resolved AND status='applied')`
+    判定「未 resolved 才跳过」，与 list_stale_proposals / apply_stale_proposal 的 resolved
+    判定一致；apply 后 task 仍 stale 会正确再提议。参数绑定 `(r[0], r[0])` 正确。
+  - forget_task（L1505-1510）/ forget_loop（L1603-1609）重复 forget 拦截: 新增
+    valid_until 已非 NULL 即抛错；底层 UPDATE 均带 `AND valid_until IS NULL`（CAS 安全），
+    重复调用不会二次写坏数据，只是提前给出明确错误。正确。
+  - memory.forget 死代码清理（memory.py L680-697）: 移除 `confirm_forget = False` 占位
+    （上轮审查发现），task/loop 一律抛 ValueError 行为不变，docstring 对齐。
+    全库无 confirm_forget 残留引用。
+- 发现: 无
+- 测试（各在独立新库上）:
+  - 新增 test_m28_review_fixes.py —— **4/4 通过**（double-forget / apply 后再提议 / 死代码静态校验）。
+  - test_m5_2_stale_proposal.py（修改后）—— **10/10 通过**。
+  - test_m5_3_d11_forget.py —— **10/10 通过**。
+  - test_m5_4_e2e_purchase.py（memory.forget 变更后回归）—— **3/3 通过**。
+  - 环境: 同上轮（init_db.py 全新临时库 + usearch 隔离运行；全量套件仍被既有
+    conftest usearch index load 原生 abort 阻断）。
