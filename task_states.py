@@ -1,3 +1,4 @@
+import re
 """task_states.py — M2 task/loop 状态机核心 (DESIGN_TASK_LOOP §4.2)."""
 import json
 import logging
@@ -501,3 +502,237 @@ def replay_task(
         "window_count": len(windows),
         "windows": windows,
     }
+
+
+
+def task_create(
+    conn: Any,
+    *,
+    name: str,
+    loop_id: Optional[str] = None,
+    owner_id: Optional[str] = None,
+    priority: int = 3,
+    summary: Optional[str] = None,
+    evidence_chunk_id: Optional[str] = None,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a task entity + open state window (DESIGN §5.1 memory_task_create).
+
+    Args:
+        conn: open sqlite3.Connection.
+        name: human label (e.g. '采购耗材').
+        loop_id: optional parent loop; if given, requires loop tick-verdict ready.
+        owner_id: optional entity id (default person:yanru).
+        priority: 0-5, default 3.
+        summary: optional.
+        evidence_chunk_id: optional FK to chunks.id.
+        now: optional timestamp override.
+
+    Returns:
+        dict {task_id, current_state, loop_id?, created_at, open_window_id}.
+
+    Raises:
+        InvalidLoopError: loop_id provided but loop not found.
+        LoopDisabledError: loop is disabled (enabled=False).
+        LoopHasActiveTaskError: loop already has active_task_id (防双 spawn).
+        EvidenceNotFoundError: evidence_chunk_id not found.
+    """
+    if not name or not name.strip():
+        raise TaskLoopError("name 必填", field="name", code="InvalidInputError")
+
+    if priority < 0 or priority > 5:
+        raise TaskLoopError(
+            f"priority {priority} 不在 0-5 范围",
+            field="priority",
+            code="InvalidInputError",
+        )
+
+    # 0. evidence_chunk_id 校验
+    if evidence_chunk_id is not None:
+        row = conn.execute(
+            "SELECT 1 FROM chunks WHERE id = ? AND valid_until IS NULL",
+            (evidence_chunk_id,),
+        ).fetchone()
+        if row is None:
+            raise EvidenceNotFoundError(
+                f"evidence_chunk_id '{evidence_chunk_id}' 不存在或已软删",
+                field="evidence_chunk_id",
+            )
+
+    # 1. loop 校验 (loop_id 提供了)
+    if loop_id is not None:
+        loop_row = conn.execute(
+            "SELECT id, properties_json FROM entities "
+            "WHERE id = ? AND kind = 'loop' AND valid_until IS NULL",
+            (loop_id,),
+        ).fetchone()
+        if loop_row is None:
+            raise LoopNotFoundError(
+                f"loop_id '{loop_id}' 不存在",
+                field="loop_id",
+            )
+        _, props_json = loop_row
+        if not props_json:
+            raise LoopNotFoundError(
+                f"loop '{loop_id}' properties_json 为空",
+                field="loop_id",
+            )
+        try:
+            cfg = json.loads(props_json)
+        except json.JSONDecodeError as e:
+            raise LoopNotFoundError(
+                f"loop '{loop_id}' properties_json 解析失败: {e}",
+                field="loop_id",
+            )
+        if not cfg.get("enabled", True):
+            raise TaskLoopError(
+                f"loop '{loop_id}' 已禁用 (enabled=False)",
+                field="loop_id",
+                code="LoopDisabledError",
+            )
+        if cfg.get("active_task_id"):
+            raise TaskLoopError(
+                f"loop '{loop_id}' 已有 active_task_id={cfg['active_task_id']} "
+                f"(防双 spawn, §边界 #8)",
+                field="loop_id",
+                code="LoopHasActiveTaskError",
+            )
+
+    # 2. 生成 task_id (DESIGN §2.1: task:YYYYMMDD-<slug>)
+    ts = now or _default_now()
+    try:
+        date_part = ts[:10].replace("-", "")
+    except (TypeError, ValueError):
+        date_part = "00000000"
+    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-")
+    if not slug:
+        slug = "task"
+    task_id = f"task:{date_part}-{slug}"
+
+    # 确保 id 唯一 (collide 试 1-2 次)
+    n = 0
+    while conn.execute("SELECT 1 FROM entities WHERE id = ?", (task_id,)).fetchone():
+        n += 1
+        task_id = f"task:{date_part}-{slug}-{n}"
+        if n > 100:
+            raise TaskLoopError(
+                f"task_id 撞名 100+ 次: {task_id}",
+                field="task_id",
+                code="TaskIdCollisionError",
+            )
+
+    # 3. INSERT entity (kind=task, memory_type=ephemeral, properties_json={loop_id, owner_id, priority, summary})
+    props = {
+        "loop_id": loop_id,
+        "owner_id": owner_id,
+        "priority": priority,
+    }
+    if summary:
+        props["summary"] = summary
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, summary, properties_json, memory_type) "
+        "VALUES (?, ?, ?, ?, ?, 'ephemeral')",
+        (task_id, "task", name, summary, json.dumps(props)),
+    )
+
+    # 4. INSERT task_states: open 窗
+    cur = conn.execute(
+        "INSERT INTO task_states "
+        "(task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) "
+        "VALUES (?, ?, ?, NULL, ?, ?, ?)",
+        (task_id, "open", ts, "task_create", evidence_chunk_id, ts),
+    )
+    open_window_id = cur.lastrowid
+
+    # 5. 关联 loop: 写 loop.properties_json.active_task_id
+    if loop_id is not None:
+        cfg["active_task_id"] = task_id
+        conn.execute(
+            "UPDATE entities SET properties_json = ? WHERE id = ?",
+            (json.dumps(cfg), loop_id),
+        )
+        # 6. 写 loop 状态窗 'running' (DESIGN §4.3 生命周期事件)
+        # 先看 loop 是否有 active 状态窗
+        cur_loop_win = conn.execute(
+            "SELECT id FROM task_states WHERE task_id = ? AND valid_until IS NULL",
+            (loop_id,),
+        ).fetchone()
+        if cur_loop_win is None:
+            conn.execute(
+                "INSERT INTO task_states "
+                "(task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) "
+                "VALUES (?, ?, ?, NULL, ?, NULL, ?)",
+                (loop_id, "running", ts, "loop: spawn task", ts),
+            )
+        # else: 已是 running 不重复落行
+
+    result: Dict[str, Any] = {
+        "task_id": task_id,
+        "current_state": "open",
+        "created_at": ts,
+        "open_window_id": open_window_id,
+    }
+    if loop_id:
+        result["loop_id"] = loop_id
+    return result
+
+
+def loop_create(
+    conn: Any,
+    *,
+    name: str,
+    trigger: str,
+    interval_hours: int = 24,
+    enabled: bool = True,
+    priority: int = 3,
+    owner_id: Optional[str] = None,
+    now: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a loop entity (DESIGN §5.1 memory_loop_create)."""
+    if not name or not name.strip():
+        raise TaskLoopError("name 必填", field="name", code="InvalidInputError")
+    if not trigger or not trigger.strip():
+        raise TaskLoopError("trigger 必填", field="trigger", code="InvalidInputError")
+    if interval_hours <= 0:
+        raise TaskLoopError(
+            f"interval_hours {interval_hours} 必须 > 0",
+            field="interval_hours",
+        )
+
+    ts = now or _default_now()
+    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())[:30].strip("-") or "loop"
+    loop_id = f"loop:{slug}"
+    n = 0
+    while conn.execute("SELECT 1 FROM entities WHERE id = ?", (loop_id,)).fetchone():
+        n += 1
+        loop_id = f"loop:{slug}-{n}"
+        if n > 100:
+            raise TaskLoopError(
+                f"loop_id 撞名 100+ 次: {loop_id}",
+                field="loop_id",
+                code="LoopIdCollisionError",
+            )
+
+    props = {
+        "trigger": trigger,
+        "interval_hours": interval_hours,
+        "enabled": enabled,
+        "active_task_id": None,
+        "last_cycle_done_at": None,
+        "priority": priority,
+        "owner_id": owner_id,
+    }
+    conn.execute(
+        "INSERT INTO entities (id, kind, name, properties_json, memory_type) "
+        "VALUES (?, ?, ?, ?, 'ephemeral')",
+        (loop_id, "loop", name, json.dumps(props)),
+    )
+    # loop 初始状态: dormant (enabled=False) 或 不落窗 (默认 enabled=True; 等第一个 tick)
+    if not enabled:
+        conn.execute(
+            "INSERT INTO task_states "
+            "(task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) "
+            "VALUES (?, ?, ?, NULL, ?, NULL, ?)",
+            (loop_id, "dormant", ts, "create disabled", ts),
+        )
+    return {"loop_id": loop_id, "enabled": enabled, "interval_hours": interval_hours}
