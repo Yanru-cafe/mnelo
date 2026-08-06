@@ -319,6 +319,83 @@ TOOLS = [
             "required": ["name"],
         },
     },
+    # === [8/6 M3 Step 8] memory_task_transition ===
+    {
+        "name": "memory_task_transition",
+        "description": "CAS 关旧窗 + 开新窗 (DESIGN §4.2). task_id 必填, to_state/reason 必填, evidence_chunk_id 可选但若提供须存在. force=True 绕过转移图 (D8 纠正门). 终端 (cancelled) 拒收. 并发 / 重复提交报 NotCurrentStateError.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "task entity id (必填)"},
+                "to_state": {"type": "string", "description": "目标状态 (task: open/in_progress/waiting/blocked/done/cancelled; loop: running/dormant/paused)"},
+                "reason": {"type": "string", "description": "语义摘要 (必填, 含 actor 痕迹)"},
+                "evidence_chunk_id": {"type": "string", "description": "支撑转移的 chunk FK (推荐必填, 创建可空)"},
+                "force": {"type": "boolean", "description": "D8 纠正门: 绕过转移图 (要求 reason 已填)", "default": False},
+                "now": {"type": "string", "description": "timestamp 覆盖 (T 分隔)"},
+            },
+            "required": ["task_id", "to_state", "reason"],
+        },
+    },
+    # === [8/6 M3 Step 9] memory_task_list ===
+    {
+        "name": "memory_task_list",
+        "description": "列出活跃任务 (DESIGN §5.1). 默认 state 过滤 active (state NOT IN done/cancelled/dormant/paused). state 参数当前状态精确过滤 (state=in_progress). loop_id 过滤父 loop. asof 时间切片. stale_days 算窗口年龄.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "state": {"type": "string", "description": "当前状态精确过滤 (None=活跃)"},  # 利用默认即 active
+                "loop_id": {"type": "string", "description": "父 loop 过滤"},
+                "asof": {"type": "string", "description": "时间切片 (isof 8601)"},
+                "stale_days": {"type": "boolean", "description": "算 valid_from 到当前的天数", "default": False},
+                "limit": {"type": "integer", "description": "max rows", "default": 50},
+            },
+            "required": [],
+        },
+    },
+    # === [8/6 M3 Step 9] memory_task_replay ===
+    {
+        "name": "memory_task_replay",
+        "description": "Replay task 状态窗历史 (DESIGN §5.1). asof 默认 = 当前. 返回 {task_id, current_state, window_count, windows: [{state, valid_from, valid_until, reason, evidence_chunk_id}]}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "task / loop entity id (必填)"},
+                "asof": {"type": "string", "description": "回放时间点 (默认 = 当前)"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    # === [8/6 M3 Step 10] memory_loop_create ===
+    {
+        "name": "memory_loop_create",
+        "description": "建 loop entity (DESIGN §5.1). enabled=False 写 dormant 状态窗, True 等首个 tick. 返回 {loop_id, enabled, interval_hours}.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "loop 名称 (必填)"},
+                "trigger": {"type": "string", "description": "触发条件 (必填, e.g. '库存低于阈值')"},
+                "interval_hours": {"type": "integer", "description": "轮转间隔 (默认 24)", "default": 24},
+                "enabled": {"type": "boolean", "description": "默认 True", "default": True},
+                "priority": {"type": "integer", "description": "0-5", "default": 3},
+                "owner_id": {"type": "string", "description": "责任人 entity id"},
+                "now": {"type": "string", "description": "timestamp 覆盖"},
+            },
+            "required": ["name", "trigger"],
+        },
+    },
+    # === [8/6 M3 Step 11] memory_loop_tick ===
+    {
+        "name": "memory_loop_tick",
+        "description": "机械算 loop tick verdict (DESIGN §4.3). 4 verdict: dormant / waiting / due / not_due. 不写 task_states, tick 判定不落行 (DESIGN §4.3 strict).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "loop_id": {"type": "string", "description": "loop entity id (必填)"},
+                "now": {"type": "string", "description": "timestamp 覆盖 (默认 = 当前)"},
+            },
+            "required": ["loop_id"],
+        },
+    },
 ]
 
 
@@ -331,8 +408,13 @@ TOOLS = [
 
 _TASK_TOOL_REGISTRY = {
     # name -> (task_states attr, id_field for response wrapping)
-    # 8 个 tool per DESIGN §5.1; 一次 ship 1 个, 减小变更面.
+    # 8 个 tool per DESIGN §5.1; Step 8-11 分批 ship.
     "memory_task_create":    ("task_create",    "task_id"),
+    "memory_task_transition": ("transition",    None),
+    "memory_task_list":      ("list_tasks",     None),
+    "memory_task_replay":    ("replay_task",    None),
+    "memory_loop_create":    ("loop_create",    "loop_id"),
+    "memory_loop_tick":      ("loop_tick",      None),
 }
 
 
@@ -721,6 +803,37 @@ if _MCP_AVAILABLE:
             task_id = data.get("task_id", "?") if isinstance(data, dict) else "?"
             state = data.get("current_state", "?") if isinstance(data, dict) else "?"
             return f"{_ECHO} {_ECHO_LABEL}    +{task_id}  (state={state})"
+
+        if name == "memory_task_transition":
+            # handler returns {task_id, from_state, to_state, valid_from, window_id}
+            task_id = data.get("task_id", "?") if isinstance(data, dict) else "?"
+            from_state = data.get("from_state", "?") if isinstance(data, dict) else "?"
+            to_state = data.get("to_state", "?") if isinstance(data, dict) else "?"
+            wid = data.get("window_id", "?") if isinstance(data, dict) else "?"
+            return f"{_ECHO} {_ECHO_LABEL}    {task_id}  {from_state}→{to_state}  (win={wid})"
+
+        if name == "memory_task_list":
+            # handler returns {tasks: [...], count, truncated}
+            tasks = data.get("tasks", []) if isinstance(data, dict) else []
+            truncated = data.get("truncated", False) if isinstance(data, dict) else False
+            return f"{_ECHO} {_ECHO_LABEL}    ⊃{len(tasks)} tasks  (truncated={truncated})"
+
+        if name == "memory_task_replay":
+            # handler returns {task_id, current_state, window_count, windows: [...]}
+            wc = data.get("window_count", "?") if isinstance(data, dict) else "?"
+            cs = data.get("current_state", "?") if isinstance(data, dict) else "?"
+            return f"{_ECHO} {_ECHO_LABEL}    ↻{data.get('task_id', '?') if isinstance(data, dict) else '?'}  ({wc} windows, current={cs})"
+
+        if name == "memory_loop_create":
+            # handler returns {loop_id, enabled, interval_hours}
+            lid = data.get("loop_id", "?") if isinstance(data, dict) else "?"
+            ih = data.get("interval_hours", "?") if isinstance(data, dict) else "?"
+            return f"{_ECHO} {_ECHO_LABEL}    ⊕{lid}  (interval={ih}h)"
+
+        if name == "memory_loop_tick":
+            # handler returns {loop_id, verdict, ...}
+            verdict = data.get("verdict", "?") if isinstance(data, dict) else "?"
+            return f"{_ECHO} {_ECHO_LABEL}    ⏱{data.get('loop_id', '?') if isinstance(data, dict) else '?'}  verdict={verdict}"
 
         # Fallback for unknown shape
         return f"{_ECHO} {_ECHO_LABEL}    {name}  (ok)"
