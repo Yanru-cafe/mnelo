@@ -97,6 +97,7 @@ def _setup_task_test_fixture(m):
         "'task:20260806-restock-1', 'loop:consumables-stock'"
         ")"
     )
+    m._conn.execute("DELETE FROM task_states WHERE task_id LIKE 'task:tlm2-%'")
     # entities has FKs from relations (source_id/target_id). Disable FK enforcement
     # just for the DELETE (other tests may have left dangling relations).
     m._conn.execute("PRAGMA foreign_keys = OFF")
@@ -104,7 +105,8 @@ def _setup_task_test_fixture(m):
         m._conn.execute(
             "DELETE FROM entities WHERE id LIKE 'task:test-%' "
             "OR id LIKE 'loop:test-%' "
-            "OR id IN ('task:20260806-restock-1', 'loop:consumables-stock')"
+            "OR id IN ('task:20260806-restock-1', 'loop:consumables-stock') "
+            "OR id LIKE 'task:tlm2-%'"
         )
     finally:
         m._conn.execute("PRAGMA foreign_keys = ON")
