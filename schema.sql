@@ -30,7 +30,7 @@ CREATE INDEX idx_entities_kind ON entities(kind);
 CREATE INDEX idx_entities_updated ON entities(updated_at);
 CREATE INDEX idx_entities_valid ON entities(valid_from, valid_until);
 CREATE INDEX idx_entities_supersede ON entities(superseded_by) WHERE superseded_by IS NOT NULL;
--- [H-1 C 修正] partial index — user_confirmed=1 实战 0-N 个, 全表索引低选择性
+-- [H-1 C 修正] partial index — user_confirmed=1 实际 0-N 个, 全表索引低选择性
 CREATE INDEX idx_entities_user_confirmed ON entities(user_confirmed) WHERE user_confirmed = 1;
 CREATE INDEX idx_entities_processed_at ON entities(processed_at);
 
@@ -120,7 +120,7 @@ CREATE INDEX idx_purged_target ON purged_queue(target_id);
 
 -- 7.5 AUDIT_LOG (L2 自主层审计) --------------------
 -- [H-1 §3] TASKS_L2_HYGIENE H0 的核心表 — Proposal/Policy/Applier 落审计
--- 实战: 0 行 (L2 未落地); UNIQUE 防同 run_id 重复 apply 同 ref
+-- 实际: 0 行 (L2 未落地); UNIQUE 防同 run_id 重复 apply 同 ref
 -- created_at 由 L2 代码用 memory.now() 写 (T 分隔), 不依赖 SQLite DEFAULT
 -- 见 TASKS_H1_SCHEMA.md §3.2 / §3.3 (deepseek B 修正)
 CREATE TABLE audit_log (
@@ -172,7 +172,7 @@ CREATE TABLE task_states (
     FOREIGN KEY (evidence_chunk_id) REFERENCES chunks(id)
 );
 
--- 不变量 1 — partial UNIQUE index (实战测试 test_ux_task_current_state_rejects_double_open)
+-- 不变量 1 — partial UNIQUE index (实际测试 test_ux_task_current_state_rejects_double_open)
 CREATE UNIQUE INDEX ux_task_current_state
     ON task_states(task_id) WHERE valid_until IS NULL;
 

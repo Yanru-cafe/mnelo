@@ -7,7 +7,7 @@ DESIGN §11 测试计划 M1 — schema:
 - test_state_transitions_seeded_defaults           # seed 矩阵存在
 - test_task_loop_kind_in_entities                   # kind 校验 (task/loop 是合法 kind)
 
-实战: stop MCP first (单写锁) — zvec 跟 test 抢锁会失败.
+实际: stop MCP first (单写锁) — zvec 跟 test 抢锁会失败.
 """
 import os
 import sys
@@ -217,7 +217,7 @@ def test_task_loop_kind_in_entities():
                 '{"trigger":"库存低于阈值","interval_hours":24,"enabled":true}',
             ),
         )
-        # task_states 接受 task_id 引用这两个 entity (evidence_chunk_id 实战创建可空)
+        # task_states 接受 task_id 引用这两个 entity (evidence_chunk_id 实际创建可空)
         m._conn.execute(
             "INSERT INTO task_states (task_id, state, valid_from, created_at) "
             "VALUES (?, ?, ?, ?)",
@@ -277,7 +277,7 @@ def test_asof_replay_query_returns_windows():
             "INSERT INTO entities (id, kind, name) VALUES (?, ?, ?)",
             ("task:test-3", "task", "test"),
         )
-        # 3 个状态窗: open → in_progress → waiting (evidence_chunk_id 为 NULL — 实战创建可空, §3.1)
+        # 3 个状态窗: open → in_progress → waiting (evidence_chunk_id 为 NULL — 实际创建可空, §3.1)
         windows = [
             ("open",        "2026-08-06T10:00", "2026-08-06T10:30", None),
             ("in_progress", "2026-08-06T10:30", "2026-08-06T11:00", None),

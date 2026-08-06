@@ -388,7 +388,7 @@ class Memory:
             "INSERT OR IGNORE INTO state_transitions (scope, from_state, to_state) VALUES (?, ?, ?)",
             default_transitions,
         )
-        # schema_version bump (1.0 → 1.1) — 实战标记 M1 落地
+        # schema_version bump (1.0 → 1.1) — 实际标记 M1 落地
         existing_version = self._conn.execute(
             "SELECT value FROM meta WHERE key='schema_version'"
         ).fetchone()
