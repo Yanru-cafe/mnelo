@@ -148,17 +148,28 @@ def test_m5_2_2_threshold_buckets():
 # ===== M5.2.3 idempotent =====
 
 def test_m5_2_3_idempotent_skip_existing():
-    """[M5.2.3] 已有 pending Proposal 跳过."""
+    """[M5.2.3] 已有 pending Proposal 跳过.
+
+    [M28 fix] 校验本 task 不被重复提议 (其他 task 隔离).
+    旧测试 assert r2["proposed"] == 0 假设全局无新提议, 但 live DB 有其他
+    stale task (e2e / m28 残留) 会让全局 count > 0. 改校验本 task 在 r2 proposals
+    不出现.
+    """
     _setup()
     tid = _create_task("m5-stale-idemp", days_ago=10)
 
     m = memory.Memory()
     try:
         r1 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
-        assert r1["proposed"] >= 1
-        # 第二次扫, 已有 pending 应跳过
+        # 本 task 第一次必被提议
+        r1_ids = [p["task_id"] for p in r1["proposals"]]
+        assert tid in r1_ids
+
+        # 第二次扫, 本 task 已有 pending 应跳过 (其他 task 不管)
         r2 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
-        assert r2["proposed"] == 0, f"应跳过已 proposed, got {r2}"
+        r2_ids = [p["task_id"] for p in r2["proposals"]]
+        assert tid not in r2_ids, f"本 task 二次扫应跳过, got {tid} in {r2_ids}"
+        # skipped_existing 至少 1 (本 task 自身)
         assert r2["skipped_existing"] >= 1
     finally:
         m.close()
