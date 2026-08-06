@@ -77,6 +77,98 @@ Skips `memory.db` / `config.toml` / `*.md` / `tests/` (by design).
 Restart the MCP server after sync:
 `launchctl kickstart -k gui/$(id -u)/ai.mnelo.mcp`.
 
+## VPS deployment (cheap US VPS — ~$10/year tier)
+
+mnelo is **designed to fit the cheapest US VPS tier** (the ~$10/year
+bracket — Racknerd / BandwagonHost / Hostinger KVM1 / etc.). The
+usearch f16 vector backend (2 bytes/dim) keeps both RAM and disk
+footprint low enough that even a 1 GB VPS with 25 GB disk is plenty.
+
+### Why usearch f16 unlocks cheap VPS
+
+| | zvec (INT8) | usearch (f16) |
+|---|---|---|
+| Vector file size | 1 byte/dim (INT8) | 2 bytes/dim (f16) |
+| Native FTS | ✅ | ❌ (use SQLite FTS5 separately) |
+| AVX2 required | ✅ | ❌ |
+| Works on KVM1 (cheapest tier) | sometimes (AVX2 flag-dependent) | ✅ always |
+| Recall quality at 512d | INT8 ≈ −1.5% vs f32 | f16 ≈ −0.4% vs f32 |
+
+For a $10/year KVM1 (1 vCPU / 1 GB RAM / 25 GB SSD / no AVX2 guarantee):
+usearch f16 is the right pick. zvec may fail to `import` (SIGILL on
+non-AVX2 CPUs); the `auto` chain falls back to usearch automatically.
+
+### Hardware requirements (per vector count)
+
+| Vectors | RAM (f16) | Disk (f16) | CPU | VPS tier |
+|---|---|---|---|---|
+| 1k | 50 MB | 5 MB | 1 vCPU | KVM1 (1 GB) ✅ |
+| 5k | 110 MB | 25 MB | 1 vCPU | KVM1 (1 GB) ✅ |
+| 15k | 200 MB | 75 MB | 1 vCPU | KVM2 (2 GB) ✅ |
+| 50k | 600 MB | 250 MB | 2 vCPU | KVM4 (4 GB) ✅ |
+| 100k+ | 1.2 GB | 500 MB | 2-4 vCPU | dedicated tier |
+
+Plus ~200 MB constant for the embedder (bge-small-zh) — so budget
+**1 GB total RAM minimum**. The cheapest KVM1 tier is fine for ~5k
+vectors, comfortably covers most personal-agent memory sizes.
+
+### Recommended $10/year VPS providers
+
+- **Racknerd** — 1 GB / 1 vCPU / 25 GB SSD, ~$10/year, multi-DC (US + EU)
+- **BandwagonHost** — 1 GB / 1 vCPU / 20 GB SSD, ~$10/year, Los Angeles
+- **Hostinger KVM1** — 1 GB / 1 vCPU / 20 GB SSD, ~$10/year, US/EU/Asia
+- **GreenCloud** — 1 GB / 1 vCPU / 25 GB SSD, ~$12/year, US/EU/Asia
+- **CloudCone** — 1 GB / 1 vCPU / 30 GB SSD, ~$12/year, US
+
+All ship Ubuntu 22.04 / Debian 12 by default — mnelo's `scripts/install.sh`
+runs unchanged. (Avoid OpenVZ / LXC; mnelo needs proper KVM/VM.)
+
+### Setup on VPS
+
+```bash
+ssh root@your-vps
+# Point your domain or just an A record at the VPS IP, or skip TLS:
+# - Self-host without TLS: bind 127.0.0.1 + SSH-tunnel from agent side.
+# - Expose with TLS: use caddy / nginx + Let's Encrypt (free).
+
+# Install mnelo as usual
+git clone https://github.com/chinesewebman/mnelo.git /opt/mnelo
+cd /opt/mnelo
+bash scripts/install.sh
+# Choose:
+#   1) memory_dir = /var/lib/mnelo (or /home/mnelo)
+#   2) backend = 'usearch' (don't rely on auto chain — most KVM1 lack AVX2)
+#   3) launchd equivalent for Linux (currently macOS-only — for VPS
+#      without macOS launchd, use cron + manual launchctl-style restart,
+#      or run mnelo as a systemd unit you write yourself; mnelo doesn't
+#      ship a systemd unit yet — see RUNBOOK.md 'Linux deployment' note)
+#   4) backup schedule = local snapshot dir on same VPS (option 1)
+
+# Verify
+python3 scripts/health_check.py
+curl -sS http://127.0.0.1:8086/health | jq
+```
+
+### Security posture on a public VPS
+
+- **Bind to 127.0.0.1 by default** — only SSH into the VPS to reach it.
+  The agent (running locally or on another host) connects via
+  `ssh -L 8086:127.0.0.1:8086 your-vps`.
+- For remote access without SSH tunnel: put mnelo behind TLS
+  (caddy / nginx), and **enable Bearer auth** (`MNELO_MEMORY_SERVER_TOKEN`).
+  The `scripts/install.sh` step "auth token" prompts to set this.
+- mnelo is single-user. Don't expose the MCP port to the LAN/internet
+  without TLS + Bearer.
+
+### Why this matters for VPS-as-relay agents
+
+The pattern is: **local Claude Code / Hermes** connects over the
+internet to **a cheap VPS running mnelo**, so the agent's memory
+persists across machines (laptop at home, workstation at office, etc).
+The $10/year VPS replaces what Mem0 / Zep charge ~$20-100/month for.
+For agents that already need a VPS as a relay / tunnel endpoint
+anyway, mnelo slots in as a free extension.
+
 ## Known limitations
 
 | Limit | Workaround |

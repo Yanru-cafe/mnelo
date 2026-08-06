@@ -34,6 +34,8 @@
   fact-promotion, with full audit_log + undo. Ship-default off.
 - **standard MCP, no lock-in** — 22 tools over SSE; works with Hermes,
   Claude Code, Cursor, or any MCP client
+- **fits a $10/year US VPS** — usearch f16 keeps RAM + disk small enough
+  for KVM1 1 GB / 25 GB SSD; full memory system + agent relay in one box
 
 ## install
 
@@ -70,7 +72,8 @@ Everything else lives in `docs/`:
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — install, launchd, client
   connection, recovery
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — backup / restore, repo ↔
-  live sync, launchd commands, known limitations
+  live sync, launchd commands, **cheap US VPS deployment**,
+  known limitations
 - [docs/VECTOR_BACKENDS.md](docs/VECTOR_BACKENDS.md) — usearch (f16) vs
   zvec (INT8 + native FTS) + AVX2 detection + crash triage
 - [docs/L2_MAINTENANCE.md](docs/L2_MAINTENANCE.md) — autonomous
