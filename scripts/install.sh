@@ -238,6 +238,42 @@ else
     log "非交互模式 或 MNELO_MEMORY_BACKUP_SKIP_PROMPT=1 — 跳过备份询问 (交互终端才会提示)"
 fi
 
+# [8/6 M5.1] 装 loop_tick cron (DESIGN §8 推进机制二期)
+            if [ "$(uname -s)" = "Darwin" ]; then
+                LOOP_TICK_PLIST_SRC="$REPO_ROOT/scripts/launchd/ai.mnelo.loop_tick.plist"
+                LOOP_TICK_PLIST_DST="$HOME/Library/LaunchAgents/ai.mnelo.loop_tick.plist"
+                if [ -f "$LOOP_TICK_PLIST_SRC" ]; then
+                    sed -e "s|__LIVE_ROOT__|$LIVE_ROOT|g" \
+                        -e "s|__VENV_PY__|$VENV_PY|g" \
+                        -e "s|__VENV_DIR__|$VENV_DIR|g" \
+                        -e "s|__MNELO_HOME__|$MNELO_HOME|g" \
+                        "$LOOP_TICK_PLIST_SRC" > "$LOOP_TICK_PLIST_DST"
+                    chmod 644 "$LOOP_TICK_PLIST_DST"
+                    if launchctl list 2>/dev/null | grep -q "ai.mnelo.loop_tick"; then
+                        launchctl unload "$LOOP_TICK_PLIST_DST" 2>/dev/null || true
+                    fi
+                    if launchctl load "$LOOP_TICK_PLIST_DST" 2>/dev/null; then
+                        ok "loop_tick plist 已装 (每 30 分钟跑)"
+                        log "tick 日志: tail -f $MNELO_HOME/logs/mnelo.loop_tick.log"
+                    else
+                        warn "loop_tick plist load 失败 (手动: launchctl load $LOOP_TICK_PLIST_DST)"
+                    fi
+                else
+                    warn "loop_tick plist 模板不存在: $LOOP_TICK_PLIST_SRC (跳过)"
+                fi
+            else
+                # Linux: 装 crontab 每 30 分钟跑
+                CRON_LOOP_TICK="MNELO_MEMORY_DIR=$LIVE_ROOT MNELO_MEMORY_SEARCH_BACKEND=usearch $VENV_PY $REPO_ROOT/scripts/mnelo_loop_tick_cron.py --threshold 0"
+                if crontab -l 2>/dev/null | grep -q "mnelo_loop_tick_cron.py"; then
+                    ok "loop_tick cron 已存在, 跳过"
+                else
+                    mkdir -p "$LIVE_ROOT/logs"
+                    ( crontab -l 2>/dev/null | grep -v "mnelo_loop_tick_cron.py"; \
+                      echo "*/30 * * * * $CRON_LOOP_TICK >> $LIVE_ROOT/logs/mnelo.loop_tick.log 2>&1" ) | crontab -
+                    ok "loop_tick cron 已装 (每 30 分钟)"
+                fi
+            fi
+
 ok "✅ install 完成"
 log "测试:"
 log "  echo '{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1.0\"}},\"id\":1}' | $VENV_PY $LIVE_ROOT/mcp_server.py --transport stdio"

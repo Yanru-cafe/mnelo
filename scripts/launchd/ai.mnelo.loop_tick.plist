@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.mnelo.loop_tick</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_PY__</string>
+        <string>__LIVE_ROOT__/scripts/mnelo_loop_tick_cron.py</string>
+        <string>--threshold</string>
+        <integer>0</integer>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MNELO_HOME</key>
+        <string>__MNELO_HOME__</string>
+        <key>PYTHONPATH</key>
+        <string>__LIVE_ROOT__</string>
+        <!-- [8/6 M5.1] 强制 usearch 后端 — 本机 zvec 缺 AVX2 / 测试环境 SIGSEGV 兜底 -->
+        <key>MNELO_MEMORY_SEARCH_BACKEND</key>
+        <string>usearch</string>
+    </dict>
+    <!-- [8/6 M5.1 DESIGN §8 cron/timer 二期] 每 30 分钟跑一次 loop_tick_cron
+         频度依据: most loops interval_hours=24, 30min tick 节拍 1/48 ratio, 既
+         保证 due 检测及时 (最坏 30min 滞后) 又不致 cron 资源浪费. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>__MNELO_HOME__/logs/mnelo.loop_tick.log</string>
+    <key>StandardErrorPath</key>
+    <string>__MNELO_HOME__/logs/mnelo.loop_tick.error.log</string>
+    <key>WorkingDirectory</key>
+    <string>__LIVE_ROOT__</string>
+</dict>
+</plist>
