@@ -532,3 +532,11 @@
   - `README.zh.md` / `README.md`: backend 选择章节修正"自动降级/CPU 不重要"误导 → 明确 auto 主进程 import zvec 的 SIGILL 陷阱; 加 env 优先级 (env > config.toml > auto)、持久化推荐 config.toml + env 双设、合法值。
   - `README.zh.md` / `README.md` agent 安装步骤第 3 步: 无 AVX2 机器显式 `backend='usearch'` 警告。
   - `docs/RUNBOOK.md` 新增 §2.2: 无 AVX2 机器必须显式 usearch, 含根因、config.toml+env 双设示例、为什么双设。
+
+## 2026-08-06 22:40 修复 zvec_available 主进程 import SIGILL 隐患（承接 22:30 记录）
+
+- 根因: `zvec_available()` 主进程 `try-import zvec`，但 zvec 0.6 在无 AVX2 CPU 上 import 是进程级 SIGILL (非 Python 异常)，try/except 拦不住 → auto 链把整个 mnelo 带崩。与 search_index.py 顶部 docstring"必须子进程检测"契约矛盾。
+- 修复: 主进程 import 前先 `_cpu_has_avx2()` 探测 CPU (Linux /proc/cpuinfo flags / macOS sysctl machdep.cpu.leaf7_features)。**明确无 AVX2 → 直接返回 False 绝不 import**，auto 链安全回落 usearch；平台探测不了 (None) 才回退 try-import。保留主进程路径 (macOS launchd fork 子进程 BlockingIOError 约束)。
+- 测试: `TestZvecAvx2Gate` 4 用例 — CPU 探测返回 bool/None；无 AVX2 不 import 返回 False (此测试本机无 fake 注入，若走了 import 直接 SIGILL 崩测试进程即防回归)；AVX2 路径 import fake zvec；探测不了回退 import。
+- 附带修复: `TestZvecBackendWithFake.setUp` 原 `zvec_available = lambda: True` 永久改写模块属性不恢复，污染后续测试类 (TestZvecAvx2Gate 的 mock 因此失效) → 改用 `mock.patch.object` + tearDown 恢复。
+- 验证: test_search_index.py 17/17 pass；真实场景 (无 config.toml 临时库 + auto 链，此前 dumped core) → `zvec_available()=False`、zvec 未 import、auto 实际走 usearch/f16，不再崩；M38 + usearch 回归 16/16 pass。
