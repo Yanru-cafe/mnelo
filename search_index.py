@@ -414,6 +414,22 @@ class UsearchIndex(SearchIndex):
         # usearch 索引: 已存在则 load, 否则新建
         from usearch.index import Index
         self._index = Index(ndim=dim, metric="cos", dtype="f16")
+        # [8/6 M38 harden] 运行时断言 - 必须 f16, 防未来 PR 不慎改 dtype.
+        # usearch 2.x dtype 在 Index.dtype 属性上返 ScalarKind 枚举 (eg
+        # <ScalarKind.F16: 12>). 用 enum 名 (F16/F32/I8/B1x8) 判定, 不依赖
+        # repr/str.
+        # 主人口中 'all usearch ops must work in f16' 锁定 (8/6).
+        actual_dtype = getattr(self._index, "dtype", None)
+        actual_dtype_name = (
+            actual_dtype.name  # ScalarKind.F16.name == "F16"
+            if hasattr(actual_dtype, "name")
+            else str(actual_dtype)
+        )
+        if actual_dtype_name.upper() != "F16":
+            raise RuntimeError(
+                f"UsearchIndex 必须 f16 (主人口中 8/6 锁定), got dtype={actual_dtype_name!r}. "
+                "改 dtype 之前请先走 design review + RUNBOOK §usearch-f16 章节."
+            )
         if self._index_path.exists():
             self._index.load(self._index_path)  # load 是实例方法
 
