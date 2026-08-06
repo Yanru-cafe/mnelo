@@ -163,3 +163,33 @@
     - `task_states.transition` 新递增逻辑（RF17/RF11）：实测 4 场景——乱序 now 回拨（初始窗 11:00:00 + now=10:00:05）、同秒连跳、正常未来 now、同秒链式 5 次转移 → 全部无零长/负长窗，新窗 valid_from 严格 > 旧窗 valid_until（通过）。
     - `mcp_server._handle_task_simple` 错误契约（RF16）+ RF8 回滚：实测 TaskNotFoundError → 返回保 message/code/field/type/tool；底层错（TypeError）→ 只返类型名不泄内部信息；loop 双 spawn → 无孤儿 entity/窗口行（通过）。
     - `tests/test_review_rf15_rf16.py` 静态测试 `test_rf15_real_mcp_wiring_in_source`：当前源码满足其全部断言（通过）；两个子进程测试在干净状态实测失败（见发现 1）。
+
+---
+
+## 2026-08-06 15:20 审查 b6e35c6..401cf10
+
+- 范围: b6e35c6..401cf10476d37f135df4f67d9c901181e80efbfb（共 1 个提交）
+- 提交:
+  - 401cf10 feat(step14): F6 真并发测试 — threading + subprocess 隔离验证 (94/94 pass)
+- 结论: 发现 3 个问题（中 / 低）。本提交仅动测试（新增 tests/test_step14_concurrency.py + 2 个既有 fixture 清理），无生产代码改动，无数据完整性风险。核心问题与上一轮 RF15/RF16 同类：子进程测试依赖本机残留文件，干净 checkout 必失败。
+
+- 发现:
+  - **[中] tests/test_step14_concurrency.py — `_setup()` 在干净 checkout 上必失败，并污染仓库**
+    - 位置: tests/test_step14_concurrency.py:53-73（`_setup` 连 `_REPO / "memory.db"`）
+    - 问题: 与 tests/test_review_rf15_rf16.py 完全同根因——清理连接硬编码 repo 根 `memory.db`（不被跟踪，干净 checkout 不存在）。`sqlite3.connect` 新建空库 → `DELETE FROM task_states` 抛 `sqlite3.OperationalError: no such table: task_states` → `_setup()` 抛错 → 5 个 F6 测试全部 setup 即失败（本机已实测复现）。同时在 repo 根留下 0 字节 `memory.db`（被 .gitignore 隐形）。
+    - 附带: 子进程 env 不含 `MNELO_MEMORY_DIR`，`Memory()` 解析到 `~/.hermes/memory/memory.db`（项目 8/6 已明确移除 ~/.hermes，会被重建）——清理 DELETE 打的 DB 与子进程实际写入的 DB 不是同一个，跨次清理无效。提交信息称 94/94 pass，推断依赖作者本机残留的带 schema 的 repo 根 memory.db。
+    - 失败场景: 干净 checkout 上 `pytest tests/test_step14_concurrency.py` → `OperationalError: no such table: task_states`（setup 阶段），且 repo 根出现 0 字节 memory.db。
+  - **[中] test_f6_3 断言过弱，无法验证其声称的并发序列化契约**
+    - 位置: tests/test_step14_concurrency.py:279-289
+    - 问题: docstring（line 223-228）明确期望 "1 success + 3 errors (StateTransitionError)"，但测试体只 `assert len(oks) >= 1`，从不校验 errors 的数量或类型。若并发保护失效、4 线程全部成功（in_progress→in_progress 若按注释所说视为合法幂等），`len(oks)==4 >= 1`，测试仍通过 → 该测试无法检测它声称要覆盖的"同 task 并发 transition 应序列化拒收"缺陷。
+    - 失败场景: 人为让并发 UPDATE 全部成功（CAS 失效）→ 断言仍通过，覆盖形同虚设。
+  - **[低] 子进程 snippet 硬编码 macOS 遗留路径 `/Users/apple/.hermes/memory`**
+    - 位置: tests/test_step14_concurrency.py:86,103,159,179,234,251,303,325,373,390
+    - 问题: 所有子进程代码 `sys.path.insert(0, '/Users/apple/.hermes/memory')`，本机（Linux /root）该目录不存在，insert 是 no-op；imports 实际靠 `python -c` 的 cwd（`cwd=_REPO`）解析才能工作。属可移植性残留，若某环境 python 不从 cwd 解析则 import 失败；且与项目 8/6 "彻底移除 .hermes" 的清理方向相悖。
+
+- 测试:
+  - 本机全量 pytest 仍被既有 conftest session fixture（usearch load abort）阻断，与上轮相同。
+  - 实测本提交的测试自身在干净状态的行为:
+    - `_setup()` 清理逻辑在无 `/root/work/mnelo/memory.db` 时抛 `OperationalError: no such table: task_states` 并新建空 memory.db（见发现 1，实测复现）。
+    - 静态核对 test_f6_3 断言仅 `len(oks) >= 1`，docstring 所述 "1+3" 契约未落为断言（见发现 2）。
+  - 本提交改动的生产代码（无）与上轮已验证的 transition/CAS/错误契约不受影响；F6 依赖的底层（RF3 CAS 双 spawn、RF14 enabled CAS、RF17 乱序 now）在上轮独立 harness 实测通过。
