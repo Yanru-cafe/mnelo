@@ -232,3 +232,154 @@ def transition(
     if bookkeeping:
         result["terminal_bookkeeping"] = bookkeeping
     return result
+
+
+
+def list_tasks(
+    conn: Any,
+    *,
+    state: Optional[str] = None,
+    loop_id: Optional[str] = None,
+    asof: Optional[str] = None,
+    stale_days: bool = False,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """List task / loop windows (DESIGN §5.1 memory_task_list).
+
+    Args:
+        conn: open sqlite3.Connection.
+        state: filter by current state (None = active only, 即非 done/cancelled/dormant/paused).
+        loop_id: filter by parent loop (从 entities.properties_json 读 loop_id).
+        asof: optional timestamp; only valid windows at asof returned.
+        stale_days: if True, only windows with valid_from > threshold days ago.
+        limit: max rows returned.
+
+    Returns:
+        dict {tasks: [{task_id, name, state, state_valid_from, loop_id?, owner_id?,
+                       stale_days?}]}.
+
+    Note: 把 list_tasks 放 step 3, 不在 transition() 一起, 是为可独立 ship.
+    """
+    where = []
+    params: List[Any] = []
+
+    # 当前活动窗过滤 (valid_until IS NULL)
+    if asof is None:
+        where.append("ts.valid_until IS NULL")
+    else:
+        # asof: 匹配 valid_from <= asof AND (valid_until IS NULL OR valid_until > asof)
+        where.append("ts.valid_from <= ?")
+        params.append(asof)
+        where.append("(ts.valid_until IS NULL OR ts.valid_until > ?)")
+
+    if state is not None:
+        if state not in ALL_STATES:
+            raise InvalidTransitionError(
+                f"state '{state}' 不在状态词汇集",
+                field="state",
+            )
+        where.append("ts.state = ?")
+        params.append(state)
+    elif asof is None:
+        # 默认: 仅 active (排除 done/cancelled/dormant/paused)
+        where.append("ts.state NOT IN ('done','cancelled','dormant','paused')")
+
+    if loop_id is not None:
+        # properties_json 含有 loop_id 字段 (M3 task_create 写入, M5 完整)
+        # 简化: 用 LIKE 匹配 JSON 字符串. 精准方案走 json_extract.
+        where.append("(e.properties_json LIKE ?)")
+        params.append(f'%"loop_id": "{loop_id}"%')
+
+    sql = (
+        "SELECT ts.task_id, e.name, ts.state, ts.valid_from, "
+        "       e.properties_json, e.aliases_json "
+        "FROM task_states ts JOIN entities e ON e.id = ts.task_id "
+        "WHERE e.kind = 'task' AND " + " AND ".join(where) + " "
+        "ORDER BY ts.valid_from ASC LIMIT ?"
+    )
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+
+    tasks = []
+    for r in rows:
+        task_id, name, st, vf, props_json, aliases_json = r
+        loop_id_val = None
+        owner_id_val = None
+        if props_json:
+            try:
+                p = json.loads(props_json)
+                loop_id_val = p.get("loop_id")
+                owner_id_val = p.get("owner_id")
+            except (json.JSONDecodeError, TypeError):
+                pass
+        entry = {
+            "task_id": task_id,
+            "name": name,
+            "state": st,
+            "state_valid_from": vf,
+            "loop_id": loop_id_val,
+            "owner_id": owner_id_val,
+        }
+        if stale_days:
+            # 算 valid_from 距今多少天 (best-effort, 不严格 to-the-second)
+            try:
+                vf_dt = datetime.fromisoformat(vf)
+                age_days = (datetime.now() - vf_dt).days
+            except (ValueError, TypeError):
+                age_days = None
+            entry["stale_days"] = age_days
+        tasks.append(entry)
+
+    return {"tasks": tasks, "count": len(tasks), "truncated": len(tasks) >= limit}
+
+
+def replay_task(
+    conn: Any,
+    *,
+    task_id: str,
+    asof: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Replay a task's full state-window history (DESIGN §5.1 memory_task_replay).
+
+    Args:
+        conn: open sqlite3.Connection.
+        task_id: entities.id.
+        asof: optional timestamp; if given, only include windows valid at asof.
+
+    Returns:
+        dict {task_id, current_state, window_count, windows: [...]}.
+    """
+    params: List[Any] = [task_id]
+    where = "task_id = ?"
+    if asof is not None:
+        where += " AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)"
+        params.extend([asof, asof])
+
+    rows = conn.execute(
+        "SELECT state, valid_from, valid_until, reason, evidence_chunk_id "
+        "FROM task_states WHERE " + where + " ORDER BY valid_from ASC",
+        params,
+    ).fetchall()
+
+    cur = conn.execute(
+        "SELECT state FROM task_states WHERE task_id=? AND valid_until IS NULL",
+        (task_id,),
+    ).fetchone()
+    current_state = cur[0] if cur else None
+
+    windows = [
+        {
+            "state": r[0],
+            "valid_from": r[1],
+            "valid_until": r[2],
+            "reason": r[3],
+            "evidence_chunk_id": r[4],
+        }
+        for r in rows
+    ]
+    return {
+        "task_id": task_id,
+        "current_state": current_state,
+        "window_count": len(windows),
+        "windows": windows,
+    }
