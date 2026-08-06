@@ -20,6 +20,11 @@
         <!-- [8/6 M5.1] 强制 usearch 后端 — 本机 zvec 缺 AVX2 / 测试环境 SIGSEGV 兜底 -->
         <key>MNELO_MEMORY_SEARCH_BACKEND</key>
         <string>usearch</string>
+        <!-- [M21 8/6 review-pass fix] launchd 不读 shell profile, 必须显式设
+             MNELO_MEMORY_DIR, 否则 config.resolve_db_path() 回落到 ~/.hermes/memory
+             (项目 8/6 已移除的旧路径) -> 空库 / 错误库. -->
+        <key>MNELO_MEMORY_DIR</key>
+        <string>__LIVE_ROOT__</string>
     </dict>
     <!-- [8/6 M5.1 DESIGN §8 cron/timer 二期] 每 30 分钟跑一次 loop_tick_cron
          频度依据: most loops interval_hours=24, 30min tick 节拍 1/48 ratio, 既

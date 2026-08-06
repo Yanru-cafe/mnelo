@@ -42,11 +42,14 @@ print('LID:', r['loop_id'])
 
 
 def _run(args, env_extra=None, timeout=60):
-    """Run script in subprocess, return (stdout, stderr, rc)."""
+    """[M22 8/6 review-pass fix] 子进程显式传 MNELO_MEMORY_DIR, 跟 _setup/断言同一库."""
     env = {
         "PATH": "/usr/bin:/bin:/usr/local/bin",
         "HOME": str(Path.home()),
         "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
+        # [M22] 干净 checkout + 显式 env: 子进程 memory.Memory() 走 MNELO_MEMORY_DIR,
+        # 不再回落 ~/.hermes/memory (项目 8/6 已移除). 跟 _setup sqlite3.connect 用同一库.
+        "MNELO_MEMORY_DIR": str(_REPO),
     }
     if env_extra:
         env.update(env_extra)
@@ -81,6 +84,18 @@ def _setup():
     Path("/tmp/mnelo_loop_tick_cron.lock").unlink(missing_ok=True)
 
 
+def _latest_digest_path() -> Path:
+    """[M22 fix] 找 ~/.hermes/cron/output/loop_tick/ 下最新 .json (按 mtime 排序).
+
+    原硬编码 '2026-08-06.json' 日期敏感, 8/7 起必失败. 改按 mtime 找最新.
+    """
+    d = Path.home() / ".hermes/cron/output/loop_tick"
+    if not d.exists():
+        return d / "never.json"
+    files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0] if files else d / "never.json"
+
+
 def _create_loop(name: str, enabled: bool = True, interval: int = 24) -> str:
     """建一个 test loop via subprocess."""
     src = _CREATE_LOOP_SRC.format(
@@ -90,7 +105,8 @@ def _create_loop(name: str, enabled: bool = True, interval: int = 24) -> str:
         [sys.executable, "-c", src],
         capture_output=True, text=True,
         env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-             "MNELO_MEMORY_SEARCH_BACKEND": "usearch"},
+             "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
+             "MNELO_MEMORY_DIR": str(_REPO)},  # [M22]
         cwd=str(_REPO),
     )
     assert p.returncode == 0, f"loop_create failed: {p.stderr}"
@@ -153,7 +169,7 @@ def test_m5_1_due_verdict_correct():
     out, err, rc = _run(["--threshold", "0"])
     assert rc == 0, f"rc={rc}: {err}"
 
-    digest_path = Path.home() / ".hermes/cron/output/loop_tick/2026-08-06.json"
+    digest_path = _latest_digest_path()
     assert digest_path.exists(), f"digest missing: {digest_path}"
     entries = json.loads(digest_path.read_text())
     if not isinstance(entries, list):
@@ -212,7 +228,7 @@ def test_m5_1_digest_path_well_formed():
     out, err, rc = _run(["--threshold", "0"])
     assert rc == 0, f"rc={rc}: {err}"
 
-    digest_path = Path.home() / ".hermes/cron/output/loop_tick/2026-08-06.json"
+    digest_path = _latest_digest_path()
     assert digest_path.exists(), f"digest missing: {digest_path}"
     data = json.loads(digest_path.read_text())
     entries = data if isinstance(data, list) else [data]
@@ -223,3 +239,110 @@ def test_m5_1_digest_path_well_formed():
         assert key in last, f"missing key {key} in {last.keys()}"
     assert isinstance(last["due_loops"], list)
     assert last["dry_run"] is False
+
+
+def test_m5_1_naive_now_avoids_subtract_error():
+    """[M20 8/6 review-pass fix] cron now 用 naive local, 跟 storage 一致.
+
+    8/6 review-pass 发现 cron 用 datetime.now(timezone.utc) (aware), 跟
+    task_states.transition 写入的 naive local last_cycle_done_at 相减抛 TypeError,
+    导致 cron 稳态下 due loop 永远检不出. 现改 naive, 验证:
+      1. cron now_ts 字符串无 timezone offset ('+00:00' / tz suffix)
+      2. cron run 不会因 subtract error 抛 TypeError
+      3. 第一个 cycle 完成后, 下次 tick 仍能正常判定 due/not_due
+    """
+    _setup()
+
+    # 子进程脚本: 1) 建 loop 2) 跑 cron 一次 (标记 cycle done) 3) 再跑 cron 一次 (验证不抛错)
+    src = """import sys, subprocess
+sys.path.insert(0, '{repo}')
+import task_states as ts
+import memory
+m = memory.Memory()
+
+# 1. 建 loop
+r = ts.loop_create(m._conn, name='m5-naive', trigger='x', interval_hours=1, now='2026-08-06T09:00')
+lid = r['loop_id']
+m._conn.commit()
+m.close()
+
+# 2. 跑 cron (用 subprocess 隔离, 模拟稳态)
+script = '{repo}/scripts/mnelo_loop_tick_cron.py'
+import os
+env = os.environ.copy()
+env['MNELO_MEMORY_DIR'] = '{repo}'
+env['MNELO_MEMORY_SEARCH_BACKEND'] = 'usearch'
+out1 = subprocess.run([sys.executable, script, '--threshold', '0'], capture_output=True, text=True, env=env)
+print('STDOUT1:', out1.stdout[:200])
+if out1.returncode != 0:
+    print('ERR1:', out1.stderr[:200])
+    raise SystemExit(1)
+
+# 3. 再跑 cron (首次 cycle done 后, 第二次跑)
+out2 = subprocess.run([sys.executable, script, '--threshold', '0'], capture_output=True, text=True, env=env)
+print('STDOUT2:', out2.stdout[:200])
+if out2.returncode != 0:
+    print('ERR2:', out2.stderr[:200])
+    raise SystemExit(1)
+
+# 4. 关键校验: stdout 含 'due=' 或 'not_due=' (说明 verdict 正常判定, 不是 TypeError)
+import re
+all_stdout = out1.stdout + out2.stdout
+if 'TypeError' in all_stdout or "can't subtract" in all_stdout:
+    raise AssertionError(f'naive/aware subtract TypeError detected: {all_stdout[:500]}')
+if 'verdicts:' not in all_stdout:
+    raise AssertionError(f'cron did not emit verdict summary: {all_stdout[:500]}')
+print('NO_TYPE_ERROR')
+"""
+    # [M22 helper compat] 用 replace 不用 .format — src 内含 f-string + {...} 占位符冲突.
+    src = src.replace("{repo}", str(_REPO))
+    p = subprocess.run(
+        [sys.executable, "-c", src],
+        capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
+             "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
+             "MNELO_MEMORY_DIR": str(_REPO)},
+        cwd=str(_REPO),
+    )
+    assert p.returncode == 0, f"M20 reproduce shell failed: rc={p.returncode} stderr={p.stderr[-300:]}"
+    # 校验 stdout 含 'NO_TYPE_ERROR'
+    assert "NO_TYPE_ERROR" in p.stdout, f"M20 NOT fixed: {p.stdout[-500:]}"
+    # 校验 stdout 不含 TypeError
+    assert "TypeError" not in p.stdout, f"TypeError leaked: {p.stdout[-500:]}"
+
+
+def test_m5_1_naive_now_no_timezone_offset():
+    """[M20 fix + scrub] cron now_ts 字符串不应含 '+00:00' 等 tz offset.
+
+    naive ISO 字符串示例: '2026-08-06T15:30:00.123'
+    aware ISO 字符串示例: '2026-08-06T15:30:00.123+00:00' (拒绝)
+
+    静态源码契约校验 — 跟 RF15 同一模式, 避开 _ilu module instance 麻烦.
+    """
+    import re
+    src_path = _REPO / "scripts/mnelo_loop_tick_cron.py"
+    text = src_path.read_text()
+    # 不应再含 timezone.utc (修订后已删除)
+    assert "datetime.now(timezone.utc)" not in text, \
+        "M20: cron 仍用 timezone.utc (aware), 会触发 naive-aware subtract TypeError"
+    # 应含 naive datetime.now()
+    assert "datetime.now().isoformat(timespec=" in text, \
+        "M20: cron 应改用 naive datetime.now()"
+
+
+def test_m5_1_m21_plist_has_memory_dir():
+    """[M21 8/6 review-pass fix] launchd plist 含 MNELO_MEMORY_DIR env."""
+    plist_path = _REPO / "scripts/launchd/ai.mnelo.loop_tick.plist"
+    text = plist_path.read_text()
+    assert "MNELO_MEMORY_DIR" in text, "M21: plist 缺 MNELO_MEMORY_DIR, macOS 会回落到 ~/.hermes/memory"
+    assert "__LIVE_ROOT__" in text, "M21: plist MNELO_MEMORY_DIR 应指向 __LIVE_ROOT__ 占位符"
+
+
+def test_m5_1_m22_subprocess_env_propagates():
+    """[M22 8/6 review-pass fix] _run 子进程 env 传 MNELO_MEMORY_DIR."""
+    import re
+    test_src = (_REPO / "tests/test_m5_1_cron_tick.py").read_text()
+    # _run 函数应设 MNELO_MEMORY_DIR=str(_REPO)
+    assert "MNELO_MEMORY_DIR" in test_src, "M22: 测试 env 没传 MNELO_MEMORY_DIR"
+    # 旧硬编码日期 '2026-08-06.json' 应已被 _latest_digest_path 替换
+    assert "_latest_digest_path" in test_src, "M22: digest 应改 _latest_digest_path (按 mtime)"
