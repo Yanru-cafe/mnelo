@@ -18,6 +18,34 @@ import task_states
 import memory
 
 
+def _assert_isolated_db():
+    """[M36 整改] 隔离守卫 — 拒绝在含真实记忆 chunk 的库上运行.
+
+    防 MNELO_MEMORY_DIR 未指到临时库时误连 live 记忆库并污染 (测试会写
+    task_states/entities/audit_log). 既有隔离模式:
+      MNELO_MEMORY_DIR=$(mktemp -d) && python scripts/init_db.py && \
+      pytest tests/test_m36_transition_guards.py
+    """
+    db = Path(memory.DB_PATH).resolve()
+    if not db.exists():
+        raise SystemExit(f"[test_m36] DB 不存在: {db} — 请先 scripts/init_db.py 初始化隔离库")
+    conn = sqlite3.connect(str(db))
+    n_real = conn.execute(
+        "SELECT COUNT(*) FROM chunks "
+        "WHERE source IS NULL OR "
+        "(source NOT LIKE '%test%' AND source NOT LIKE '%audit%')"
+    ).fetchone()[0]
+    conn.close()
+    if n_real > 0:
+        raise SystemExit(
+            f"[test_m36] 拒绝运行: {db} 含 {n_real} 个真实 chunk (疑似 live 记忆库). "
+            "请用隔离临时库: MNELO_MEMORY_DIR=$(mktemp -d) && python scripts/init_db.py"
+        )
+
+
+_assert_isolated_db()
+
+
 def _setup():
     c = sqlite3.connect(str(memory.DB_PATH))
     c.execute("PRAGMA foreign_keys = OFF")

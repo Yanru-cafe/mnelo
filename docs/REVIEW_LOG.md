@@ -478,3 +478,14 @@
   - test_asof_replay 在本机 usearch index.add 段错误——既有环境问题（REVIEW_LOG 已记录），非本提交引入
   - 调用方核实: MCP memory_task_transition 工具契约明示 reason 必填；CLI task_manager.py 用 `reason or "(no reason)"` 兜底；test_review_fixes 全部 transition 调用带非空 reason——M36 always-required 行为变更无运行时破坏
   - docs 0886ac9: 内容与实测一致（rebuild_index.py --fresh 重建 17 chunk 恢复启动崩溃；f32 Index load f16 文件 2/2 崩已复现），zh/en/RUNBOOK 三处同步
+
+## 2026-08-06 21:34 审查 eed483f..（M36 2 低危整改）
+- 范围: eed483f 之后工作区整改 2 低危（未先提交，随本 commit 一并 push）
+- 整改:
+  - [低 2] task_states.py transition() docstring: "force: bypass allowed graph (要求 reason)" → "force: bypass allowed graph; reason 仍必填 (D8 纠正门需审计痕迹)" + reason 行补 "恒必填, 不依赖 force"。消除「仅 force 时需 reason」歧义，与 M36 行为一致。
+  - [低 1] tests/test_m36_transition_guards.py: 加模块级 `_assert_isolated_db()` fail-fast 守卫——解析出的 DB 若含真实 chunk（source 非 test/audit）则 SystemExit，拒绝对 live 记忆库写入；DB 不存在也给可操作提示。既有隔离模式不变（mktemp + init_db.py + MNELO_MEMORY_DIR）。
+- 验证:
+  - 隔离临时库 test_m36 → 10/10 通过（守卫生效放行）
+  - 守卫对 live 库（30 真实 chunk）→ 正确拒绝运行
+  - 守卫对不存在 DB → 清晰 SystemExit 提示
+- 结论: 2 低危整改完成，行为无回归（docstring 为纯注释；守卫只在含真实数据时阻断）。
