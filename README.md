@@ -34,6 +34,7 @@ It runs **entirely on your own computer** (a single local file). Nothing goes to
 - **4-way recall + RRF** — vector / graph / meta / entity lanes fused without score normalization
 - **memory_type taxonomy** — every memory auto-classified (fact / preference / episode / decision / procedure / ephemeral) by a zero-LLM rule classifier, bilingual (简体/繁體/EN)
 - **L2 autonomous maintenance layer** — optional hygiene pass (importance decay, per-type TTL, purge candidates) with a full **audit_log + undo** trail; fact-promotion that graduates high-value memories to canonical facts
+- **Tasks, loops, and stuck-task proposals** — finite-state tasks, periodic loops, CAS-protected transitions, stale-task proposals (D5 / D7 / D11), and a thin cron wrapper with `launchd` plist
 - **Session-state digest** — a 500–2000 char "current state" summary injected into your agent at session start (Claude Code SessionStart hook / MCP resource)
 - **Vector backends** — runtime must be `usearch` (HNSW, any CPU, f16) or `zvec` (HNSW + native FTS + INT8, AVX2+)
 
@@ -112,19 +113,22 @@ A **500–2000 char digest** (identity facts + recent key decisions + in-progres
 - **MCP tool** `memory_get_digest(ref=None)` (ref = expand a line)
 - **Claude Code SessionStart hook** — auto-injects on every new session
 
-### 🔌 Standard MCP, no lock-in — 14 tools
+### ⏱️ Tasks, loops, and stuck-task proposals
+Every long-running work item is a **task** with a finite state machine (`open` → `in_progress` / `waiting` / `blocked` → `done` / `cancelled`), and every periodic check-in is a **loop** (cron-like trigger + interval + active task). State transitions are CAS-protected (race-safe), every step leaves an audit row, and the loop engine ends a cycle only after the linked task closes — see [📐 DESIGN_TASK_LOOP.md](docs/DESIGN_TASK_LOOP.md) for the state graph and D1–D12 invariants. Three safety nets keep mnelo from acting on its own:
+- **D5 — proposal mode** — L2 only writes audit_log rows (`pass_name='stuck_task'`, `status='proposed'`); an explicit `memory_audit_undo` or `task_states.apply_stale_proposal` is required before any task can be auto-transitioned.
+- **D11 — task/loop TTL exemption** — `memory_forget(kind='task'|'loop')` raises; deletion must go through `task_states.forget_task` / `forget_loop` with a required `reason` (D8 corrective gate).
+- **Append-only audit trail** — `apply_stale_proposal` writes a new row rather than mutating the original; the `audit_log` row plus `revert_sql` keeps every decision reversible.
 
-| Tool | Purpose |
+Stale detection thresholds (D7): `open > 7d` / `waiting > 14d` / `blocked > 3d` / `in_progress > 7d`. The loop tick wrapper (`scripts/mnelo_loop_tick_cron.py`) is a thin shell around `task_states.loop_tick` and is wired to `launchd` (plist in `scripts/launchd/`) — it never mutates state without an explicit `apply_*` from a user or agent.
+
+### 🔌 Standard MCP, no lock-in — 22 tools
+
+| Group | Tools |
 |---|---|
-| `memory_remember` | Write a chunk + entities + relations (auto-classified) |
-| `memory_recall` | 4-way recall + RRF (filters: type/source/session/asof) |
-| `memory_relate` / `memory_forget` / `memory_update` | CRUD with soft-delete + version chain |
-| `memory_graph_query` | 2-hop subgraph navigation |
-| `memory_stats` | Stats incl. `hygiene` sub-key |
-| `memory_get_digest` | Session digest (ref = expand a line) |
-| `memory_maintenance` | Run L2 passes (dry-run default) |
-| `memory_audit_list` / `memory_audit_undo` | Audit trail + undo |
-| `memory_entity_resolve` / `memory_list_entities` / `memory_search_relations` | Entity management |
+| **Write** | `memory_remember` · `memory_update` · `memory_relate` |
+| **Read** | `memory_recall` · `memory_graph_query` · `memory_entity_resolve` · `memory_list_entities` · `memory_search_relations` |
+| **Tasks & loops** | `memory_task_create` · `memory_task_transition` · `memory_task_list` · `memory_task_replay` · `memory_loop_create` · `memory_loop_update` · `memory_loop_list` · `memory_loop_tick` |
+| **Hygiene** | `memory_forget` (chunk/entity/relation) · `memory_maintenance` (L2 dry-run default) · `memory_audit_list` · `memory_audit_undo` · `memory_stats` · `memory_get_digest` |
 
 ### 🌏 Bilingual, every layer
 - Locale auto-detect (`MNELO_MEMORY_LANG` > `LC_ALL` > `LANG` > `en`)

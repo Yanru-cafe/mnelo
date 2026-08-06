@@ -34,6 +34,7 @@ mnelo 是**你的 AI 助手的记忆**——像一本你的 AI 随身携带的�
 - **4 路召回 + RRF**——vector / graph / meta / entity 四路融合，无需分数归一化
 - **memory_type 类型谱系**——每条记忆自动分类（fact / preference / episode / decision / procedure / ephemeral），**零 LLM 规则分类器**，支持简体/繁體/英文
 - **L2 自主维护层（可选）**——卫生 pass（importance 衰减、按类型 TTL、purge 候选）+ 完整 **audit_log + undo** 审计链；事实晋升（高频记忆升为 canonical_fact）
+- **任务、循环与停滞检测提议**——有限状态任务、周期循环、CAS 保护转移、停滞任务提议（D5 / D7 / D11），含 cron 包装器 + launchd plist
 - **会话状态摘要**——500–2000 字"当前状态"摘要，会话开场自动注入（Claude Code SessionStart 钩子 / MCP resource）
 - **向量后端**——运行时必须 `usearch`（HNSW，任意 CPU，f16）或 `zvec`（HNSW + 原生 FTS + INT8，AVX2+）
 
@@ -112,19 +113,22 @@ mnelo 四路用标准 `k=60`，另加一个小 `0.05/sqrt(rank)` boost 给已知
 - **MCP tool** `memory_get_digest(ref=None)`（ref = 展开某行）
 - **Claude Code SessionStart 钩子**——每次新会话自动注入
 
-### 🔌 标准 MCP，无锁定——14 个工具
+### ⏱️ 任务、循环与停滞检测提议
+每个长期工作项是**任务**（有限状态机：`open` → `in_progress` / `waiting` / `blocked` → `done` / `cancelled`），每次周期检查是**循环**（cron 触发器 + 间隔 + 活跃任务）。状态转移 CAS 保护（并发安全），每步留审计行，循环引擎仅在关联任务关闭后结束周期——状态图与 D1–D12 不变量见 [📐 DESIGN_TASK_LOOP.md](docs/DESIGN_TASK_LOOP.md)。三道安全网防止 mnelo 自主行动：
+- **D5 — 提议模式** — L2 只写 audit_log 行（`pass_name='stuck_task'`，`status='proposed'`）；任何任务自动转移前必须显式 `memory_audit_undo` 或 `task_states.apply_stale_proposal`。
+- **D11 — task/loop TTL 豁免** — `memory_forget(kind='task'|'loop')` 直接抛错；删除必须走 `task_states.forget_task` / `forget_loop`，且必须填 `reason`（D8 显式纠正门）。
+- **Append-only 审计轨迹** — `apply_stale_proposal` 写新行不改原行；audit_log 行 + `revert_sql` 让每个决策可逆。
 
-| 工具 | 用途 |
+停滞检测阈值（D7）：`open > 7 天` / `waiting > 14 天` / `blocked > 3 天` / `in_progress > 7 天`。循环 tick 包装器（`scripts/mnelo_loop_tick_cron.py`）是 `task_states.loop_tick` 的薄壳，配 `launchd` plist（`scripts/launchd/`）——未经用户或 Agent 显式 `apply_*`，永不主动改状态。
+
+### 🔌 标准 MCP，无锁定——22 个工具
+
+| 分组 | 工具 |
 |---|---|
-| `memory_remember` | 写入 chunk + 实体 + 关系（自动分类） |
-| `memory_recall` | 4 路召回 + RRF（filters：type/source/session/asof） |
-| `memory_relate` / `memory_forget` / `memory_update` | CRUD，软删 + 版本链 |
-| `memory_graph_query` | 2-hop 子图导航 |
-| `memory_stats` | 统计，含 `hygiene` 子键 |
-| `memory_get_digest` | 会话摘要（ref = 展开某行） |
-| `memory_maintenance` | 跑 L2 pass（默认 dry-run） |
-| `memory_audit_list` / `memory_audit_undo` | 审计轨迹 + 撤销 |
-| `memory_entity_resolve` / `memory_list_entities` / `memory_search_relations` | 实体管理 |
+| **写入** | `memory_remember` · `memory_update` · `memory_relate` |
+| **读取** | `memory_recall` · `memory_graph_query` · `memory_entity_resolve` · `memory_list_entities` · `memory_search_relations` |
+| **任务与循环** | `memory_task_create` · `memory_task_transition` · `memory_task_list` · `memory_task_replay` · `memory_loop_create` · `memory_loop_update` · `memory_loop_list` · `memory_loop_tick` |
+| **维护** | `memory_forget`（chunk/entity/relation）· `memory_maintenance`（L2 默认 dry-run）· `memory_audit_list` · `memory_audit_undo` · `memory_stats` · `memory_get_digest` |
 
 ### 🌏 每一层都双语
 - 语言自动检测（`MNELO_MEMORY_LANG` > `LC_ALL` > `LANG` > `en`）
