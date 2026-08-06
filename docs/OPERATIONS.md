@@ -138,9 +138,10 @@ bash scripts/install.sh
 # Choose:
 #   1) memory_dir = /var/lib/mnelo (or /home/mnelo)
 #   2) backend = 'usearch' (don't rely on auto chain — most KVM1 lack AVX2)
-#   3) Linux service: systemd unit example in RUNBOOK.md §5.2
-#      (mnelo doesn't ship a unit file — copy the template; setsid nohup
-#      fallback for container / no-systemd hosts, also in §5.2)
+#   3) Linux service: install.sh ships scripts/systemd/mnelo-mcp.service —
+#      run install as root to get the system-level unit (WantedBy=multi-user.target)
+#      + `systemctl enable --now mnelo-mcp`; container / no-systemd hosts use
+#      the setsid nohup fallback in RUNBOOK.md §5.2
 #   4) backup schedule = local snapshot dir on same VPS (option 1)
 
 # Verify

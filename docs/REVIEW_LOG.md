@@ -551,3 +551,14 @@
   - RUNBOOK.md 标题/§1 系统要求: 改为 "macOS launchd / Linux systemd"。
   - OPERATIONS.md VPS 部署步骤 3: 引用更新为 "systemd unit 模板见 RUNBOOK §5.2"。
 - 原 §5.2 测试 SSE 顺延为 §5.3 (无外部交叉引用破坏, 已 grep 验证)。
+
+## 2026-08-06 23:15 完善 mnelo Linux 服务管理 — systemd 支持（模板 + install.sh 集成）
+
+- 背景: 22:50 只写了 RUNBOOK §5.2 文档（手动抄 unit）。用户要求"完善 Linux 服务管理, 比如 systemd 支持" → 从文档升级为**代码级支持**。
+- 改动:
+  - 新增 `scripts/systemd/mnelo-mcp.service` **unit 模板**（对齐 launchd plist 的 sed 占位符约定: `__LIVE_ROOT__`/`__VENV_PY__`/`__USER_LINE__`/`__WANTED_BY__`）。含 `Restart=always`（应对无 AVX2 usearch 偶发原生崩溃）、`--host 127.0.0.1` 安全绑定、`MNELO_MEMORY_SEARCH_BACKEND=usearch` 显式环境变量（呼应 §2.2 SIGILL 坑）、`MNELO_MEMORY_SERVER_PORT=8086` env（config chain: env > toml > default）、LimitNOFILE/NPROC 资源限制（对齐 launchd plist）、日志写 `<LIVE_ROOT>/logs/`（与 backup/loop_tick cron 同目录）。
+  - `scripts/install.sh` 第 10 步 Linux 分支从"跳过 launchd"升级为真 systemd 安装: **root → 系统级** `/etc/systemd/system/mnelo-mcp.service`（`WantedBy=multi-user.target` + `User=<当前用户>`）; **非 root → 用户级** `~/.config/systemd/user/mnelo-mcp.service`（`WantedBy=default.target`, user unit 不允许 `User=` 故注释）+ `loginctl enable-linger`（失败 warn, 提示 root 手动）。用户级自动 export `XDG_RUNTIME_DIR`（SSH 非登录 shell 连不上 user manager 的坑）。幂等: enable 失败不 abort（`|| warn` 提示手动命令）。
+  - install.sh 头部注释第 6 步: macOS plist / Linux systemd 双路径说明。
+  - `docs/RUNBOOK.md` §5.2 改为引用随包模板 + 自动安装说明; 手动模板里 `StandardOutput` 修正为实际路径（`/path/to/mnelo-data/logs/`, 不留 `__LIVE_ROOT__` 占位符）。
+  - `docs/OPERATIONS.md` VPS 步骤 3: 删除过时的 "mnelo doesn't ship a unit file" → 改为 install.sh 自带模板说明。
+- 验证: `bash -n` 通过; 模板两种 scope 渲染（sed）后 `systemd-analyze verify` **0 unit 错误**（仅假路径可执行性警告 + 系统无关 unit 警告）; 无占位符残留。
