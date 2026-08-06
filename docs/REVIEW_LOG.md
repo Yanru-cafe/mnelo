@@ -193,3 +193,36 @@
     - `_setup()` 清理逻辑在无 `/root/work/mnelo/memory.db` 时抛 `OperationalError: no such table: task_states` 并新建空 memory.db（见发现 1，实测复现）。
     - 静态核对 test_f6_3 断言仅 `len(oks) >= 1`，docstring 所述 "1+3" 契约未落为断言（见发现 2）。
   - 本提交改动的生产代码（无）与上轮已验证的 transition/CAS/错误契约不受影响；F6 依赖的底层（RF3 CAS 双 spawn、RF14 enabled CAS、RF17 乱序 now）在上轮独立 harness 实测通过。
+
+## 2026-08-06 15:41 审查 6b0a5ab..def4136
+- 范围: 6b0a5ab..def4136（共 1 个提交）
+- 提交:
+  - def4136 feat(m5.1): cron/timer loop tick wrapper + launchd plist (6/6 pass)
+- 结论: 发现 4 个问题（1 高 / 1 中 / 2 低中），1 处风格问题
+- 发现:
+  - **[高] scripts/mnelo_loop_tick_cron.py:161 — cron 传 UTC-aware `now`，与存储的 naive 时间戳相减必抛 TypeError，稳态下永远检不出 due loop**
+    - 位置: scripts/mnelo_loop_tick_cron.py:161（`now_ts = datetime.now(timezone.utc).isoformat(timespec="milliseconds")`），交互于 task_states.py:418-426（loop_tick step5）
+    - 问题: `last_cycle_done_at` 由 `task_states.transition()` 以 naive local 写入（`_default_now()` = `datetime.now().isoformat(...)`，task_states.py:72，无 tz）。cron 传入 `+00:00` 的 aware now。loop_tick 里 `now_dt - last_dt` 在 Python 3.10 抛 `TypeError: can't subtract offset-naive and offset-aware datetimes`（已实测复现），被 `except (ValueError, TypeError)` 包装成 `LoopNotFoundError` → cron 每 loop 落入 `error_loops`。
+    - 失败场景: 某 loop 完成第一个 cycle（last_cycle_done_at 被 transition 写入）后，之后每次 tick 都报 `last_cycle_done_at 解析失败`，verdict 永远不是 `due`/`not_due`，只能走 `--dry-run` 首次扫描或手工清空才恢复——本提交要实现的「cron 驱动到期检测」在稳态下完全失效。首次运行（last_cycle_done_at=None）不受影响，掩盖了问题。
+    - 建议: cron 侧与 `_default_now()` 对齐（naive local，或统一改 aware 并同时改 transition 写入端）。
+  - **[中] scripts/launchd/ai.mnelo.loop_tick.plist:14-25 — EnvironmentVariables 缺 `MNELO_MEMORY_DIR`，macOS 部署会打开错误/遗留库或直接崩溃**
+    - 位置: scripts/launchd/ai.mnelo.loop_tick.plist:14-25（仅设 MNELO_HOME / PYTHONPATH / MNELO_MEMORY_SEARCH_BACKEND）
+    - 问题: launchd 不读 shell profile，`config.py:47` 解析 `MNELO_MEMORY_DIR` 缺失时回落 `~/.hermes/memory`（项目 8/6 已移除的旧路径）。两情形: ① 旧路径无库 → `Memory()` 建空库，`_migrate_schema` 对不存在表 ALTER → `sqlite3.OperationalError: no such table: entities`（已实测复现），cron 每 30 分钟崩溃退出 1，且把已删除的 ~/.hermes 重建出来；② 旧库残留 → 对错误 DB 写 audit_log/digest，实际 loop 数据在 MNELO_MEMORY_DIR 里，全部漏检。install.sh Linux 分支（install.sh:266）正确设了 `MNELO_MEMORY_DIR=$LIVE_ROOT`，两分支不对称。
+    - 失败场景: macOS 安装后 `launchctl` 每 30 分钟跑 `mnelo_loop_tick_cron.py` → 日志见 `no such table: entities`（或对错误库空转），loop 到期永远不被发现。
+    - 建议: plist 增加 `<key>MNELO_MEMORY_DIR</key><string>__LIVE_ROOT__</string>`。
+  - **[低中] tests/test_m5_1_cron_tick.py:44-53,88-94,64/112/131/193 — 测试库路径不一致，干净 checkout 上必失败，仅作者本机假绿**
+    - 位置: `_run`/`_create_loop` 子进程 env（:44-53, :88-94）不设 `MNELO_MEMORY_DIR`，子进程 `Memory()` 落到 `~/.hermes/memory/memory.db`；而 `_setup`/断言直接 `sqlite3.connect(_REPO / "memory.db")`（:64,112,131,193）。
+    - 问题: 与上轮在 test_step14_concurrency.py / test_review_rf15_rf16.py 记录的同一反模式在新测试文件复现。干净机器上两个库不同：loop 写入 ~/.hermes（空库时 `loop_create` 前 `Memory()` init 即因缺表崩溃），断言读 repo 根库为 0 行 → 测试失败；即便两库都存在，跨库写入/读取也清不干净。只有作者本机两条路径恰好指向同一带 schema 的 DB 才 6/6 通过。此外 :156/:215 硬编码 digest 日期 `2026-08-06.json`，而脚本用 UTC 当天日期写文件——任何晚于 2026-08-06 的运行该断言必失败，测试是日期敏感的。
+    - 失败场景: 干净 checkout 上 `pytest tests/test_m5_1_cron_tick.py` → `_create_loop` 子进程 init 崩（no such table）或断言读到 0 行；8/7 起即使环境就绪，digest 断言也失败。
+    - 建议: 子进程 env 传 `MNELO_MEMORY_DIR` 指向测试用临时库，断言改读同一路径，digest 断言用脚本输出的实际路径（或相对 mtime 找最新文件）。
+  - **[低] scripts/mnelo_loop_tick_cron.py:22 — docstring 声称的隔离保证与实现不符**
+    - 位置: 文件头 docstring（:21-27）「subprocess mcp_memory…走 MCP 不直接调 task_states.* 防 SQL 写入冲突」
+    - 问题: 实现是 `_mcp_call` 同进程直接 `import memory/task_states` 直连 SQLite，从不 spawn MCP（:86-109 注释也自认）。「多 MCP instance 并行隔离」承诺未兑现，且每次 `_mcp_call` 新建 `Memory()`（触发 embedder 模型加载 + _migrate_schema + 索引构建），每 loop 一次连接，30 分钟 cron 每轮重复开销；并发 tick 时靠的是 SQLite WAL/busy_timeout 而非文档所述的隔离。属误导性文档 + 轻微效率问题。
+    - 失败场景: 维护者据 docstring 认为有跨进程隔离而放松并发约束，或误以为写 MCP 调用可并行。
+  - **[风格] scripts/install.sh:242-277 — 新块 12 空格缩进与仓库 4 空格风格不一致**
+    - 位置: scripts/install.sh:242（M5.1 块起始 `if [ "$(uname -s)"...`）
+    - 问题: 该块位于顶层（前一个备份 `fi` 之后），shell 忽略缩进、语义正确，但与仓库既有缩进风格不统一，易让后续编辑误以为嵌在某函数/条件内。
+- 测试:
+  - 本机无法运行 `pytest tests/test_m5_1_cron_tick.py tests/test_task_states_loop_tick.py`：既有 conftest session fixture 在 `Memory()` 初始化时触发 native 扩展堆损坏（`corrupted size vs. prev_size`，无 AVX2 环境，plist 注释亦承认「测试环境 SIGSEGV 兜底」），属既有环境限制、非本提交引入，与上轮相同。
+  - 已用独立最小片段实测关键契约: ① naive − aware 相减抛 `TypeError`（Finding 1 成立）; ② 空库 `Memory()` init 抛 `OperationalError: no such table: entities`（Finding 2 情形①成立）; ③ `list_loops` 返回 `{loops,count,truncated}` 且 loop 含 loop_id/name/trigger/interval_hours、`loop_tick` 返回 verdict/active_task_id/last_cycle_done_at、`audit_log` 列与 UNIQUE(run_id,pass_name,action_type,ref_id,status) 均与新脚本假设一致（run_id 每次带 uuid 唯一，无约束冲突）。
+  - 提交声称 6/6 pass 无法在本机复现；鉴于 Finding 3，推断通过依赖作者本机 ~/.hermes 与 repo 根 memory.db 路径重合。
