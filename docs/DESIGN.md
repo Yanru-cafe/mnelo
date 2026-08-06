@@ -2,8 +2,8 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.13 · 2026-08-04 · 依据 7/21 修复 + 8/4 实战数据评估 (v0.3 报告) + 8/4 bug 修 (4bd654d) + 8/4 H-1 落地 (d98cd93/3421d99) + 8/4 可逆压缩 (v0.13) 后的状态。
-> **v0.12 变更**（hermes 实战数据评审 8/4 + 主人 deepseek-v4-flash 交叉验证 + bug 修复）——§1.1 **实战回灌**：实测召回量 1.1 次/日（人脑级）+ Phase 1 placeholder id 100% 命名错位 + Phase 2 30 天延迟清的"延期/清"两步半完成状态；**§3.8 §5.6 done bug 修**：`run_purge_worker()` 落地 (commit 4bd654d, 125 行) — 3 phase (clean_orphan_target_ids / 物理删 + set done=1 / vec0 orphan cleanup)；§1.1 标注 TASKS 未建 schema 前置 (`user_confirmed` / `processed_at` / `audit_log` 仍缺 — H0 真前置)；§3.0 memory_type 字段已落地但实战 0% non-fact (根因：写入方不分类 + 无 P1 提取器)；§8.3 P3 升级档触发条件实战 scale 评估 (4344 chunks 距 50 万差 115 倍，延迟 30ms 内 — 升级档面向未来备选)。
+> **版本**：v0.13 · 2026-08-04 · 依据 7/21 修复 + 8/4 实际数据评估 (v0.3 报告) + 8/4 bug 修 (4bd654d) + 8/4 H-1 落地 (d98cd93/3421d99) + 8/4 可逆压缩 (v0.13) 后的状态。
+> **v0.12 变更**（hermes 实际数据评审 8/4 + 主人 deepseek-v4-flash 交叉验证 + bug 修复）——§1.1 **实际回灌**：实测召回量 1.1 次/日（人脑级）+ Phase 1 placeholder id 100% 命名错位 + Phase 2 30 天延迟清的"延期/清"两步半完成状态；**§3.8 §5.6 done bug 修**：`run_purge_worker()` 落地 (commit 4bd654d, 125 行) — 3 phase (clean_orphan_target_ids / 物理删 + set done=1 / vec0 orphan cleanup)；§1.1 标注 TASKS 未建 schema 前置 (`user_confirmed` / `processed_at` / `audit_log` 仍缺 — H0 真前置)；§3.0 memory_type 字段已落地但实际 0% non-fact (根因：写入方不分类 + 无 P1 提取器)；§8.3 P3 升级档触发条件实际 scale 评估 (4344 chunks 距 50 万差 115 倍，延迟 30ms 内 — 升级档面向未来备选)。
 > **v0.13 变更**（8/4 可逆压缩设计）——§4.5.2 新增**可逆压缩**（⟵ 借鉴 Headroom CCR）：摘要行带 `source_chunk_ids` provenance 指针 + `memory_get_digest(ref=...)` 按需展开；信息单源不破，截断可恢复。§5.7 工具清单同步 `memory_get_digest(ref=None)` 双模式。
 > **v0.3 变更**：全方位专家评审后补入——产品边界（§1.4）、记忆类型谱系（§3.0）、双轨组织模型（§4.8）、新近度加权（§4.9）、来源可信度（§4.10）、并发与保留（§3.9）、工具收敛（§6.5）。
 > **v0.4 变更**：采纳 hermes agent 评审反馈——P1 提取拆 P1a(规则)/P1b(LLM)（§5.2）、correct() 与 user_confirmed 边界明确化（§3.7）、工具收敛提前到 P1 末（§9）、git 快照改 `VACUUM INTO` 且不进主仓（§3.8）。
@@ -14,7 +14,7 @@
 > **v0.9 变更**（主人指示 + 整体复查修订）——§12 确立**无道德立场（amoral by design）**原则：mnelo 不做内容价值判断（合法/涉密/冒犯），威胁模型只覆盖"存取机制被滥用"，内容价值判断从设计中移除；§3.0.6 定案 entity 路 type 软加权（硬过滤只限 chunk 路，关掉开放决策）；§4.11.4 补 aspect 消费端（lane 偏向 + 权重映射）；§9 P0 标注 §3.0 已落地。
 > **v0.10 变更**：6 处遗留加深到可实施粒度——§3.4.1 写事务边界表 + embed 同步/异步取舍；§4.1.1-4.1.3 FTS5 中文分词器决策（trigram）+ 外部内容表触发器 + 软删一致性 + BM25×importance 查询；§4.8.1 location 各 lane 过滤语义 + 空子树/复合约束；§4.11 排序因子默认值（λ₁=0.3/λ₂=0.2/α=0/半衰期 30 天）；§4.5.1 digest 生成刷新机制（三块来源 + dirty 触发 + LLM 可选）；§3.7.1 dedup_check 结构化三元组匹配键 + 场景表。
 > **v0.11 变更**（hermes 评审 8/4 采纳）——§8.3 适配器分档加 usearch 档 + **fail-fast 回落策略**（显式配置不可用默认报错，`ALLOW_FALLBACK=1` 才回落）；§9 阶段说明（P3 已落地，P1 卫生 pass **已排期 Q3 末**，任务分解在 `docs/TASKS_L2_HYGIENE.md`）；§3.6 跨存储一致性（Q1/Q2）→ 指到 TASKS A7（含 auto-repair + drift 指标）。
-> **v0.12 变更**（实战数据评审 + deepseek 交叉 + bug 修 8/4）——见顶部说明。
+> **v0.12 变更**（实际数据评审 + deepseek 交叉 + bug 修 8/4）——见顶部说明。
 > **约定**：`P0/P1/P2/P3` = 演进阶段，见 §9。所有设计遵循现有六条 design tenets（local-first / 单文件 / 标准 MCP / 双语 / boring & predictable / measured）。
 > **借鉴来源**：标 `⟵ 借鉴 <系统>` 的条目，其思路来自对 Mem0 / Letta(MemGPT) / Zep(Graphiti) / Cognee / LangMem / SuperMemory / Hindsight 的调研（2026-08），按 mnelo 的 local-first 单机约束裁剪。
 
@@ -36,37 +36,37 @@
 | 校验 | `validation.py` 已完善（8KB/1KB 上限、控制字符/bidi/零宽清洗、ValidationError 带字段） |
 | 维护 | **8/4 落地 `run_purge_worker()`**（commit 4bd654d）：3 phase = ①清 placeholder id（v0.5.12 100% 脏数据已清 4198 项）② 30 天延迟清的物理删 + set done=1（不破坏 §3.8 意图）③ vec0 orphan cleanup。**forget() 行为完全不变**——worker 是独立清理入口，主人 cron 可调 |
 
-### 1.1.1 实战数据回灌 (2026-08-04, 8/4 hermes 评审 + deepseek 交叉验证)
+### 1.1.1 实际数据回灌 (2026-08-04, 8/4 hermes 评审 + deepseek 交叉验证)
 
-> 详细审计报告：`/Users/apple/study/predict/research/2026-08-04-mnelo-schema-drift/mnelo_schema_audit.md` (v0.3, 38 KB / 650 行)
-> 实战 DB 真值: `~/.hermes/memory/memory.db` 44.72 MB / 4344 chunks / 4498 entities / 56730 relations / 9015 recall_log
+> 详细审计报告：`mnelo_schema_audit.md` (v0.3, 38 KB / 650 行)
+> 实际 DB 真值: `$MNELO_MEMORY_DIR/memory.db` 44.72 MB / 4344 chunks / 4498 entities / 56730 relations / 9015 recall_log
 
-**实战规模与用法 (主人 14 天, 7/19-8/4):**
+**实际规模与用法 (主人 14 天, 7/19-8/4):**
 
-| 指标 | 实战真值 | DESIGN 假设 | 偏差 |
+| 指标 | 实际真值 | DESIGN 假设 | 偏差 |
 |---|---|---|---|
 | 召回频次 | **1.1 次/日** (7/21-8/4 真战, 116 次/13 days) | 持续活跃 | **人脑级, 不是搜索引擎级** |
 | p50/p95/p99 latency | 13.7ms / 30.9ms / 68.2ms | "<~50万向量才换 zvec" | 当前 scale 完全够用 |
-| 召回空窗率 (实战 13/13 天) | **0%** | — | demo 阶段 3.3%, 实战 0% |
-| memory_type 分布 | **100% fact** (4344/4344) | 6 类系统落地 | **6 类实战空架子** — 根因：写入方 (Hermes agent, conv 68%) 不分类 + 无 P1 提取器 |
+| 召回空窗率 (实际 13/13 天) | **0%** | — | demo 阶段 3.3%, 实际 0% |
+| memory_type 分布 | **100% fact** (4344/4344) | 6 类系统落地 | **6 类实际空架子** — 根因：写入方 (Hermes agent, conv 68%) 不分类 + 无 P1 提取器 |
 | chunks soft-deleted | 12 (14 天) | — | forget() 几乎没用过 |
 | entities soft-deleted | 115 (14 天) | — | 同上 |
 | purged_queue 入队 | 4308 (7/18 升级脏数据) | — | **100% target_id 命名错位** (placeholder id) — 8/4 bug 2 修后剩 110 真软删项 |
 
-**TASKS 依赖的 schema 前置 (8/4 实战验证, 仍缺):**
+**TASKS 依赖的 schema 前置 (8/4 实际验证, 仍缺):**
 
-| 主人 DESIGN § 引用 | 预期 schema | 实战状态 | 影响 |
+| 主人 DESIGN § 引用 | 预期 schema | 实际状态 | 影响 |
 |---|---|---|---|
 | §3.7 实体纠正 `Memory.correct()` 受 `user_confirmed` 不可变规则约束 | entities `user_confirmed` 列 | **缺** | §3.7 设计落不了, TASKS H0 之前需建 |
 | TASKS_L2_HYGIENE H5 watermark 需 `chunks/entities.processed_at` | 两表 `processed_at` 列 | **缺** | H5 落不了, H0 之前需建 |
 | TASKS_L2_HYGIENE H0 audit_log + Proposal/Policy/Applier 基建 | `audit_log` 表 | **缺** | H0 整个 L2 落不了, 必前置 |
-| §3.0 memory_type 6 类 | chunks/entities `memory_type` 列 | ✅ 落地 (但 0% 实战) | 字段已加, 实战全 fact |
+| §3.0 memory_type 6 类 | chunks/entities `memory_type` 列 | ✅ 落地 (但 0% 实际) | 字段已加, 实际全 fact |
 | 双时态 `valid_from/valid_until` | 两表 | ✅ | 真用 |
 
-**实战数据驱动的 actionable 调整 (按 v0.3 报告 §9):**
+**实际数据驱动的 actionable 调整 (按 v0.3 报告 §9):**
 
-- §1.4 边界: mnelo 是"个人单机记忆系统", 实战召回量 1.1 次/日确认 = 不是搜索引擎设计
-- §8.3 P3 升级档触发条件: 实战 4344 chunks / 30ms 内延迟 = 升级档面向未来备选, 不是当前瓶颈 (P3 已在 v0.11 落地 usearch + zvec 适配器)
+- §1.4 边界: mnelo 是"个人单机记忆系统", 实际召回量 1.1 次/日确认 = 不是搜索引擎设计
+- §8.3 P3 升级档触发条件: 实际 4344 chunks / 30ms 内延迟 = 升级档面向未来备选, 不是当前瓶颈 (P3 已在 v0.11 落地 usearch + zvec 适配器)
 - §3.0 memory_type: 6 类系统落不了, **必须先有 P1 提取器** (P1a 规则 + P1b LLM, §5.2)
 - §3.8 §5.6 purge: **8/4 done bug 已修** (`run_purge_worker`), 但主人 cron 需手动调 (`m.run_purge_worker(dry_run=False)` 周期跑)
 
@@ -80,14 +80,14 @@
 6. **无召回质量评测**——`benchmark.py` 只测延迟；`recall_log` 里的 `recall_details_json`（每 hit 的 method/rank/score）**无人消费**做质量分析。17 个指标全是运维视角，没有 precision@k。
 7. **写路径无显式事务/回滚**——remember/update 的 chunk+entities+relations+vector 多步写入依赖 Python sqlite3 的隐式事务（无 `BEGIN`/`ROLLBACK` 包裹）。中途异常（如 embed 失败）时隐式事务保持打开，单例连接复用下后续操作可能把部分数据一并提交。
 
-### 1.2.1 实战数据驱动的 8/4 新增短板
+### 1.2.1 实际数据驱动的 8/4 新增短板
 
-> 8/4 hermes 实战数据评估 (v0.3 报告) + deepseek-v4-flash 交叉验证 + commit 4bd654d 修复
+> 8/4 hermes 实际数据评估 (v0.3 报告) + deepseek-v4-flash 交叉验证 + commit 4bd654d 修复
 
-- **8. §3.8 §5.6 30 天延迟清半完成**（已修）——v0.5.12 之前 `forget()` 入 `purged_queue done=0` 后，**没有任何代码路径 set done=1**，也没物理删 worker。8/4 落地 `run_purge_worker()` 3 phase 修复：①清 placeholder id (v0.5.12 100% 脏数据已清 4198 项) ② 物理删 + set done=1 ③ vec0 orphan cleanup。**实战影响**: 8/16 起 30 天到期的真软删项 (110 项, 12 chunk + 97 entity 软删过 + 1 entity edge) 会自动 Phase 2 物理删
-- **9. §3.0 memory_type 6 类系统实战空架子**（未修，待 P1 提取器）——memory_type 字段已加 (f1bc1bf), 但 4344/4344 chunks 100% fact。根因：写入方 (Hermes agent, conv 68%) 从不分类 + 系统无 P1 提取器 (P1a 规则 + P1b LLM, §5.2) 自动推断。**实战意义**: 6 套生命周期 + 6 套矛盾规则 + H3 TTL 表 = 等 P1 提取器落地才能真用
-- **10. §1.1 现状与实战 schema 漂移 3 项**（未修，待 H-1）——TASKS 依赖的 `user_confirmed` / `processed_at` / `audit_log` 仍缺（详见 §1.1.1 TASKS schema 前置表）— H-1 是 H0 真前置，不修 H-1 整个 L2 落不了
-- **11. §8.3 P3 升级档触发条件实战 scale 错配**（v0.11 已定档，**scale 评估不需改**）——实战 4344 chunks 距 §8.3 "向量 >~50 万" 升级档差 115 倍, 实战延迟 30ms 内；usearch/zvec 面向未来备选, 不是当前瓶颈
+- **8. §3.8 §5.6 30 天延迟清半完成**（已修）——v0.5.12 之前 `forget()` 入 `purged_queue done=0` 后，**没有任何代码路径 set done=1**，也没物理删 worker。8/4 落地 `run_purge_worker()` 3 phase 修复：①清 placeholder id (v0.5.12 100% 脏数据已清 4198 项) ② 物理删 + set done=1 ③ vec0 orphan cleanup。**实际影响**: 8/16 起 30 天到期的真软删项 (110 项, 12 chunk + 97 entity 软删过 + 1 entity edge) 会自动 Phase 2 物理删
+- **9. §3.0 memory_type 6 类系统实际空架子**（未修，待 P1 提取器）——memory_type 字段已加 (f1bc1bf), 但 4344/4344 chunks 100% fact。根因：写入方 (Hermes agent, conv 68%) 从不分类 + 系统无 P1 提取器 (P1a 规则 + P1b LLM, §5.2) 自动推断。**实际意义**: 6 套生命周期 + 6 套矛盾规则 + H3 TTL 表 = 等 P1 提取器落地才能真用
+- **10. §1.1 现状与实际 schema 漂移 3 项**（未修，待 H-1）——TASKS 依赖的 `user_confirmed` / `processed_at` / `audit_log` 仍缺（详见 §1.1.1 TASKS schema 前置表）— H-1 是 H0 真前置，不修 H-1 整个 L2 落不了
+- **11. §8.3 P3 升级档触发条件实际 scale 错配**（v0.11 已定档，**scale 评估不需改**）——实际 4344 chunks 距 §8.3 "向量 >~50 万" 升级档差 115 倍, 实际延迟 30ms 内；usearch/zvec 面向未来备选, 不是当前瓶颈
 - **12. P3 跨阶段做事 (v0.11 已落地)** 配对风险**——P3 之后应优先补 P1 卫生 pass (TASKS_L2_HYGIENE H0-H8) 防索引漂移，否则 usearch/zvec 索引可能长期与 chunks 不一致
 
 ### 1.3 现存正确设计（保留，不推倒重来）
@@ -962,10 +962,10 @@ l2.running             = bool         # 防重叠
 - **P1 §5.2 P4 卫生 pass——已排期**：目标 **Q3 2026 末（2026-09-30）前**落地，任务分解见 **`docs/TASKS_L2_HYGIENE.md`**（H1-H8，含时间窗）。否则 usearch/zvec 索引可能长期与 chunks 不一致。`repair_index.py`（TASKS A7）是即时兜底，卫生 pass 是长期解
 - **P3 可观测性**：`[search] backend` 实际生效值由 health_check 报告（C3）+ **drift 指标**（索引孤儿/活跃 chunk 比，TASKS A7）持续观测；后续 L2 audit_log 落地后补到审计链
 
-**阶段执行说明（v0.12 实战数据回灌 8/4）**：
+**阶段执行说明（v0.12 实际数据回灌 8/4）**：
 - **§3.8 §5.6 done bug 已修**（commit 4bd654d，2026-08-04）：`run_purge_worker()` 3 phase 落地，v0.5.12 100% placeholder id 脏数据已清 4198 项；剩 110 项真 mnelo 软删项等 8/16-8/28 30 天后 Phase 2 自动物理删 + set done=1。**主人口径**: 主人 cron 可定期调 `m.run_purge_worker(dry_run=False)` (e.g. 每日 1 次) 维护 purge 状态
-- **TASKS 依赖的 schema 前置 (H-1) 仍未建**: `user_confirmed` / `processed_at` / `audit_log` 3 项 — H0 之前必须建, 否则整个 L2 落不了 (§1.1.1 实战回灌表)
-- **memory_type 6 类系统**: 字段已加 (f1bc1bf), 实战 0% non-fact — 必须等 P1 提取器 (§5.2 P1a 规则 + P1b LLM) 落地才能真用; H3 TTL 表不能先于 P1 跑
+- **TASKS 依赖的 schema 前置 (H-1) 仍未建**: `user_confirmed` / `processed_at` / `audit_log` 3 项 — H0 之前必须建, 否则整个 L2 落不了 (§1.1.1 实际回灌表)
+- **memory_type 6 类系统**: 字段已加 (f1bc1bf), 实际 0% non-fact — 必须等 P1 提取器 (§5.2 P1a 规则 + P1b LLM) 落地才能真用; H3 TTL 表不能先于 P1 跑
 - **P1 卫生 pass 落地步骤调整 (v0.12 修订)**: H-1 (建 3 schema) → H0 (audit_log + 抽象基建) → H1-H8 (H1-H4 Q3 中, H5-H7 Q3 末, H8 同步). 不按此顺序, H0/H5/H7 落不了
 
 ---
@@ -992,7 +992,7 @@ l2.running             = bool         # 防重叠
 | 可信度 | 来源档位映射权重，进 RRF | 已有 confidence/source 字段用满 |
 | 工具面 | 收敛到 ~10 个高层工具，意图分组 | LLM 工具选择是错误源，越少越好 |
 | 并发 | 单写者 + WAL + 多读者，不引多写者 | 边界声明 + 事务串行 |
-| 实战回灌机制 (v0.12) | v0.3 报告 + deepseek 交叉验证 → §1.1.1 新增实战回灌表 + §1.2.1 实战新增短板 5 项 | DESIGN 跟实战漂移会被定期 v0.x 报告抓回，不再是"自证循环" |
+| 实际回灌机制 (v0.12) | v0.3 报告 + deepseek 交叉验证 → §1.1.1 新增实际回灌表 + §1.2.1 实际新增短板 5 项 | DESIGN 跟实际漂移会被定期 v0.x 报告抓回，不再是"自证循环" |
 | 30 天延迟清 (v0.12) | `run_purge_worker()` 3 phase (commit 4bd654d)：①清 placeholder id ②物理删 + set done=1 ③vec0 orphan cleanup；forget() 行为完全不变 | deepseek 提议; 不破坏 §3.8 30 天延迟意图; 主人 cron 定期调 |
 
 ---

@@ -161,7 +161,7 @@ class _FakeZvec:
         return col
 
     class DataType:
-        """[8/6 fix] zvec 0.6 全部 data_type, 实战用 VECTOR_FP32 + STRING."""
+        """[8/6 fix] zvec 0.6 全部 data_type, 实际用 VECTOR_FP32 + STRING."""
         VECTOR_FP16 = "VECTOR_FP16"
         VECTOR_FP32 = "VECTOR_FP32"
         VECTOR_FP64 = "VECTOR_FP64"

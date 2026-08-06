@@ -1,7 +1,7 @@
 """
 [H-3 8/4] L2 主动层真 apply 路径测试 (隔离版本).
 
-实战 8/4 ephemeral 全清完后, 测试用 setUp/tearDown INSERT 临时 fixture:
+实际 8/4 ephemeral 全清完后, 测试用 setUp/tearDown INSERT 临时 fixture:
   - 每个 test 自己 insert 临时 chunk (memory_type='ephemeral' / 'fact')
   - 测试结束 DELETE 临时 fixture
   - 这样跨 test 互不干扰
@@ -12,8 +12,8 @@
   - [§5.9.2 watermark 推进] failed > 0 不推 watermark
   - [§5.9.2 confirm_destructive] TTL 真 apply 需 confirm_destructive=True
   - [§5.9.3 revert_sql] 字段填好
-  - [实战] ephemeral chunk 真 soft-delete + purged_queue 入队
-  - [实战] decay_importance 真 UPDATE chunks.importance
+  - [实际] ephemeral chunk 真 soft-delete + purged_queue 入队
+  - [实际] decay_importance 真 UPDATE chunks.importance
 """
 import json
 import unittest
@@ -47,7 +47,7 @@ class _H3Fixture:
         )
         # 改 ephemeral timestamp 8 天前 (用 UPDATE 设 valid_until / timestamp?)
         # [fix 8/4] chunks.timestamp 是 read-only (created_at)? 看 schema
-        # 实战: created_at 是 INSERT 时, 改 8 天前需要 UPDATE timestamp
+        # 实际: created_at 是 INSERT 时, 改 8 天前需要 UPDATE timestamp
         from datetime import datetime, timedelta
         eight_days_ago = (datetime.now() - timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%S")
         self.mem._exec_clean(
@@ -76,9 +76,9 @@ class TestH3DecayApply(_H3Fixture, unittest.TestCase):
     """[H-3 §5.9] 真 apply decay_importance (用临时 fixture)"""
 
     def test_01_real_decay_updates_chunks_importance(self):
-        """[实战 8/4] dry_run=False 真 UPDATE chunks.importance (直接调 _apply_xxx)
+        """[实际 8/4] dry_run=False 真 UPDATE chunks.importance (直接调 _apply_xxx)
 
-        [fix 8/4] 不跑 run_maintenance (实战 50 cap + 顺序依赖),
+        [fix 8/4] 不跑 run_maintenance (实际 50 cap + 顺序依赖),
         直接调 _apply_decay_importance 验证 UPDATE + audit_log applied 行
         """
         before_imp = self.mem._exec_clean(
@@ -234,7 +234,7 @@ class TestH3TTLApply(_H3Fixture, unittest.TestCase):
             f"没 confirm_destructive 应有 failed: {r['failed']}")
 
     def test_02_ttl_with_confirm_destructive_actually_soft_deletes(self):
-        """[实战 8/4] confirm_destructive=True → ephemeral > 7d 真 soft-delete (fixture)"""
+        """[实际 8/4] confirm_destructive=True → ephemeral > 7d 真 soft-delete (fixture)"""
         self.mem.run_maintenance(
             passes=["hygiene"], dry_run=False, confirm_destructive=True,
         )
@@ -247,7 +247,7 @@ class TestH3TTLApply(_H3Fixture, unittest.TestCase):
             "fixture ephemeral 应被软删 (valid_until != NULL)")
 
     def test_03_soft_deleted_chunks_go_to_purged_queue(self):
-        """[实战 8/4] TTL soft-delete → purged_queue 入队 (30 天延迟清, 跟 §3.8 一致)"""
+        """[实际 8/4] TTL soft-delete → purged_queue 入队 (30 天延迟清, 跟 §3.8 一致)"""
         self.mem.run_maintenance(
             passes=["hygiene"], dry_run=False, confirm_destructive=True,
         )
@@ -261,7 +261,7 @@ class TestH3TTLApply(_H3Fixture, unittest.TestCase):
         self.assertEqual(row["target_kind"], "chunk")
         self.assertEqual(row["done"], 0)
         self.assertGreater(row["purged_at"], "2026-08-04",
-            "purged_at 应在未来 30 天 (实战 8/4 + 30d)")
+            "purged_at 应在未来 30 天 (实际 8/4 + 30d)")
 
     def test_04_watermark_does_not_advance_on_failed(self):
         """[§5.9.2] failed > 0 → l2.last_run.hygiene 不推进"""

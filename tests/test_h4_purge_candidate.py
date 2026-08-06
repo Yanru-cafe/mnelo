@@ -93,7 +93,7 @@ def test_h4_dry_run_does_not_physically_delete():
 
 def test_h4_stats_expose_purge_candidate_count():
     mem = _new_mem()
-    # 30 天前的 ephemeral (TTL 7d) — 更接近实战场景 (95% 的真 purge 是 ephemeral)
+    # 30 天前的 ephemeral (TTL 7d) — 更接近实际场景 (95% 的真 purge 是 ephemeral)
     cid = _insert_old_ephemeral(mem)
     try:
         s = mem.stats()["hygiene"]

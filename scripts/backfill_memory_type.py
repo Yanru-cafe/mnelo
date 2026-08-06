@@ -3,7 +3,7 @@
 [8/4 P1a E5] backfill_memory_type.py — 回填存量 chunks 的 memory_type.
 
 DESIGN §5.2 P1a + TASKS_L2_EXTRACT §E5:
-- 实战 4344/4344 chunks 100% fact (v0.3 报告 §2) — 写路径 P1a 已修 (Batch 2)
+- 实际 4344/4344 chunks 100% fact (v0.3 报告 §2) — 写路径 P1a 已修 (Batch 2)
 - 本脚本: 存量 chunks 一键升级 (确定性规则, 直接 UPDATE, 无 LLM)
 - H0 落地后 L2 分类走提案链, 本脚本保持"一次性迁移"边界
 

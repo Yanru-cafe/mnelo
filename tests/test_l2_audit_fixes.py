@@ -2,7 +2,7 @@
 [H-3 audit fix 8/4] 3 真问题修复测试:
   - #1: confirm_destructive 加到 MCP schema (handler 自动透传)
   - #4: timestamp format 统一 (Python now() T+ ISO 跟 chunks.timestamp 一致)
-  - #5: audit_log GC 实战 (默认 enabled, dry-run supports)
+  - #5: audit_log GC 实际 (默认 enabled, dry-run supports)
 
 隔离模式: 每个 test 用自己的 row_ids 验证, 真删前 verify.
 """
@@ -14,7 +14,7 @@ from memory import Memory, now
 
 
 class TestAuditGC(unittest.TestCase):
-    """[H-3 audit #5] audit_log GC 实战"""
+    """[H-3 audit #5] audit_log GC 实际"""
 
     @classmethod
     def setUpClass(cls):
@@ -31,15 +31,15 @@ class TestAuditGC(unittest.TestCase):
         # dry_run gc
         stats = self.mem._run_audit_gc(dry_run=True)
         after = self.mem._exec_clean("SELECT COUNT(*) FROM audit_log").fetchone()[0]
-        # 实战: stats 报告有数字, but after == before (不真删)
+        # 实际: stats 报告有数字, but after == before (不真删)
         self.assertEqual(before, after, "dry_run 不 mutate audit_log")
-        # 3 字段都有 (实战 v0.2 TASKS §3)
+        # 3 字段都有 (实际 v0.2 TASKS §3)
         self.assertIn("applied_removed", stats)
         self.assertIn("skipped_removed", stats)
         self.assertIn("proposed_removed", stats)
 
     def test_02_gc_real_run_keeps_recent_applied(self):
-        """[§3 GC] applied + created_at > 90d 实战保留 (实战保留追溯)"""
+        """[§3 GC] applied + created_at > 90d 实际保留 (实际保留追溯)"""
         # 写 1 行 recent applied (今天创建, 应该保留)
         run_id = "test_gc_recent"
         ts = now()
@@ -71,7 +71,7 @@ class TestAuditGC(unittest.TestCase):
         self.mem._conn.commit()
 
     def test_03_gc_removes_old_applied(self):
-        """[§3 GC] applied + created_at > 90d 实战清 (90 天 retention)"""
+        """[§3 GC] applied + created_at > 90d 实际清 (90 天 retention)"""
         # 写 1 行 old applied (91 天前, 应该被清)
         run_id = "test_gc_old_applied"
         old_ts = (datetime.now() - timedelta(days=91)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -96,7 +96,7 @@ class TestAuditGC(unittest.TestCase):
         self.assertIsNone(row, "old applied 应被 GC 清")
 
     def test_04_gc_run_maintenance_dry_run_includes_gc(self):
-        """[§5.7] run_maintenance 返 gc_stats 字段 (实战 EXPOSED)"""
+        """[§5.7] run_maintenance 返 gc_stats 字段 (实际 EXPOSED)"""
         # 启用 l2 first
         self.mem._l2_set("l2.enabled", "1")
         self.mem._l2_set("l2.dry_run", "1")
@@ -160,7 +160,7 @@ class TestTimestampISO(unittest.TestCase):
         if row:
             # [fix audit #4] 应该 'YYYY-MM-DDTHH:MM:SS' (T+) 不是 'YYYY-MM-DD HH:MM:SS' (空格)
             self.assertIn("T", row["purged_at"],
-                f"purged_at 应该是 ISO T+ 格式, 实战: {row['purged_at']}")
+                f"purged_at 应该是 ISO T+ 格式, 实际: {row['purged_at']}")
 
         # Cleanup
         self.mem._exec_clean("DELETE FROM chunks WHERE id = ?", (cid,))
@@ -173,7 +173,7 @@ class TestMCPConfirmDestructive(unittest.TestCase):
     """[H-3 audit #1] confirm_destructive 在 MCP schema 里 exposed"""
 
     def test_01_mcp_memory_maintenance_schema_has_confirm_destructive(self):
-        """MCP schema 实战应该暴露 confirm_destructive 字段"""
+        """MCP schema 实际应该暴露 confirm_destructive 字段"""
         from mcp_server import TOOLS
         tool = next((t for t in TOOLS if t["name"] == "memory_maintenance"), None)
         self.assertIsNotNone(tool, "memory_maintenance 不在 TOOLS")

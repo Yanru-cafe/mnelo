@@ -142,8 +142,8 @@ class TestH1SchemaAndMigration(unittest.TestCase):
             n_user_confirmed_zero + n_user_confirmed_one, n_total_entities,
             "user_confirmed 列跟 entities 总数不匹配"
         )
-        # H-1 落地后没任何 user_confirmed=1 实体 (实战 0 个)
-        # 实战可能其他 test 设过, 所以不强制 == 0
+        # H-1 落地后没任何 user_confirmed=1 实体 (实际 0 个)
+        # 实际可能其他 test 设过, 所以不强制 == 0
 
         # processed_at 验证 (同款 state-agnostic)
         n_processed_chunks_null = self.mem._conn.execute(

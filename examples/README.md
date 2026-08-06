@@ -16,7 +16,7 @@ Python script you can read top-to-bottom, then run with `python examples/0X_*.py
 ## Running
 
 Each script:
-- Uses LIVE mnelo DB (`~/.hermes/memory/memory.db` by default).
+- Uses LIVE mnelo DB (`$MNELO_MEMORY_DIR/memory.db` by default).
 - Tags all writes with `source='example_NN:<purpose>'` so cleanup is easy.
 - Cleans up its own data on exit (even on Ctrl-C).
 - Prints expected output for each step so you know it worked.

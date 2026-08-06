@@ -196,8 +196,7 @@ mnelo is a **generic agent memory system** — Hermes, Claude Code, Cursor, or a
 
 ```toml
 # Default install dir: any visible workspace-adjacent folder (e.g. $HOME/mnelo-data).
-# Override via MNELO_MEMORY_DIR; works for ANY MCP client:
-[digest]
+# Override via MNELO_MEMORY_DIR; works for ANY MCP client:[digest]
 inject_on_initialize = true   # digest rides the MCP initialize response
 ```
 
@@ -213,9 +212,8 @@ Either way, your agent opens each session already knowing the current memory sta
 If you're an AI agent (Claude Code, Cursor, …) setting up mnelo for your user, follow these operational steps:
 
 **1. Choose the install directory (LIVE_ROOT) — propose options, let the user pick or customize.**
-- The **recommended** path is a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<workspace>/mnelo-data`. Hidden dot-dirs under `$HOME` (like `~/.hermes/memory`) work too but are easy to lose track of.
-- Keep it out of the repo you just cloned — memory data isn't source code.
-- Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
+- The **recommended** path is a **visible, workspace-adjacent directory** — e.g. `$HOME/mnelo-data`, `$HOME/.local/share/mnelo`, or `<workspace>/mnelo-data`. Hidden dot-dirs under `$HOME` work too but are easy to lose track of.
+- Keep it out of the repo you just cloned — memory data isn't source code.- Offer candidates and let the user choose or supply their own path — **decide before first use** (the DB, embedder config, and vector index all live here; moving later means stop → migrate → restart).
 - Set via env `MNELO_MEMORY_DIR` (finer control: `MNELO_MEMORY_CONFIG` / `MNELO_MEMORY_DB_PATH`). Persist it in the shell profile (`~/.profile` / `~/.bashrc`) so scripts and the server agree. To customize the health-check report dir, override with `MNELO_CRON_OUTPUT_DIR` (default `$MNELO_MEMORY_DIR/cron/output`, recreated by `health_check.py` on every run).
 
 **2. Choose the vector backend — based on the actual machine.**
@@ -504,7 +502,6 @@ Total disk for a fresh install: **~200 MB** (model is the bulk). After that, gro
 ## 🔄 Repo ↔ live sync (post-commit hook)
 
 mnelo has two copies of every `.py` / `.sql` file: the repo (whatever directory you cloned it into) and the live server dir (set via `MNELO_MEMORY_DIR`; defaults to `~/mnelo-data`). The repo ships a **post-commit hook** that syncs edited files to live, backs up the old version, and runs `health_check.py` after:
-
 ```bash
 cd <your-clone-dir> && git config core.hooksPath .githooks
 ```
