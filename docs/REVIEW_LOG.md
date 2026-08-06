@@ -489,3 +489,17 @@
   - 守卫对 live 库（30 真实 chunk）→ 正确拒绝运行
   - 守卫对不存在 DB → 清晰 SystemExit 提示
 - 结论: 2 低危整改完成，行为无回归（docstring 为纯注释；守卫只在含真实数据时阻断）。
+
+## 2026-08-06 21:44 审查 4bf3e2b..9e32ae2
+- 范围: 4bf3e2b..9e32ae2（共 1 个提交）
+- 提交:
+  - 9e32ae2 fix(ops): health_check.py MCP 探测兼容 PATH 缺 /usr/sbin (5.2h uptime)
+- 结论: 通过（1 极低危，理论性，非整改级）。双探测设计正确：lsof 三路径（lsof//usr/sbin/lsof//usr/bin/lsof）→ ps 兜底找 mcp_server.py 进程 → lsof `-a -p` 二次验证该 pid 持有端口；etime 解析失败不再掩盖 alive（parse_etime 自带 try/except 永不抛，返回 None，正常路径即得 (True,pid,None)）。
+- 发现:
+  - [极低·理论] check_mcp_alive() 的 `except Exception: return (True, int(pid_str), None)` 重复解析 pid_str——若 lsof 输出非数字（理论场景；`lsof -t` 仅输出数字 pid，实测不可触发），int() 在 except 内再抛会传播打崩整个 health_check，而非如实返回 DOWN。建议复用 try 内已解析的 `pid` 变量，纯防御性加固。
+- 验证:
+  - 实测 check_mcp_alive() = (True, 1197572, 831) ✓（本机 lsof 在 /usr/bin/lsof，三路径覆盖）
+  - 场景模拟: ① 裸 lsof 缺失（沙箱 PATH）→ 显式路径回退 → 仍 alive ✓（修复目的达成）② lsof 完全缺失 → (False, None, None) ③ 正常 → alive
+  - parse_etime 边界: ''/garbage → None（永不抛）；'5-03:14:22'→443662；'45:23'→2723
+  - 新 health_check 全流程: ✅ MCP server alive PID 1197572, uptime 0.2h
+- 备注: lsof 完全缺失时仍报 DOWN 属已知边界（ps 兜底也需 lsof 验证端口；根因是 PATH 剥离非 lsof 缺失，超出本提交范围）。后续可用 ss/netstat 做最终兜底增强，非缺陷。
