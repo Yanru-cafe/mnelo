@@ -301,7 +301,55 @@ TOOLS = [
             },
         },
     },
+    # === [8/6 v0.2 M3] task/loop 状态机 — 8 工具 §5.1 (Step 7: task_create) ===
+    {
+        "name": "memory_task_create",
+        "description": "建 task entity + open 状态窗. loop_id 必填时检查 loop 已启用且无 active_task_id (防双 spawn). 返回 task_id + current_state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "任务名 (必填, e.g. '采购耗材')"},
+                "loop_id": {"type": "string", "description": "父 loop; None = 独立一次性任务"},
+                "owner_id": {"type": "string", "description": "责任人 entity id (默认 person:yanru)"},
+                "priority": {"type": "integer", "description": "0-5, default 3"},
+                "summary": {"type": "string", "description": "可选摘要"},
+                "evidence_chunk_id": {"type": "string", "description": "触发此任务的 chunk FK"},
+                "now": {"type": "string", "description": "timestamp 覆盖 (T 分隔)"},
+            },
+            "required": ["name"],
+        },
+    },
 ]
+
+
+# === [8/6 v0.2 M3] task/loop 状态机 MCP tools (DESIGN §5.1) ===
+# 8 新工具: task_create / task_transition / task_list / task_replay /
+#           loop_create / loop_update / loop_tick / loop_list
+#
+# 走 task_states.py 模块函数 (直接 sqlite3 conn), 不走 Memory class.
+# 委托 hook: _handle_task_simple() 跟 _handle_simple() 同形, 只是从模块拿函数.
+
+_TASK_TOOL_REGISTRY = {
+    # name -> (task_states attr, id_field for response wrapping)
+    # 8 个 tool per DESIGN §5.1; 一次 ship 1 个, 减小变更面.
+    "memory_task_create":    ("task_create",    "task_id"),
+}
+
+
+def _handle_task_simple(mem, name: str, args: Dict) -> str:
+    """[8/6 M3] Dispatch task/loop tool to task_states module function.
+
+    task_states 模块函数收 (conn, ...) 不收 Memory, 自己会 commit.
+    result 已是 dict (task_states.task_create returns {task_id, current_state, ...}),
+    不再做 id_field 嵌套包装 — 直接序列化整个 result.
+    """
+    import task_states as _ts
+
+    attr_name, _id_field = _TASK_TOOL_REGISTRY[name]
+    func = getattr(_ts, attr_name)
+    result = func(mem._conn, **args)
+    mem._conn.commit()  # 跟 _handle_simple 同一 commit 边界
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 # === Tool dispatch ===
@@ -494,6 +542,8 @@ def _call_tool(name: str, args: Dict) -> str:
             return _handle_simple(mem, name, args)
         if name in _CUSTOM_HANDLERS:
             return _CUSTOM_HANDLERS[name](mem, args)
+        if name in _TASK_TOOL_REGISTRY:
+            return _handle_task_simple(mem, name, args)
         return json.dumps({"error": f"unknown tool: {name}"}, ensure_ascii=False)
     except ValidationError as ve:
         # validation 错误是 user-facing 的, message 安全 (不带原始 input)
@@ -665,6 +715,12 @@ if _MCP_AVAILABLE:
             rels = data.get("relations", []) if isinstance(data, dict) else []
             rel_type = args.get("relation", "all")
             return f"{_ECHO} {_ECHO_LABEL}    ⇢{len(rels)} relations  (type={rel_type})"
+
+        if name == "memory_task_create":
+            # handler returns {task_id, current_state, status}
+            task_id = data.get("task_id", "?") if isinstance(data, dict) else "?"
+            state = data.get("current_state", "?") if isinstance(data, dict) else "?"
+            return f"{_ECHO} {_ECHO_LABEL}    +{task_id}  (state={state})"
 
         # Fallback for unknown shape
         return f"{_ECHO} {_ECHO_LABEL}    {name}  (ok)"
