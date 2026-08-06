@@ -461,3 +461,20 @@
   - test_m35(7)+test_m34(5)+test_m33(7)+test_m30(5) —— 24/24 通过
   - 跨文件回归 test_m35+test_m4+test_m5_3 —— 23/23 通过
   - 边界实测: reason=12345/None/['x']/42 → 全部 InvalidReasonTypeError
+
+## 2026-08-06 22:05 审查 3977ff2..0886ac9
+- 范围: 3977ff2..0886ac9（共 2 个提交）
+- 提交:
+  - 7dbdf74 feat(m36): transition() API 边界守卫 — reason/task_id/to_state/evidence (85/85 pass)
+  - 0886ac9 docs(guide): 写死 usearch f16 精度约定 + 启动崩溃索引损坏排查（纯文档，3 文件 39 行）
+- 结论: 通过（2 低危，无需整改级发现）。M36 把 transition() reason 从「仅 force=True 必填」改为「always 必填 + isinstance(str) 守卫」，与 docstring「reason: required」契约对齐，与 M33/M35 forget 路径同语义；task_id/to_state/evidence_chunk_id 非 str 早抛 TaskLoopError InvalidInputError（带 field/code），不再依赖 SQLite 类型转换静默失败。
+- 发现:
+  - [低] M36 测试隔离: test_m36_transition_guards.py 直接连 memory.DB_PATH（config 解析），未用既有 init_db.py 临时库模式。_setup() 仅删 m36 前缀行、_create_task 会真建 task——若 MNELO_MEMORY_DIR 指向 live 会轻度污染（m36 前缀隔离，风险低）。建议后续按既有隔离模式加固。
+  - [低] transition() docstring "force: bypass allowed graph (要求 reason)" 措辞可误读为「仅 force 时需 reason」；主契约行 "reason: required" 正确。建议补一句：force 只绕转移图，reason 恒必填。
+- 测试:
+  - 环境: 隔离临时库（scripts/init_db.py + MNELO_MEMORY_DIR + MNELO_MEMORY_SEARCH_BACKEND=usearch）。
+  - test_m36(10) —— 10/10 通过
+  - 回归: test_review_fixes 18/18 + test_task_states_loop_tick 6/6 通过
+  - test_asof_replay 在本机 usearch index.add 段错误——既有环境问题（REVIEW_LOG 已记录），非本提交引入
+  - 调用方核实: MCP memory_task_transition 工具契约明示 reason 必填；CLI task_manager.py 用 `reason or "(no reason)"` 兜底；test_review_fixes 全部 transition 调用带非空 reason——M36 always-required 行为变更无运行时破坏
+  - docs 0886ac9: 内容与实测一致（rebuild_index.py --fresh 重建 17 chunk 恢复启动崩溃；f32 Index load f16 文件 2/2 崩已复现），zh/en/RUNBOOK 三处同步
