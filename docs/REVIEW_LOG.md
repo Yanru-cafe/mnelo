@@ -91,3 +91,31 @@
     - 问题: 与上轮 RF3 修复的 task_create 竞态同型——先读后写。并发两个 `loop_update(enabled=...)` 对同一 loop：双方都读到同一活动窗并各自 UPDATE 关掉，再各自 INSERT 新活动窗，第二个 INSERT 撞 `ux_task_current_state` 部分唯一索引（schema.sql:176）抛 IntegrityError。
     - 失败场景: 该 IntegrityError 在 `_handle_task_simple`/`_call_tool` 不 rollback（[高]#1 根因）→ 关旧窗的 UPDATE 留在隐式事务，下一次成功调用 commit 后 loop 变"无活动窗"（既非 running 也非 dormant），`list_loops`/`transition` 对它的判定失真。建议: enabled 切换也改 CAS 单语句（或 `INSERT ... WHERE NOT EXISTS` + 唯一索引兜底），并随 [高]#1 一起补事务回滚。
 - 测试: 本机 `pytest tests/test_task_states_loop_update_list.py tests/test_mcp_loop_update_list.py -q` → `12 passed`；与 131aae4 之前的 task/loop 套件无 regression（前述 45 过 2 败不变）。
+
+## 2026-08-06 13:35 审查 303128b..f0d3878
+- 范围: 303128b..f0d3878（共 1 个提交）
+- 提交:
+  - `f0d3878` feat(cli): M3 Step 13 — task_manager.py CLI 5 子命令 + 8 测试 (70/70 pass)
+- 结论: 发现 5 个问题（1 高 / 1 中 / 2 低 / 1 信息）。CLI 主体（scripts/task_manager.py）与 task_states.py 既有函数签名逐一比对全部匹配，正确性无虞；但新增测试文件 `test_task_manager_cli.py` 在本机 8/8 FAIL，提交声称的 "70/70 pass" 不可复现。
+- 发现:
+  - **[高] 新增 CLI 测试文件整包硬编码作者 macOS 路径，本机 8/8 FAIL（重复上轮已标记反模式）**
+    - 位置: tests/test_task_manager_cli.py:24（`_PY = "/Users/apple/hermes-agent/venv/bin/python3"`）与 :66-69（`_setup()` 直连 `/Users/apple/.hermes/memory/memory.db`）
+    - 问题: `_PY` 指向作者 mac 专用解释器路径，本机（Linux）不存在；`_setup()` 的 DB 路径正是 CLAUDE.md 明示本机已"彻底移除"的旧 Hermes 目录。两条硬编码任一即可让全部 8 个用例失败——这是上轮在 test_review_fixes.py 已标记并建议修复的同类问题（repo 相对路径）在本轮新建文件中复发。
+    - 失败场景: 本机 `pytest tests/test_task_manager_cli.py -q` → **8 failed**，全部 `sqlite3.OperationalError: unable to open database file`（_setup 在 connect 即抛）；即使绕过 _setup，subprocess 也会因解释器不存在抛 FileNotFoundError。新 CLI 的唯一测试覆盖在非作者机器上完全不可运行，"70/70 pass" 只对作者成立。建议: `_PY` 改为 `sys.executable`（继承当前 pytest 解释器），`_setup()` 的 DB 路径改从 `config.resolve_db_path()` 或 `_REPO` 相对解析。
+  - **[中] 测试无 DB 隔离：CLI 直写 live 记忆库，清理却指向另一路径 → 跑一次套件污染真实记忆库**
+    - 位置: tests/test_task_manager_cli.py:66-76（`_setup()` 清理硬编码旧路径）+ 该文件 subprocess 启动的 CLI（`Memory()` → `config.resolve_db_path()`）
+    - 问题: CLI 本身无 `--db` 参数指向临时库，subprocess 写的库与 `_setup()` 清理的库不是同一个（本机 live 为 `/root/work/mnelo-data/memory.db`）。即使在本轮 [高]#1 修复后（_setup 改对路径），测试也会在**真实的记忆库**上建 `task:20260806-cli-*` / `loop:cli-*` 行；mnelo 是记忆库，测试垃圾直接进 production 数据。
+    - 失败场景: 任一台机器上运行该测试套件 → live DB 出现测试 task/loop 实体与状态窗；若 cleanup 路径与 resolve_db_path 不一致（如作者日后改 MNELO_MEMORY_DIR），垃圾行永不清理，`list tasks`/`memory_task_list` 把测试数据当真实记忆返回。建议: `_setup()` 建临时 DB 并通过 env 传给 subprocess（`MNELO_MEMORY_DIR=<tmp>`）隔离，测试结束清理。
+  - **[低] CLI falsy 默认值掩蔽合法 0 值**
+    - 位置: scripts/task_manager.py:60（`priority=args.priority or 3`）、:77（`interval_hours=args.interval_hours or 24`）、:102/:113（`limit=args.limit or 50`）
+    - 问题: `or` 把假值当未传。task_states 明确支持 priority 0-5（task_create docstring），`--priority 0` 被静默改为 3；`--limit 0` 被当 50。
+    - 失败场景: 用户 `task_manager.py create task --name x --priority 0` 期望最低优先级，落库为 priority=3，与既有 open 任务同权重；低优先级调度语义被 CLI 悄悄吞掉。建议: 用 `if args.X is not None` 区分未传与 0。
+  - **[低] main() 不捕获 task_states 异常，错误裸 traceback**
+    - 位置: scripts/task_manager.py:183-190（`main()` 的 `args.func(args, mem)` 无 try/except）
+    - 问题: `transition`/`task_create`/`loop_tick` 会抛 `TaskLoopError`/`TaskNotFoundError`/`LoopNotFoundError`（非法 transition、未知 id、`--interval-hours` 传负等），CLI 直接打印完整 Python traceback。与 docstring 宣称的"Claude Code friendly / Bash 驱动"定位不符。
+    - 失败场景: `task_manager.py move task:不存在 --to done` → 3 屏 traceback 而非一行中文错误；Claude agent 解析 stderr 提取失败原因变难。数据安全不受影响（sqlite 隐式事务在 close 时回滚），纯 UX。建议: main() 捕获异常打印 `{code}: {message}` 并以非零码退出。
+  - **[信息] `_commit_or_print` 死代码**
+    - 位置: scripts/task_manager.py:29-34
+    - 问题: 定义了但从未调用；docstring 声称"事务包裹 task_states 调用"，函数体却是 `pass`，且实际提交逻辑散布在各 cmd_* 里。具误导性，易让后续维护者以为有统一事务入口。
+    - 建议: 删除该函数，或在 cmd_* 内真正复用统一 commit/rollback 助手。
+- 测试: 本机 `pytest tests/test_task_manager_cli.py -q` → **8 failed**（全部 `OperationalError`，硬编码路径，见[高]#1）；`pytest tests/test_task_loop_m1_schema.py tests/test_task_states_list_replay.py -q` → **10 passed**（本轮对既有 fixture 的清理补充无 regression）。
