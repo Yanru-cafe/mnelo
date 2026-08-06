@@ -248,3 +248,24 @@
   - 全量 pytest 仍被既有 conftest session fixture（`_clean_test_data_session` → `Memory()` → usearch index `load` 原生 abort：`free(): corrupted unsorted chunks`）阻断，与上轮同环境问题（usearch 库/索引格式不匹配），非本提交引入——本提交仅改测试文件。
   - 已绕过该 fixture 直接驱动被改的 5 个测试函数：**5/5 FAIL**，全部因子进程 `OperationalError: unable to open database file`（Finding 1 实测复现）。
   - 已静态核对 `transition()`/`loop_tick` 语义与 F6.3 新断言匹配（见说明）。提交声称 100/100 pass 在本机不可复现；推断作者机通过依赖 `~/.hermes/memory` 与 `MNELO_MEMORY_DIR` 恰好同指。
+
+## 2026-08-06 16:35 审查 131afca..0d0fd1b
+- 范围: 131afca..0d0fd1b（共 1 个提交）
+- 提交:
+  - 0d0fd1b fix(review): M20-M26 review-pass 整改 (104/104 pass)
+- 结论: 通过（发现 1 个低严重度问题）
+- 发现:
+  - **[低] scripts/mnelo_loop_tick_cron.py:32 — M20 整改后 `timezone` 已无使用处，import 残留未清**
+    - 位置: `from datetime import datetime, timezone`（:32）。本提交把 `_log`/`now_ts`/`today` 共 3 处 `datetime.now(timezone.utc)` 全部改为 `datetime.now()`（:44/:165/:213），`timezone` 从此零引用。
+    - 问题: 纯 lint 级清理遗漏（`F401` unused import），无功能影响、无失败场景。属「宁缺毋滥」边缘项，一并记录供下次顺手清理。
+    - 建议: 改为 `from datetime import datetime`。
+- 核实（非发现）:
+  - **M20 修复正确性（实测）**: naive/aware 减法实测——旧版 `now=aware` 与 naive `last_cycle_done_at` 相减抛 `TypeError`，被 `loop_tick` 的 `except (ValueError, TypeError)` 捕获转 `LoopNotFoundError` → cron 记入 `error_loops`，due loop 永远检不出（与提交描述一致）；新版 `now=naive` 正常算 `elapsed_hours`。`now_ts` 用 `datetime.now().isoformat(timespec="milliseconds")` 与 `task_states._default_now()` 同格式（naive local ms）。**前向兼容**: live DB 6 个 loop 均无 `last_cycle_done_at`，旧 cron 从未实际 tick 过，无 aware 时间戳存量需迁移。
+  - **M21 修复成立**: `install.sh` 确实对 `ai.mnelo.loop_tick.plist` 做 `__LIVE_ROOT__`/`__VENV_PY__`/`__MNELO_HOME__` sed 替换（~:246），`MNELO_MEMORY_DIR=__LIVE_ROOT__` 部署时会解析为真实路径，不再回落 `~/.hermes/memory`。
+  - **M25/M26 同源一致性**: `_run_in_subprocess` env 显式注入 `MNELO_MEMORY_DIR=str(_REPO)`（子进程环境被整体替换，无 `MNELO_MEMORY_DB_PATH` 泄漏），`_setup()` 直连 `_REPO/"memory.db"`——`config.resolve_db_path()` 优先 `MNELO_MEMORY_DB_PATH`、次 `MNELO_MEMORY_DIR`，两者解析到同一路径。上一轮「高」发现（子进程回落 `~/.hermes`）确认被修复。
+  - **M22 `_latest_digest_path`**: 读取目录与 cron 默认 `--output-dir`（`Path.home()/".hermes/cron/output/loop_tick"`）一致；按 mtime 取最新，消除跨日硬编码失效。
+  - **新测试契约**: `test_m5_1_naive_now_avoids_subtract_error` 的 `loop_create` 调用省略 `enabled`，默认 `True`（task_states.py:773），契约成立；内嵌子进程 `env=os.environ.copy()` 注入 `MNELO_MEMORY_DIR`，cron 输出 `verdicts:` 行恒打印，断言可判定。
+- 测试:
+  - 全量 pytest 仍被既有 conftest session fixture（`_clean_test_data_session` → `memory.Memory()` → usearch index `load` 原生 abort：`Aborted`/`free(): corrupted unsorted chunks`）阻断。已确认该崩溃在 base（131afca）与 new（0d0fd1b）上、以及全新 DB/索引下均复现——既有环境问题（usearch native 在本 Linux 机不稳定，对应提交描述「测试环境 SIGSEGV 兜底」），**非本提交引入**。本提交未触 conftest / search_index / memory。
+  - 已绕过 conftest 做静态契约验证（等价 M20/M21/M22 三条静态断言，全部通过）：cron/两测试文件 `ast.parse` 语法编译通过；cron 源码无 `timezone.utc`、含 naive `datetime.now().isoformat`；plist 含 `MNELO_MEMORY_DIR`+`__LIVE_ROOT__`；测试 env 含 `MNELO_MEMORY_DIR`+`_latest_digest_path`。
+  - 提交声称 104/104 pass 在本机不可直接复现（usearch native 崩溃阻断任何构造 `memory.Memory()` 的路径），但全部改动点经静态核实与 M20 行为实测与提交描述一致，未发现高/中危问题。
