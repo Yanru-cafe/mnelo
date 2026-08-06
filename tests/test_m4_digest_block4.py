@@ -70,7 +70,7 @@ def _setup():
             "OR id LIKE 'task:20260806-first%' OR id LIKE 'task:20260806-replay%' "
             "OR id LIKE 'task:20260806-second%' "
             "OR id LIKE 'task:20260806-cli%' "
-            "OR id LIKE 'task:tlm12-%'"
+            "OR id LIKE 'task:tlm12-%' OR id LIKE 'task:step14-%' OR id LIKE 'loop:step14-%' OR id LIKE 'task:20260806-step14-%' OR id LIKE 'loop:20260806-step14-%'"
         )
     finally:
         mem._conn.execute("PRAGMA foreign_keys = ON")
