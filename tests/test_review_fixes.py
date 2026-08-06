@@ -337,6 +337,50 @@ def test_rf8_rollback_on_task_create_double_spawn():
 
 # === RF11 [低]: now override 秒级零长 — 严格递增强制 ===
 
+def test_rf17_no_negative_window_when_now_rewound():
+    """[RF17 8/6 review-pass] transition(now=过去) 不应写负长窗 (valid_from > valid_until).
+
+    修因: max(closed_vu, current_active_vf) 推进 1ms.
+    """
+    from memory import Memory
+    m = Memory()
+    try:
+        # 建 task, 初始窗 valid_from='11:00:00'
+        m._conn.execute(
+            "INSERT INTO entities (id, kind, name) VALUES (?, ?, ?)",
+            ("task:rf17-rewind", "task", "rf17"),
+        )
+        m._conn.execute(
+            "INSERT INTO task_states (task_id, state, valid_from, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("task:rf17-rewind", "open", "2026-08-06T11:00:00", "2026-08-06T11:00:00"),
+        )
+        m._conn.commit()
+
+        # transition 回拨到 '10:00:05' (早于活动窗 valid_from)
+        ts_mod.transition(
+            m._conn, task_id="task:rf17-rewind", to_state="in_progress",
+            reason="rewind", now="2026-08-06T10:00:05",
+        )
+
+        # 校验没有负长窗 (valid_from <= valid_until)
+        wins = [
+            tuple(r) for r in m._conn.execute(
+                "SELECT state, valid_from, valid_until FROM task_states "
+                "WHERE task_id='task:rf17-rewind' ORDER BY id",
+            )
+        ]
+        # open 窗: valid_from='11:00:00', valid_until 应 >= '11:00:00.001'
+        # (不能是 10:00:05 — 那是负长窗)
+        first_win = wins[0]
+        assert first_win[2] is not None, "open 窗必须有 valid_until (活动 in_progress 紧跟)"
+        assert first_win[1] <= first_win[2],             f"negative-length window: {first_win}"
+        # valid_until 必须 >= 初始 valid_from (推进至少 1ms)
+        assert first_win[2] >= "2026-08-06T11:00:00",             f"valid_until 应 >= 初始 valid_from '11:00:00', got {first_win[2]}"
+    finally:
+        m.close()
+
+
 def test_rf11_now_override_seconds_strict_increasing():
     """两次 transition 同秒级 now, 第二窗 valid_from > 旧 valid_until (1ms 推进)."""
     from memory import Memory
