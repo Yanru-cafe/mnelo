@@ -326,6 +326,18 @@ python scripts/repair_index.py --backend zvec       # cleanup orphan vectors
 python scripts/rebuild_index.py --backend zvec --dry-run
 ```
 
+**Precision contract (2026-08-06): usearch is permanently f16.** The `usearch.index` file is f16-format — every load/rebuild/test must explicitly use `Index(dtype='f16')`; a default (f32) `Index` loading an f16 file crashes natively (`free(): corrupted unsorted chunks` — a test artifact, not a data problem).
+
+**Startup crash triage: `free(): corrupted unsorted chunks` / `Aborted` → corrupt index.** If `usearch.index` was written abnormally and is stale relative to the `chunks` table (holds rowids no longer in the DB), the MCP server blind-loads it at startup and aborts (symptom: crash right after `[H-1]`, before `mnelo MCP ready`, port not listening). Check and rebuild (**data-safe** — chunks live in SQLite):
+
+```bash
+sqlite3 $MNELO_MEMORY_DIR/memory.db "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"   # confirm valid chunk count
+cp $MNELO_MEMORY_DIR/usearch.index $MNELO_MEMORY_DIR/usearch.index.stale                      # back up bad index
+python scripts/rebuild_index.py --backend usearch --fresh    # full re-embed of valid chunks, same bge-small-zh-v1.5 model
+```
+
+After rebuild, `health_check.py`'s `vectors` count should equal valid chunks.
+
 ---
 
 ## 📊 Benchmark results

@@ -327,6 +327,18 @@ python scripts/repair_index.py --backend zvec       # 清孤儿向量（chunk �
 python scripts/rebuild_index.py --backend zvec --dry-run
 ```
 
+**精度约定（2026-08-06 定案）：usearch 固定 f16。** `usearch.index` 是 f16 格式，所有 load/重建/测试必须显式 `Index(dtype='f16')`——用默认 f32 `Index` 去 load f16 文件会原生崩溃（`free(): corrupted unsorted chunks`，是测试假象不是数据问题）。
+
+**启动崩溃排查：`free(): corrupted unsorted chunks` / `Aborted` → 索引损坏。** 若 `usearch.index` 被异常进程写坏/陈旧（与 chunks 表不一致，索引含 DB 中不存在的 rowid），MCP server 启动盲 load 该文件即崩（症状：启动在 `[H-1]` 之后、`mnelo MCP ready` 之前崩溃，端口未监听）。核对并重建（**数据无损**，chunks 全在 SQLite）：
+
+```bash
+sqlite3 $MNELO_MEMORY_DIR/memory.db "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"   # 确认有效 chunk 数
+cp $MNELO_MEMORY_DIR/usearch.index $MNELO_MEMORY_DIR/usearch.index.stale                      # 备份坏索引
+python scripts/rebuild_index.py --backend usearch --fresh    # 全量重嵌有效 chunks，同模型 bge-small-zh-v1.5
+```
+
+重建后 `health_check.py` 的 `vectors` 数应与 valid chunks 一致。
+
 ---
 
 ## 📊 测评结果

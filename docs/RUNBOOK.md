@@ -375,6 +375,21 @@ launchctl list | grep mnelo
 cat /tmp/mnelo-mcp.err | tail -50
 ```
 
+#### 启动崩溃 `free(): corrupted unsorted chunks` / `Aborted`（usearch 索引损坏）
+
+症状：启动在 `[H-1] 6 new indexes ensured` 之后、`mnelo MCP ready` 之前崩，端口未监听；反复如此多为**索引与 DB 不一致**——`usearch.index` 被异常进程写坏/陈旧（含 DB 中已不存在的 rowid），启动盲 load 触发 usearch 原生堆损坏。
+
+核对 + 修复（**数据无损**，chunks 全在 SQLite，重建只重写向量索引）：
+
+```bash
+sqlite3 $MNELO_MEMORY_DIR/memory.db "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"   # 确认有效 chunk 数
+cp $MNELO_MEMORY_DIR/usearch.index $MNELO_MEMORY_DIR/usearch.index.stale                      # 备份坏索引
+cd /root/work/mnelo && MNELO_MEMORY_DIR=$MNELO_MEMORY_DIR \
+  .venv/bin/python scripts/rebuild_index.py --backend usearch --fresh   # 同模型全量重嵌，重建后 health_check 的 vectors 应与有效 chunk 数一致
+```
+
+注意：本机 usearch **固定 f16**。独立 load 测试必须显式 `Index(dtype='f16')`——`ui.Index(ndim=512)` 默认 f32，load f16 文件必崩，是测试假象非数据问题。2026-08-06 本机实测：该故障曾致 server 启动全崩（`free(): corrupted unsorted chunks`），备份后 `rebuild_index.py --fresh` 一次重建 17 个有效 chunk 即恢复。
+
 ### Recall 全空
 
 `empty hits rate > 20%`: 大多因 query 是 placeholder / 中文单字。请升级 `MneloClient` (含占位符短路 + ASCII 单字符过滤).
