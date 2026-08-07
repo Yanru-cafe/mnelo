@@ -2,7 +2,7 @@
 
 > **mnelo** = μνήμη + λόγος (希腊语 记忆 + 推理). 5-字符缩写, 跟 Hermes Agent 平行 — Hermes 是 messenger, mnelo 是他的 memory layer.
 
-部署约 5 分钟。**单 SQLite 文件、macOS launchd / Linux systemd 守护, MCP 协议 via SSE**.
+部署约 5 分钟。**单 SQLite 文件、macOS launchd 守护, MCP 协议 via SSE**.
 
 ---
 
@@ -11,7 +11,7 @@
 | 项 | 最小 | 推荐 |
 |---|---|---|
 | Python | 3.9+ | 3.11+ (实测) |
-| OS | macOS / Linux | macOS 14+ (launchd) · systemd 发行版 (Linux) |
+| OS | macOS / Linux | macOS 14+ (launchd 守护) |
 | 磁盘 | 100 MB | 1 GB (留 growth 余量) |
 | 内存 | 4 GB | 8 GB (bge-small-zh embedder ~200 MB RSS + Python + mcp + SQLite overhead，总进程 RSS 实测 ~270 MB) |
 | 网络 | 仅首次拉模型 | 同上 |
@@ -51,31 +51,12 @@ python3 -c "from fastembed import TextEmbedding; t = TextEmbedding('BAAI/bge-sma
 
 模型缓存在 `~/.cache/huggingface/`，下次启动秒级 warm-up。
 
-### 2.2 向量后端 — 无 AVX2 机器必须显式 `usearch`
-
-后端三选一：`auto`（默认）/ `usearch` / `zvec`，优先级 **env `MNELO_MEMORY_SEARCH_BACKEND` > `config.toml [search] backend` > `auto`**。
-
-⚠️ **`auto` 链在主进程 `import zvec` 检测后端**：只要机器上 pip 残留过 zvec（即使只是试用后忘了卸），在**无 AVX2 的 CPU 上 `import zvec` 直接 SIGILL 崩进程**（进程级崩溃，不是可捕获异常），auto 没有任何"降级"机会。本机（Ivy Bridge，无 AVX2）实测：venv 残留 zvec + 临时库无 config.toml → fallback `auto` → 崩。标准安装（`requirements.txt` 不含 zvec）安全；装过 `requirements-zvec.txt` 或手动 `pip install zvec` 的机器必须显式指定。
-
-**部署时两条都设（覆盖所有路径）：**
-```toml
-# live 库的 config.toml — 持久化，对 server / 脚本 / 测试生效
-[search]
-backend = 'usearch'
-```
-```bash
-# shell profile — env 只对当前进程生效；pytest / cron / 子进程默认不带
-export MNELO_MEMORY_SEARCH_BACKEND=usearch
-```
-
-为什么两条都要：pytest / cron / 子进程默认不带 env，且如果它们用的库目录没有 config.toml（如 `mktemp -d` 临时库）就会 fallback 回 `auto` → 崩。config.toml 与 env 都显式 `usearch` 后，任何路径都安全。
-
 ---
 
 ## 3. 文件布局
 
 ```
-$MNELO_MEMORY_DIR/
+~/.hermes/memory/
 ├── memory.py                 # 核心 Memory class (CRU + 4 路召回)
 ├── mcp_server.py             # MCP server entry (SSE)
 ├── config.py                 # 配置加载 (env + toml)
@@ -92,7 +73,7 @@ $MNELO_MEMORY_DIR/
 │   ├── init_db.py            # 第一次创建 db (跑过一次即可)
 │   ├── health_check.py       # 每天自检 (source-of-truth)
 │   ├── repair_vectors.py     # 一次性 vec0 rowid 修复 (post-import)
-│   └── migrate_to_mnelo.py  # 从旧 Mnemosyne 迁移 (可选)
+│   └── migrate_to_hermes_memory.py  # 从旧 Mnemosyne 迁移 (可选)
 │
 ├── tests/
 │   ├── test_memory.py        # 50 测试覆盖 CRUD/recall/bounds/clamp
@@ -109,9 +90,9 @@ $MNELO_MEMORY_DIR/
 ## 4. 初始化数据库 (首次)
 
 ```bash
-cd $MNELO_MEMORY_DIR
+cd ~/.hermes/memory
 python3 scripts/init_db.py
-# 输出: 初始化 db @ $MNELO_MEMORY_DIR/memory.db
+# 输出: 初始化 db @ ~/.hermes/memory/memory.db
 ```
 
 schema 自动建 11 tables: `chunks`, `entities`, `relations`, `vectors` (sqlite-vec), `recall_log`, `purged_queue`, `meta`, `vectors_*` (sqlite-vec 内部)。
@@ -133,23 +114,23 @@ schema 自动建 11 tables: `chunks`, `entities`, `relations`, `vectors` (sqlite
     <string>ai.mnelo.mcp</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/path/to/agent-venv/bin/python3</string>
-        <string>/path/to/mnelo/mcp_server.py</string>
+        <string>/Users/you/hermes-agent/venv/bin/python3</string>
+        <string>/Users/you/.hermes/memory/mcp_server.py</string>
         <string>--transport</string>
         <string>sse</string>
         <string>--host</string>
         <string>127.0.0.1</string>
         <!-- 不传 --port: argparse default 走 config.server_port.
-             Port 改值: plist 环境变量 MNELO_MEMORY_SERVER_PORT, 或 config.toml [server].port. -->
+             Port 改值: plist 环境变量 HERMES_MEMORY_SERVER_PORT, 或 config.toml [server].port. -->
     </array>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>MNELO_HOME</key>
-        <string>/path/to/agent-home</string>
-        <key>MNELO_MEMORY_SERVER_PORT</key>
+        <key>HERMES_HOME</key>
+        <string>/Users/you/.hermes</string>
+        <key>HERMES_MEMORY_SERVER_PORT</key>
         <string>8086</string>
         <key>VIRTUAL_ENV</key>
-        <string>/path/to/agent-venv</string>
+        <string>/Users/you/hermes-agent/venv</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -177,80 +158,7 @@ launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
 **Token 配置**: 不在 plist 里 (plist 是 world-readable XML, 暴露 attack surface)。
 Token 走 `~/.config/mnelo/auth_token` (mode 600) 默认; 或手动 `export MNELO_AUTH_TOKEN=***` override。
 
-### 5.2 systemd 守护 (Linux 推荐)
-
-`scripts/install.sh` 第 6 步在 Linux 上自动装 systemd unit
-（模板: `scripts/systemd/mnelo-mcp.service`）：
-
-- **root** 跑 install.sh → 系统级 `/etc/systemd/system/mnelo-mcp.service`
-  （`WantedBy=multi-user.target`, `User=<当前用户>`）。
-- **非 root** 跑 → 用户级 `~/.config/systemd/user/mnelo-mcp.service`
-  （`WantedBy=default.target`, 无 `User=`），并尝试 `loginctl enable-linger`
-  让服务在 SSH 登出后继续跑（失败会 warn — 需 root 手动
-  `sudo loginctl enable-linger <user>`）。
-
-安装产物即下方 unit（占位符 `LIVE_ROOT`/`VENV_PY`/`USER_LINE`/`WANTED_BY`
-由 install.sh 用 sed 渲染）。手动安装可照抄:
-
-```ini
-[Unit]
-Description=mnelo MCP memory server (SSE)
-After=network.target
-
-[Service]
-Type=simple
-User=mnelo
-WorkingDirectory=/path/to/mnelo-data
-# ⚠️ MNELO_MEMORY_SEARCH_BACKEND 必须显式 usearch — 无 AVX2 机 auto 链
-# 主进程 import zvec 直接 SIGILL 崩进程 (见 §2.2). systemd 环境干净, 别赌 auto.
-Environment=MNELO_MEMORY_DIR=/path/to/mnelo-data
-Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
-# 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
-Environment=MNELO_MEMORY_SERVER_PORT=8086
-ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport sse --host 127.0.0.1
-# usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
-Restart=always
-RestartSec=3
-StandardOutput=append:/path/to/mnelo-data/logs/mnelo.mcp.log
-StandardError=append:/path/to/mnelo-data/logs/mnelo.mcp.error.log
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> 模板里 `StandardOutput`/`StandardError` 用 install.sh 建的
-> `<LIVE_ROOT>/logs/` 目录（与 launchd plist、backup cron 一致）。
-
-启用 / 管理:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now mnelo-mcp      # 开机自启 + 立即启动
-sudo systemctl status mnelo-mcp            # Active: active (running)
-journalctl -u mnelo-mcp -f                 # 实时日志
-journalctl -u mnelo-mcp -e                 # 末尾 20 行
-```
-
-要点:
-
-- **`--host 127.0.0.1` 只绑本机** — 公网 VPS 上经 SSH 访问即可, 不要绑 `0.0.0.0` (见 §12 安全 / OPERATIONS §VPS security)。
-- **`Restart=always`** — 本机 (无 AVX2) usearch 偶发原生崩溃 (`free(): corrupted unsorted chunks`), 崩溃即自动拉起; 若反复崩 (启动循环) 查 §10 故障排查 (多为索引损坏, 需 `rebuild_index.py --fresh`)。
-- **`User=mnelo` 建议专用系统用户** — 最小权限跑 daemon (见 §12 安全 / 多用户)。
-- 系统级 vs 用户级: 上面是系统 unit (`/etc/systemd/system/` + `WantedBy=multi-user.target`)。单用户机器也可用 user unit (`~/.config/systemd/user/` + `WantedBy=default.target`, 配 `systemctl --user`), 但 user unit 在 SSH 登出后可能不随会话存活 — 服务器场景优先系统 unit。
-
-**备用: 无 systemd (容器 / 裸机 / 临时环境)** — `setsid nohup` 后台 (无开机自启、无崩溃自拉起):
-
-```bash
-cd /path/to/mnelo
-MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
-  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
-  >> /tmp/mnelo-server.log 2>&1 &
-ss -tlnp | grep 8086      # 确认监听
-```
-
-要开机自启需另配 cron `@reboot` 或外部进程管理器 (supervisor / Docker restart policy)。
-
-### 5.3 测试 SSE server
+### 5.2 测试 SSE server
 
 ```bash
 curl -sS http://127.0.0.1:8086/sse -m 1 | head
@@ -265,7 +173,7 @@ curl -sS http://127.0.0.1:8086/sse -m 1 | head
 
 ```python
 import sys
-sys.path.insert(0, '$MNELO_MEMORY_DIR/api')
+sys.path.insert(0, '/Users/you/.hermes/memory/api')
 
 from mnelo_client import MneloClient
 
@@ -296,11 +204,11 @@ Hermes 通过 platform connectors (Telegram / Discord / WeChat) 收发消息, �
 | `memory_graph_query` | BFS 遍历实体图 |
 | `memory_stats` | DB / recall_log / kind 分布 |
 
-接法 — 把 `$MNELO_MEMORY_DIR/api/mnelo_client.py` 软链到 hermes-agent 的 plugin 目录:
+接法 — 把 `~/.hermes/memory/api/mnelo_client.py` 软链到 hermes-agent 的 plugin 目录:
 
 ```bash
 mkdir -p ~/.hermes/plugins/mnelo
-ln -sf $MNELO_MEMORY_DIR/api/mnelo_client.py \
+ln -sf ~/.hermes/memory/api/mnelo_client.py \
        ~/.hermes/plugins/mnelo/__init__.py
 ```
 
@@ -323,7 +231,7 @@ mcp_servers:
 
 ```python
 import sys
-sys.path.insert(0, '$MNELO_MEMORY_DIR/api')
+sys.path.insert(0, '/Users/you/.hermes/memory/api')
 from mnelo_client import MneloClient
 
 c = MneloClient()
@@ -396,7 +304,7 @@ mnelo daily check — 2026-07-18 17:25:04 BJT
 
 ---
 
-## 8. 配置 (`$MNELO_MEMORY_DIR/config.toml`)
+## 8. 配置 (`~/.hermes/memory/config.toml`)
 
 ```toml
 [main]
@@ -407,8 +315,8 @@ warm_up_embedder = true      # 启动时预加载 bge-small-zh (避免首次 1s 
 环境变量优先 (env vars > toml > 代码默认):
 
 ```bash
-export MNELO_MEMORY_TIMEZONE=Asia/Shanghai   # 覆盖 timezone
-export MNELO_MEMORY_WARM_UP_EMBEDDER=false   # 启动不预热 (省 500ms)
+export HERMES_MEMORY_TIMEZONE=Asia/Shanghai   # 覆盖 timezone
+export HERMES_MEMORY_WARM_UP_EMBEDDER=false   # 启动不预热 (省 500ms)
 ```
 
 ---
@@ -418,21 +326,9 @@ export MNELO_MEMORY_WARM_UP_EMBEDDER=false   # 启动不预热 (省 500ms)
 ### 9.1 重启
 
 ```bash
-# macOS (launchd)
-launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
+launchctl kickstart -k "gui/$(id -u)/ai.hermes-memory.mcp"
 sleep 3
 lsof -tiTCP:8086 -sTCP:LISTEN | xargs -I{} ps -p {}
-
-# Linux (systemd, 见 §5.2)
-sudo systemctl restart mnelo-mcp
-sleep 3
-ss -tlnp | grep 8086
-
-# 无 systemd (setsid nohup, 备用方式) — kill 旧进程后重新 nohup 启动
-pkill -f "mcp_server.py --transport sse" && sleep 2
-MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
-  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
-  >> /tmp/mnelo-server.log 2>&1 &
 ```
 
 ### 9.2 备份
@@ -450,7 +346,7 @@ dr-backup 加 cron 后 (见 `~/.hermes/scripts/dr-backup.sh`) 自动 rsync 到 N
 如果从老 Mnemosyne 迁移, vec0 rowid 可能 60-70% 错位. 一次性修复:
 
 ```bash
-cd $MNELO_MEMORY_DIR
+cd ~/.hermes/memory
 python3 scripts/repair_vectors.py  # dry-run 默认
 python3 scripts/repair_vectors.py --apply   # 写入 (1591 条历史, ~2 sec)
 ```
@@ -462,7 +358,7 @@ python3 scripts/repair_vectors.py --apply   # 写入 (1591 条历史, ~2 sec)
 实时看 recall 流:
 
 ```bash
-sqlite3 $MNELO_MEMORY_DIR/memory.db \
+sqlite3 ~/.hermes/memory/memory.db \
   "SELECT id, query, latency_ms, created_at FROM recall_log ORDER BY id DESC LIMIT 20"
 ```
 
@@ -479,21 +375,6 @@ launchctl list | grep mnelo
 cat /tmp/mnelo-mcp.err | tail -50
 ```
 
-#### 启动崩溃 `free(): corrupted unsorted chunks` / `Aborted`（usearch 索引损坏）
-
-症状：启动在 `[H-1] 6 new indexes ensured` 之后、`mnelo MCP ready` 之前崩，端口未监听；反复如此多为**索引与 DB 不一致**——`usearch.index` 被异常进程写坏/陈旧（含 DB 中已不存在的 rowid），启动盲 load 触发 usearch 原生堆损坏。
-
-核对 + 修复（**数据无损**，chunks 全在 SQLite，重建只重写向量索引）：
-
-```bash
-sqlite3 $MNELO_MEMORY_DIR/memory.db "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"   # 确认有效 chunk 数
-cp $MNELO_MEMORY_DIR/usearch.index $MNELO_MEMORY_DIR/usearch.index.stale                      # 备份坏索引
-cd /root/work/mnelo && MNELO_MEMORY_DIR=$MNELO_MEMORY_DIR \
-  .venv/bin/python scripts/rebuild_index.py --backend usearch --fresh   # 同模型全量重嵌，重建后 health_check 的 vectors 应与有效 chunk 数一致
-```
-
-注意：本机 usearch **固定 f16**。独立 load 测试必须显式 `Index(dtype='f16')`——`ui.Index(ndim=512)` 默认 f32，load f16 文件必崩，是测试假象非数据问题。2026-08-06 本机实测：该故障曾致 server 启动全崩（`free(): corrupted unsorted chunks`），备份后 `rebuild_index.py --fresh` 一次重建 17 个有效 chunk 即恢复。
-
 ### Recall 全空
 
 `empty hits rate > 20%`: 大多因 query 是 placeholder / 中文单字。请升级 `MneloClient` (含占位符短路 + ASCII 单字符过滤).
@@ -508,7 +389,7 @@ cd /root/work/mnelo && MNELO_MEMORY_DIR=$MNELO_MEMORY_DIR \
 
 ```bash
 # 手动 PASSIVE checkpoint (非阻塞, ~1 sec)
-sqlite3 $MNELO_MEMORY_DIR/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
+sqlite3 ~/.hermes/memory/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
 # 后 WAL 从 5.7M 缩回 <1M
 ```
 
@@ -552,7 +433,7 @@ sqlite3 $MNELO_MEMORY_DIR/memory.db 'PRAGMA wal_checkpoint(PASSIVE);'
 跑这个 command 一行验证所有:
 
 ```bash
-cd $MNELO_MEMORY_DIR && \
+cd ~/.hermes/memory && \
 /Users/you/hermes-agent/venv/bin/python3 -m pytest tests/ -q
 # 预期: 50 passed in ~3s
 ```
@@ -565,16 +446,16 @@ cd $MNELO_MEMORY_DIR && \
 
 ```bash
 # 1. 备份 db
-sqlite3 $MNELO_MEMORY_DIR/memory.db ".backup ~/memory.backup.db"
+sqlite3 ~/.hermes/memory/memory.db ".backup ~/memory.backup.db"
 
 # 2. 拉新代码 (git)
-cd $MNELO_MEMORY_DIR && git pull
+cd ~/.hermes/memory && git pull
 
 # 3. 跑迁移 (如果有 schema 变)
 python3 scripts/migrate.py latest
 
 # 4. 重启 MCP
-launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
+launchctl kickstart -k "gui/$(id -u)/ai.hermes-memory.mcp"
 
 # 5. 跑测试
 python3 -m pytest tests/ -q

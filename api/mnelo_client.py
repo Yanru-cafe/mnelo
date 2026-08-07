@@ -43,11 +43,11 @@ class MneloClient:
         self.timeout = timeout
         self._session: Optional[Any] = None
         # [2026-07-22 P0-fix] Bearer token auth (matches server load_auth_token).
-        # Priority: explicit kwarg -> MNEOLO_AUTH_TOKEN env -> ~/.config/mnelo/auth_token
+        # Priority: explicit kwarg -> MNELO_AUTH_TOKEN env -> ~/.config/mnelo/auth_token
         # Bug history: missing token caused server 401 and silent recall failures.
         self._auth_token = (
             auth_token
-            or os.environ.get('MNEOLO_AUTH_TOKEN')
+            or os.environ.get('MNELO_AUTH_TOKEN')
             or self._read_token_file()
         )
 
