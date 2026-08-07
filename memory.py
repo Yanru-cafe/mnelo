@@ -200,6 +200,15 @@ class Memory:
         self._conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._conn.execute("PRAGMA busy_timeout = 30000")
+        # [PRAGMA-fix 2026-08-07] synchronous=NORMAL: WAL 模式下每次 commit 不 fsync,
+        # 性能 +10-100x, 崩溃风险 = 丢最后一两个 transaction (recall_log/audit_log 不 critical).
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        # [PRAGMA-fix 2026-08-07] wal_autocheckpoint=4000 pages (16MB, 默认 1000 pages ≈ 4MB).
+        # 旧阈值太小 — 实测 memory.db-wal 累积到 196MB 才 auto-checkpoint, INSERT seek 慢 → 撞锁.
+        # 配合下一行 startup TRUNCATE 双管齐下 — 平时让 WAL 自然长到 16MB, 重启时一次性清.
+        self._conn.execute("PRAGMA wal_autocheckpoint = 4000")
+        # [PRAGMA-fix 2026-08-07] 启动时强制 TRUNCATE checkpoint, 清积压 WAL 进主 db.
+        self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         # [7/18 patch G] SQLite page cache 64 MB — 让 working-set (24 MB db)
         # 在 RAM, vec0 cold-chunk 走 mmap/OS page cache 而不是每次 fetch
         # cache_size 单位是 page (default 4 KB); -64000 = -64*1024 KB
