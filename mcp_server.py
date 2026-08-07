@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-mcp_server.py — mnelo MCP Server (替代 Mnemosyne MCP)
+mcp_server.py — mnelo MCP Server
 
-- 主人口中 7/18 拍板 A+C 方案: 写 mnelo (前身 mnelo) mcp + 杀 Mnemosyne MCP
 - 7/19 v0.5.0 breaking change: 变量名 `HERMES_MEMORY_*` → `MNELO_MEMORY_*`, `MNELO_HOME` → `MNELO_HOME`
 - 接口: memory_remember / memory_recall / memory_relate / memory_forget
        / memory_update / memory_graph_query / memory_stats
 - 7 工具, 与 mnelo v0.5.x 6 API + 1 个 stats 完美对齐
-- SSE transport on 127.0.0.1:8086 (与 Mnemosyne 同端口, 无缝替换)
+- SSE transport on 127.0.0.1:8086
 
 [运行]
     cd LIVE_ROOT && python3 mcp_server.py --transport sse
@@ -44,9 +43,11 @@ if not logger.handlers:
 # Guarded import
 try:
     import uvicorn
+    from contextlib import asynccontextmanager
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
     from mcp.server.stdio import stdio_server
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
     from mcp.types import (
         AnyUrl,
         ListResourcesRequest,
@@ -942,6 +943,107 @@ async def run_stdio() -> None:
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+async def _mnelo_health_endpoint(request):
+    """Public liveness/readiness endpoint with compact hygiene signals.
+
+    [8/7] 提到模块级, 让 _build_sse_app 和 _build_streamable_app 共享
+    (原 _build_sse_app 内 closure 依赖全部模块级, 无副作用).
+    """
+    from starlette.responses import JSONResponse
+
+    target = _mem_instance
+    try:
+        if target is None:
+            target = _get_mem()
+        stats = target.stats()
+        hygiene = stats.get("hygiene", {})
+        backlog = int(hygiene.get("purge_backlog", 0))
+        floor_count = int(hygiene.get("decay_floor_chunks", 0))
+        backlog_limit = config.health_purge_backlog_threshold
+        floor_limit = config.health_floor_chunks_threshold
+        status = "degraded" if backlog > backlog_limit or floor_count > floor_limit else "ok"
+        recommendations = []
+        if status == "degraded":
+            reasons = []
+            if backlog > backlog_limit:
+                reasons.append(f"purge backlog {backlog} > {backlog_limit}")
+            if floor_count > floor_limit:
+                reasons.append(f"floor chunks {floor_count} > {floor_limit}")
+            recommendations = [{
+                "tool": "memory_maintenance",
+                "safe": True,
+                "reason": "; ".join(reasons),
+                "args": {
+                    "passes": ["hygiene"],
+                    "dry_run": True,
+                    "confirm_destructive": False,
+                },
+            }, {
+                "tool": "memory_audit_list",
+                "safe": True,
+                "reason": "review recent hygiene proposals before destructive runs",
+                "args": {"pass_name": "hygiene", "limit": 20},
+            }]
+        # [8/6 E 路线] PII advisory 24h count (audit_log, pass_name=pii_audit).
+        # 不 block, 仅 surface 提醒调用方. 阈值高于 0 → 推荐用户自检.
+        pii_24h = target._conn.execute(  # noqa: SLF001 (intentional private access for /health)
+            "SELECT COUNT(*) FROM audit_log "
+            "WHERE pass_name='pii_audit' AND created_at >= datetime('now', '-1 day')"
+        ).fetchone()[0]
+        pii_recommendation = None
+        if pii_24h > 0:
+            pii_recommendation = {
+                "tool": "memory_audit_list",
+                "safe": True,
+                "reason": (
+                    f"{pii_24h} chunks in the last 24h matched advisory PII patterns "
+                    "(credit card / email / cn mobile / id card / secret token); "
+                    "mnelo does NOT redact or refuse — caller decides."
+                ),
+                "args": {"pass_name": "pii_audit", "limit": 50},
+            }
+
+        return JSONResponse({"status": status, "hygiene": {
+            "purge_backlog": backlog,
+            "importance_below_floor": floor_count,
+            "freshness": hygiene.get("freshness"),
+        }, "pii_warnings_last_24h": pii_24h, "recommendations": recommendations
+            + ([pii_recommendation] if pii_recommendation else [])})
+    except Exception:
+        logger.exception("health check failed")
+        return JSONResponse({"status": "degraded", "hygiene": {
+            "purge_backlog": None,
+            "importance_below_floor": None,
+            "freshness": None,
+        }, "recommendations": []}, status_code=503)
+
+
+async def _mnelo_metrics_endpoint(request):
+    """[7/19 v0.5.3] /metrics endpoint (Prometheus text format).
+
+    [8/7] 提到模块级, 共享给 SSE + streamable 双 transport.
+    Bypasses Bearer auth (like /health in RUNBOOK spec). Refreshes DB
+    stats with TTL caching so scrape doesn't hammer SQLite.
+    """
+    from starlette.responses import PlainTextResponse
+
+    from metrics import get_registry
+
+    reg = get_registry()
+    # Refresh DB gauges (TTL=10s inside registry)
+    try:
+        target = _mem_instance
+        if target is None:
+            from memory import Memory as _Memory
+
+            target = _Memory()
+        reg.refresh_db_stats(target)
+    except Exception:
+        pass
+    body = reg.render()
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+
+
 def _validate_loopback_host(host: str) -> None:
     """[P2-1] host 白名单 — 只接 loopback, 拒绝 0.0.0.0 / LAN IP.
 
@@ -1007,98 +1109,12 @@ def _build_sse_app(auth_token: str) -> "Starlette":
         return Response()
 
     async def handle_health(request):
-        """Public liveness/readiness endpoint with compact hygiene signals."""
-        from starlette.responses import JSONResponse
-
-        target = _mem_instance
-        try:
-            if target is None:
-                target = _get_mem()
-            stats = target.stats()
-            hygiene = stats.get("hygiene", {})
-            backlog = int(hygiene.get("purge_backlog", 0))
-            floor_count = int(hygiene.get("decay_floor_chunks", 0))
-            backlog_limit = config.health_purge_backlog_threshold
-            floor_limit = config.health_floor_chunks_threshold
-            status = "degraded" if backlog > backlog_limit or floor_count > floor_limit else "ok"
-            recommendations = []
-            if status == "degraded":
-                reasons = []
-                if backlog > backlog_limit:
-                    reasons.append(f"purge backlog {backlog} > {backlog_limit}")
-                if floor_count > floor_limit:
-                    reasons.append(f"floor chunks {floor_count} > {floor_limit}")
-                recommendations = [{
-                    "tool": "memory_maintenance",
-                    "safe": True,
-                    "reason": "; ".join(reasons),
-                    "args": {
-                        "passes": ["hygiene"],
-                        "dry_run": True,
-                        "confirm_destructive": False,
-                    },
-                }, {
-                    "tool": "memory_audit_list",
-                    "safe": True,
-                    "reason": "review recent hygiene proposals before destructive runs",
-                    "args": {"pass_name": "hygiene", "limit": 20},
-                }]
-            # [8/6 E 路线] PII advisory 24h count (audit_log, pass_name=pii_audit).
-            # 不 block, 仅 surface 提醒调用方. 阈值高于 0 → 推荐用户自检.
-            pii_24h = target._conn.execute(  # noqa: SLF001 (intentional private access for /health)
-                "SELECT COUNT(*) FROM audit_log "
-                "WHERE pass_name='pii_audit' AND created_at >= datetime('now', '-1 day')"
-            ).fetchone()[0]
-            pii_recommendation = None
-            if pii_24h > 0:
-                pii_recommendation = {
-                    "tool": "memory_audit_list",
-                    "safe": True,
-                    "reason": (
-                        f"{pii_24h} chunks in the last 24h matched advisory PII patterns "
-                        "(credit card / email / cn mobile / id card / secret token); "
-                        "mnelo does NOT redact or refuse — caller decides."
-                    ),
-                    "args": {"pass_name": "pii_audit", "limit": 50},
-                }
-
-            return JSONResponse({"status": status, "hygiene": {
-                "purge_backlog": backlog,
-                "importance_below_floor": floor_count,
-                "freshness": hygiene.get("freshness"),
-            }, "pii_warnings_last_24h": pii_24h, "recommendations": recommendations
-                + ([pii_recommendation] if pii_recommendation else [])})
-        except Exception:
-            logger.exception("health check failed")
-            return JSONResponse({"status": "degraded", "hygiene": {
-                "purge_backlog": None,
-                "importance_below_floor": None,
-                "freshness": None,
-            }, "recommendations": []}, status_code=503)
+        """[8/7] 委托到模块级 _mnelo_health_endpoint (SSE + streamable 共享)."""
+        return await _mnelo_health_endpoint(request)
 
     async def handle_metrics(request):
-        """[7/19 v0.5.3] /metrics endpoint (Prometheus text format).
-
-        Bypasses Bearer auth (like /health in RUNBOOK spec). Refreshes DB
-        stats with TTL caching so scrape doesn't hammer SQLite.
-        """
-        from starlette.responses import PlainTextResponse
-
-        from metrics import get_registry
-
-        reg = get_registry()
-        # Refresh DB gauges (TTL=10s inside registry)
-        try:
-            target = _mem_instance
-            if target is None:
-                from memory import Memory as _Memory
-
-                target = _Memory()
-            reg.refresh_db_stats(target)
-        except Exception:
-            pass
-        body = reg.render()
-        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+        """[8/7] 委托到模块级 _mnelo_metrics_endpoint."""
+        return await _mnelo_metrics_endpoint(request)
 
     async def handle_messages(scope, receive, send):
         """/messages/ 的 Bearer 鉴权 ASGI 包装.
@@ -1135,6 +1151,278 @@ def _build_sse_app(auth_token: str) -> "Starlette":
         ]
     )
     return app
+
+
+def _build_streamable_app(auth_token: str) -> "Starlette":
+    """[8/7] Streamable HTTP transport (MCP 2025-03-26 spec).
+
+    与 SSE 共享同一端口 (路径不同):
+      - /sse + /messages/  → SSE 客户端 (hermes gateway 现状)
+      - /mcp               → streamable-http (Claude Desktop / Cursor / 任意 agent)
+      - /health + /metrics → 公用
+
+    设计决策 (为啥走 stateless=True):
+    - 多 agent 同时调 /mcp 不需要维护 session 状态, 每次 request fresh transport
+    - 没有 "client 离开后 session 泄漏" 问题
+    - server.run stateless=True 走 anyio task_group 起短任务,
+      对短查询 (memory_recall / memory_remember) 开销 < 50ms
+    - stateful 模式会留下 orphan session, 不适合此场景
+
+    [为啥用 Route 不是 Mount]
+    Mount("/mcp") 默认会 307 redirect → /mcp/ (trailing slash), 而 MCP Python client
+    (mcp/client/streamable_http.py line 341) 默认 follow_redirects=False, 会收到 307
+    当作 error 处理. Route("/mcp", endpoint=...) exact-match, 不走 redirect.
+
+    [Bearer auth] endpoint 内部读 request.headers (跟 SSE /messages/ 同样的写法).
+    """
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    manager = StreamableHTTPSessionManager(
+        app=server,
+        json_response=False,        # SSE-style streaming (客户端可监听 server push)
+        stateless=True,             # 多客户端无 session 冲突
+    )
+
+    class _MCPASGI:
+        """[8/7] /mcp ASGI callable instance.
+
+        Starlette Route 区分 endpoint 类型:
+          - function/method → wrap 成 request_response(func) (期望返回 Response)
+          - class instance (callable) → 当 ASGI app 直接调 __call__(scope, recv, send)
+        我们要走 ASGI 路径 (manager.handle_request 自己通过 send 写响应),
+        所以用 class instance, 不要 async def function.
+        """
+
+        def __init__(self):
+            self.manager = manager
+            self.auth_token = auth_token
+
+        async def __call__(self, scope, receive, send):
+            auth_header = ""
+            for k, v in scope.get("headers", []):
+                if k == b"authorization":
+                    auth_header = v.decode("latin-1")
+                    break
+            if not verify_bearer(auth_header, self.auth_token):
+                client = scope.get("client")
+                logger.warning(
+                    f"rejected {scope.get('method', '?')} /mcp from "
+                    f"{client[0] if client else '?'} - invalid/missing token"
+                )
+                response = JSONResponse(
+                    {"error": "unauthorized", "detail": "Bearer token required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp-streamable"'},
+                )
+                await response(scope, receive, send)
+                return
+            await self.manager.handle_request(scope, receive, send)
+
+    mcp_asgi = _MCPASGI()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        """启动 streamable_http task_group, 客户端请求来时 manager 才 spawn server.run task."""
+        async with manager.run():
+            yield
+
+    app = Starlette(
+        routes=[
+            Route("/mcp", endpoint=mcp_asgi, methods=["GET", "POST", "DELETE"]),
+            Route("/health", endpoint=_mnelo_health_endpoint),
+            Route("/metrics", endpoint=_mnelo_metrics_endpoint),
+        ],
+        lifespan=lifespan,
+    )
+    return app
+
+
+def run_streamable_http(host: Optional[str] = None, port: Optional[int] = None, auth_token: Optional[str] = None) -> None:
+    """[8/7] Streamable HTTP transport 入口 (跟 run_sse 镜像).
+
+    [8/7 P1] host 只接受 loopback (跟 run_sse 同安全策略).
+    [8/7 P2] Bearer token 复用 run_sse 加载逻辑 (load_auth_token()).
+    [8/7 P3] port 默认从 config.server_port 读 (跟 SSE 共用 8086).
+    """
+    if host is None or port is None:
+        cfg_host, cfg_port = _resolve_server_defaults()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
+
+    if not _MCP_AVAILABLE:
+        raise RuntimeError("MCP/Starlette not available")
+
+    if auth_token is None:
+        try:
+            auth_token = load_auth_token()
+        except AuthError as e:
+            logger.error(f"streamable_http transport requires auth token: {e}")
+            raise
+    logger.info("streamable_http auth: Bearer token loaded (length=%d chars)", len(auth_token))
+
+    _validate_loopback_host(host)
+    if not _check_port_available(host, port):
+        logger.warning(f"port {port} already in use on {host}; exiting cleanly")
+        return
+
+    app = _build_streamable_app(auth_token)
+    logger.info(f"mnelo MCP streamable-http listening on http://{host}:{port}/mcp (Bearer auth ON)")
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+def _build_dual_app(auth_token: str) -> "Starlette":
+    """[8/7] Dual transport: SSE + streamable-http 同进程同端口.
+
+    为什么需要 dual:
+      - hermes gateway 现状配的是 SSE (/sse + /messages/) → 不能破
+      - 新 agent (Claude Desktop / Cursor / 助手 直接调) → 需 streamable-http
+      - 单 process 两个 transport 共享同一端口 8086, paths 分流, launchd plist 不动
+
+    Routes:
+      - GET  /sse         → SSE handshake (hermes gateway)
+      - POST /messages/   → SSE message channel (hermes gateway)
+      - *    /mcp         → streamable-http (新 agent / 可选)
+      - GET  /health      → hygiene JSON
+      - GET  /metrics     → Prometheus
+    """
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+
+    sse = SseServerTransport("/messages/")
+
+    streamable_mgr = StreamableHTTPSessionManager(
+        app=server,
+        json_response=False,
+        stateless=True,
+    )
+
+    async def sse_endpoint(request: Request) -> Response:
+        """/sse Route endpoint — 原有 handle_sse 的 Route 版本 (auth + sse.connect)."""
+        auth_header = request.headers.get("authorization", "")
+        if not verify_bearer(auth_header, auth_token):
+            client = request.client
+            logger.warning(
+                f"rejected GET /sse from {client.host if client else '?'} - invalid/missing token"
+            )
+            return JSONResponse(
+                {"error": "unauthorized", "detail": "Bearer token required"},
+                status_code=401,
+                headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp"'},
+            )
+        async with sse.connect_sse(request.scope, request.receive, request._send) as (read_stream, write_stream):
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+        return Response()
+
+    class _MessagesASGI:
+        """/messages/ ASGI handler (Bearer auth + sse.handle_post_message)."""
+        def __init__(self):
+            self.sse = sse
+            self.auth_token = auth_token
+
+        async def __call__(self, scope, receive, send):
+            auth_header = ""
+            for k, v in scope.get("headers", []):
+                if k == b"authorization":
+                    auth_header = v.decode("latin-1")
+                    break
+            if not verify_bearer(auth_header, self.auth_token):
+                client = scope.get("client")
+                logger.warning(
+                    f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from "
+                    f"{client[0] if client else '?'} - invalid/missing token"
+                )
+                response = JSONResponse(
+                    {"error": "unauthorized", "detail": "Bearer token required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp"'},
+                )
+                await response(scope, receive, send)
+                return
+            await self.sse.handle_post_message(scope, receive, send)
+
+    class _MCPASGI:
+        """/mcp ASGI handler (Bearer auth + streamable_mgr.handle_request)."""
+        def __init__(self):
+            self.manager = streamable_mgr
+            self.auth_token = auth_token
+
+        async def __call__(self, scope, receive, send):
+            auth_header = ""
+            for k, v in scope.get("headers", []):
+                if k == b"authorization":
+                    auth_header = v.decode("latin-1")
+                    break
+            if not verify_bearer(auth_header, self.auth_token):
+                client = scope.get("client")
+                logger.warning(
+                    f"rejected {scope.get('method', '?')} /mcp from "
+                    f"{client[0] if client else '?'} - invalid/missing token"
+                )
+                response = JSONResponse(
+                    {"error": "unauthorized", "detail": "Bearer token required"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": 'Bearer realm="mnelo-mcp-streamable"'},
+                )
+                await response(scope, receive, send)
+                return
+            await self.manager.handle_request(scope, receive, send)
+
+    messages_asgi = _MessagesASGI()
+    mcp_asgi = _MCPASGI()
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        """启动 streamable_http task_group. SSE 不需要 lifespan (per-request connect_sse)."""
+        async with streamable_mgr.run():
+            yield
+
+    app = Starlette(
+        routes=[
+            Route("/sse", endpoint=sse_endpoint),
+            Route("/mcp", endpoint=mcp_asgi, methods=["GET", "POST", "DELETE"]),
+            Mount("/messages/", app=messages_asgi),
+            Route("/health", endpoint=_mnelo_health_endpoint),
+            Route("/metrics", endpoint=_mnelo_metrics_endpoint),
+        ],
+        lifespan=lifespan,
+    )
+    return app
+
+
+def run_dual(host: Optional[str] = None, port: Optional[int] = None, auth_token: Optional[str] = None) -> None:
+    """[8/7] Dual transport 入口 (SSE + streamable-http 同进程同端口).
+
+    与 run_sse / run_streamable_http 镜像, 但构造 dual app 同时挂 SSE + streamable.
+    Launchd plist 仅需改 --transport dual, host/port/Bearer 不动.
+    """
+    if host is None or port is None:
+        cfg_host, cfg_port = _resolve_server_defaults()
+        host = host if host is not None else cfg_host
+        port = port if port is not None else cfg_port
+
+    if not _MCP_AVAILABLE:
+        raise RuntimeError("MCP/Starlette not available")
+
+    if auth_token is None:
+        try:
+            auth_token = load_auth_token()
+        except AuthError as e:
+            logger.error(f"dual transport requires auth token: {e}")
+            raise
+    logger.info("dual auth: Bearer token loaded (length=%d chars)", len(auth_token))
+
+    _validate_loopback_host(host)
+    if not _check_port_available(host, port):
+        logger.warning(f"port {port} already in use on {host}; exiting cleanly")
+        return
+
+    app = _build_dual_app(auth_token)
+    logger.info(
+        f"mnelo MCP DUAL listening on http://{host}:{port} "
+        f"(SSE=/sse+/messages/, streamable-http=/mcp, /health, /metrics; Bearer auth ON)"
+    )
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 def run_sse(host: Optional[str] = None, port: Optional[int] = None, auth_token: Optional[str] = None) -> None:
@@ -1184,7 +1472,7 @@ def main():
     import argparse
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
+    ap.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http", "dual"])
     # [Round 2] host/port default 从 config 读 (config.toml [server] 段)
     _cfg_host, _cfg_port = _resolve_server_defaults()
     ap.add_argument("--host", default=_cfg_host)
@@ -1219,7 +1507,12 @@ def main():
             except AuthError as e:
                 logger.error(f"--auth-token-file load failed: {e}")
                 sys.exit(2)
-        run_sse(host=args.host, port=args.port, auth_token=token)
+        if args.transport == "sse":
+            run_sse(host=args.host, port=args.port, auth_token=token)
+        elif args.transport == "streamable-http":
+            run_streamable_http(host=args.host, port=args.port, auth_token=token)
+        else:  # dual
+            run_dual(host=args.host, port=args.port, auth_token=token)
 
 
 if __name__ == "__main__":
