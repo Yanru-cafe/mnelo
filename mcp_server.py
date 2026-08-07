@@ -1193,7 +1193,7 @@ def main():
     ap.add_argument(
         "--auth-token-file",
         default=None,
-        help="Path to file containing Bearer token (default: $MNEOLO_AUTH_TOKEN or ~/.config/mnelo/auth_token)",
+        help="Path to file containing Bearer token (default: $MNELO_AUTH_TOKEN or ~/.config/mnelo/auth_token)",
     )
     args = ap.parse_args()
 

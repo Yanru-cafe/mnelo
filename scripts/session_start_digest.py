@@ -10,7 +10,7 @@
   只在成功取到摘要时输出。
 - **通用优先**: 走 MneloClient (MCP 标准), 不直接读 DB —— 任何部署形态 (server
   常驻/手动起) 都能用; 客户端默认连 127.0.0.1:8086/sse, token 从
-  MNEOLO_AUTH_TOKEN 或 ~/.config/mnelo/auth_token 读。
+  MNELO_AUTH_TOKEN 或 ~/.config/mnelo/auth_token 读。
 - **输出格式**: `[mnelo-digest] ... [/mnelo-digest]` 包裹, 便于 Agent 识别为
   引用数据而非指令 (DESIGN §12 数据围栏同思想)。
 

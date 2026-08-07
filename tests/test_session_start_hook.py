@@ -22,7 +22,7 @@ SCRIPT = REPO_ROOT / "scripts" / "session_start_digest.py"
 
 def _run_script(env_extra=None):
     env = os.environ.copy()
-    env.pop("MNEOLO_AUTH_TOKEN", None)  # 不依赖外部 token
+    env.pop("MNELO_AUTH_TOKEN", None)  # 不依赖外部 token
     if env_extra:
         env.update(env_extra)
     r = subprocess.run(

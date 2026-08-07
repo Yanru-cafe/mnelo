@@ -5,7 +5,7 @@ auth.py — Bearer token auth for SSE transport (P0-2 fix).
 现在加 Bearer token 校验:
 
 1. Token 来源 (优先级):
-   - 环境变量 MNEOLO_AUTH_TOKEN (注入 plist)
+   - 环境变量 MNELO_AUTH_TOKEN (注入 plist)
    - 文件 ~/.config/mnelo/auth_token (mode 600)
    - CLI 参数 --auth-token-file <path>
    - 都没有 → fail-fast 拒绝启动 SSE transport
@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 # 通用 token env 名 — 避开 HERMES/MCP 避免冲突, 但用 mnelo_ 前缀保持项目自识别
-AUTH_TOKEN_ENV = "MNEOLO_AUTH_TOKEN"
+AUTH_TOKEN_ENV = "MNELO_AUTH_TOKEN"
 AUTH_TOKEN_FILE = Path.home() / ".config" / "mnelo" / "auth_token"
 
 

@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 # 找 LIVE_ROOT
+os.environ.setdefault("MNELO_MEMORY_SEARCH_BACKEND", "usearch")
 _LIVE_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_LIVE_ROOT))
 
