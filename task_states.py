@@ -1025,7 +1025,7 @@ def list_active_tasks_and_loops(
     conn: Any,
     *,
     now: Optional[str] = None,
-    stale_days_threshold: int = 7,
+    stale_days_threshold: Optional[int] = None,  # [8/9 P1-yanru] 默认从 config.task_stale_days_threshold 读
     limit: int = 50,
 ) -> Dict[str, Any]:
     """[8/6 M4 digest 集成] 列出未闭环 task + dormant loop (DESIGN §4.4).
@@ -1060,10 +1060,16 @@ def list_active_tasks_and_loops(
     Args:
         conn: open sqlite3.Connection.
         now: 时间参考 (默认 = 当前).
-        stale_days_threshold: 算 stale (默认 7 天). active 超 7 天没 transition → stale.
+        stale_days_threshold: 算 stale (默认从 config.task_stale_days_threshold 读, 当前 7 天).
+        active 超阈值天数没 transition → stale.
         limit: 各自分组上限 (默认 50).
     """
     from datetime import datetime as _dt
+
+    # [8/9 P1-yanru] stale_days_threshold fallback — None 时从 config 读
+    if stale_days_threshold is None:
+        from config import config as _cfg
+        stale_days_threshold = _cfg.task_stale_days_threshold
 
     now_ts = now or _default_now()
     try:
@@ -1161,7 +1167,7 @@ def propose_stale_tasks(
     conn: Any,
     *,
     now: Optional[str] = None,
-    stale_days_threshold: int = 7,
+    stale_days_threshold: Optional[int] = None,  # [8/9 P1-yanru] 默认从 config.task_stale_days_threshold 读
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """[8/6 M5.2 + DESIGN TASK_LOOP 4.4 + M30/M32] 扫描 stale task, 写 audit_log Proposal.
@@ -1195,6 +1201,11 @@ def propose_stale_tasks(
             "proposals": [{"task_id", "state", "age_days", "threshold_days", "is_stale"}],
         }
     """
+    # [8/9 P1-yanru] stale_days_threshold fallback — None 时从 config 读 (必须在 M30 校验前)
+    if stale_days_threshold is None:
+        from config import config as _cfg
+        stale_days_threshold = _cfg.task_stale_days_threshold
+
     if not isinstance(stale_days_threshold, int) or stale_days_threshold < 1:
         raise TaskLoopError(
             f"stale_days_threshold 必须正整数, got {stale_days_threshold!r}",
