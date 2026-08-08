@@ -41,15 +41,35 @@ and load-time assertions:
 - `Index(ndim=dim, metric="cos", dtype="f16")` — `__init__` runtime guard
 - `if self._index.dtype != ScalarKind.F16` after `.load()` — load-time guard
 
-## Startup crash triage
+## Startup pre-check + auto-rebuild (2026-08-08 root-cause fix)
 
-`free(): corrupted unsorted chunks` / `Aborted` → corrupt index.
+`free(): corrupted unsorted chunks` / `Aborted` on startup was the symptom of
+a blind load: the MCP server saw `usearch.index` exist and `load()`-ed it
+unconditionally, so a corrupt/truncated/f32-typed file crashed the process
+natively *before* any Python could react. Root cause fixed — startup no
+longer blind-loads:
 
-If `usearch.index` was written abnormally and is stale relative to the
-`chunks` table (holds rowids no longer in the DB), the MCP server
-blind-loads it at startup and aborts (symptom: crash right after `[H-1]`,
-before `mnelo MCP ready`, port not listening). Check and rebuild
-(**data-safe** — chunks live in SQLite):
+1. **Header pre-check** — `Index.metadata(path)` parses only the file header
+   (no native graph load). Corrupt/garbage/truncated files raise a clean
+   `ValueError`; wrong dtype (≠ f16) or wrong dim (≠ 512) is detected here.
+2. **Staleness check** — a sidecar `usearch.index.verified.json` (written on
+   `close()`) holds the md5 signature of the active chunk set in SQLite
+   (the source of truth). Signature mismatch → stale. No sidecar (old
+   upgrade / deleted) → fallback: header vector count vs active chunk count.
+3. **Auto-rebuild** — any failed check triggers a rebuild from SQLite: the
+   bad file is renamed `usearch.index.corrupt-<ts>` (kept for forensics),
+   a fresh f16 index is built by re-embedding active chunks, then saved with
+   a fresh sidecar. Data-safe — chunks live in SQLite, the index is derived.
+
+A startup that used to crash now logs
+`[usearch] 索引 … 预检不过 → 自动重建. 原因: …` and comes up self-healed.
+If the rebuild itself cannot proceed (embedder unavailable / 0 vectors
+embedded), it raises `RuntimeError` pointing at the manual path below.
+
+## Manual rebuild (fallback)
+
+If auto-rebuild cannot help (e.g. `RuntimeError` on startup), check and
+rebuild by hand (**data-safe** — chunks live in SQLite):
 
 ```bash
 sqlite3 $MNELO_MEMORY_DIR/memory.db "SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL"   # confirm valid chunk count

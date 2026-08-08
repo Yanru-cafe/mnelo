@@ -589,3 +589,20 @@
   - `git rm` 4 个根目录重复文件: `RUNBOOK.md`（478 行, 重构前陈旧副本, docs/RUNBOOK.md 599 行为权威）、`test_auth.py`、`test_config_validation_coverage.py`（与 tests/ 逐字节相同）、`test_coverage_gaps.py`（859 行旧版, tests/ 860 行为新版且对当前 validate_id 语义正确）。无 pyproject testpaths → 根目录 `pytest` 会重复收集这些测试（旧版还会挂）。
   - 保留版验证: tests/test_auth.py 11 passed + 1 skipped; tests/test_config_validation_coverage.py 30 passed; tests/test_memory.py 28 passed; tests/test_coverage_gaps.py 74 passed（此前）。
 - 环境注: 全量 pytest 仍被既有 usearch index load 原生 abort 阻断（REVIEW_LOG 多轮记录的**本机既有问题**, parent commit 同复现, 与本次无关）; 逐文件跑 + 隔离临时库可验证。
+
+## 2026-08-08 09:01 usearch 启动盲 load 根因修复 — 预检 + sidecar + 自动重建
+
+- 背景: 用户"之前修复过，要强制f16的，你再看看能不能优化，解决根源问题"。此前 [8/6] 加了 f16 断言（把静默 dtype 切换变成启动期快速失败），但根因仍在: 启动见 `usearch.index` 存在就无条件 `load()` — 文件损坏/截断/f32 时 load 本身原生 abort（`free(): corrupted unsorted chunks`，进程级崩溃，断言拦不住）; stale（rowid 不再对应 chunks / 漏最新 chunk）则静默漏召回。
+- 关键使能点: `usearch.Index.metadata(path)` 是 **classmethod，只解析文件头**（不触发原生图 load），对损坏/垃圾文件抛干净 Python `ValueError`。实测确认: 正常 f16/f32 文件返回 `kind_scalar/dimensions/count_present`，垃圾字节抛 "Not a dense USearch index!"。
+- 改动（`search_index.py` `UsearchIndex`）:
+  - `_init_from_disk()` 取代盲 load 块: ①`_validate_index_header()` 用 `Index.metadata` 预检（损坏/错 dtype≠f16/错 dim≠512）; ②`_is_stale()` sidecar 指纹比对 SQLite active 集合（sidecar 缺失时用 header count vs active count 兜底）; ③任一不过 → `_auto_rebuild()`。
+  - `close()` 先 save 索引再原子写 sidecar `usearch.index.verified.json`（tmp+replace）; 启动若 sidecar 缺失（旧代码升级/手删）→ 补写采纳，避免下次误判 stale。
+  - `_auto_rebuild()`: 坏文件改名 `usearch.index.corrupt-<ts>` 留档 → 全新 f16 `Index` → 从 chunks 全量重嵌入（lazy `from embedder import embed`）→ save + 写 sidecar。重建不可能（无 embedder / 0 向量）→ `RuntimeError` 提示手动 `rebuild_index.py --fresh`。
+  - `_chunks_table_exists()` 守卫: 损坏/极简 db（无 chunks 表）不 abort，正常加载。
+  - 坑: `Path.with_suffix(".corrupt-…")` 会把 `.index` 当后缀替换 → 备份名变 `usearch.corrupt-…`; 改用 `with_name(name + ".corrupt-…")` 追加保留原名。
+- 测试:
+  - 新增 `tests/test_usearch_auto_rebuild.py`（8 个）: 正常 reopen 不重建 / 垃圾文件自动重建（坏文件留档） / f32 自动重建为 f16 / stale 自动重建 / 无 sidecar count 兜底重建 / 无 chunks 表容错 / embedder 缺失 RuntimeError。真 usearch 后端 + 假 embedder（确定性 4 维，不 load bge 模型）。
+  - `tests/test_search_index.py` `test_f32_index_raises` 改写为 `test_f32_index_auto_rebuilds`（旧行为 RuntimeError → 新行为自动重建 f16 + 坏文件留档）。
+  - 验证: test_usearch_auto_rebuild + test_search_index + test_a1_a2_a4_usearch = 35 passed; 其余 search_index 相关测试文件逐文件跑全绿（m4_digest 2 失败为预存在，parent commit 同复现，与本次无关）。
+- live 验证: server 重启（`--transport dual`，兼容 /mcp 客户端）→ `_init_from_disk` 预检通过（sidecar 签名与当前 active 集合一致 → 直接 load，不误重建），health_check 全绿，client recall 3 命中正常。live 索引 f16/512d，count_present=24 vs active 23（软删向量残留，recall 层过滤，无害）。
+- 文档: `docs/VECTOR_BACKENDS.md` §Startup crash triage 重写为 §Startup pre-check + auto-rebuild（自动恢复 + 手动兜底双路径）。

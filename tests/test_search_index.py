@@ -290,19 +290,37 @@ class TestUsearchF16Assertion(unittest.TestCase):
             finally:
                 idx.close()
 
-    def test_f32_index_raises(self):
-        """f32 文件 → RuntimeError, 提示用 f16 重建."""
+    def test_f32_index_auto_rebuilds(self):
+        """[8/8 根因修复] f32 文件 → 预检出 dtype 不符 → 自动重建 f16.
+
+        旧行为: 盲 load f32 → dtype 静默变 F32 → 后续 add 混合精度 → 原生堆
+        损坏 (free(): corrupted unsorted chunks). 新行为: 文件头预检
+        (Index.metadata, 只解析头部不触发原生 load) 发现 F32 → 自动重建 f16,
+        坏文件改名 .corrupt-<ts> 留档.
+        """
         import tempfile
+        import types
 
         from search_index import UsearchIndex
+        from usearch.index import ScalarKind
 
-        with tempfile.TemporaryDirectory() as td:
-            td = Path(td)
-            self._build_empty("f32", td / "usearch.index")
-            with self.assertRaises(RuntimeError) as ctx:
-                UsearchIndex(td / "memory.db", 512)
-            self.assertIn("f16", str(ctx.exception))
-            self.assertIn("rebuild_index.py", str(ctx.exception))
+        fake = types.ModuleType("embedder")
+        fake.embed = lambda text: [0.5] * 512  # 假 embedder, 不 load bge 模型
+        sys.modules["embedder"] = fake
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                td = Path(td)
+                self._build_empty("f32", td / "usearch.index")
+                idx = UsearchIndex(td / "memory.db", 512)
+                try:
+                    self.assertEqual(idx._index.dtype, ScalarKind.F16)
+                    self.assertEqual(idx._index.size, 0)
+                finally:
+                    idx.close()
+                corrupts = list(td.glob("usearch.index.corrupt-*"))
+                self.assertEqual(len(corrupts), 1)
+        finally:
+            sys.modules.pop("embedder", None)
 
 
 class TestZvecAvx2Gate(unittest.TestCase):
