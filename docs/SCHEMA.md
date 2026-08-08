@@ -2,7 +2,7 @@
 
 > **项目代号**: `mnelo` (HM, 后简称 hm_)
 > **位置**: `$MNELO_MEMORY_DIR/`
-> **目的**: 替换频繁出问题的 Mnemosyne, 主人口中 7/17 拍板 (本地 0 预算 + 知识图谱)
+> **目的**: 自建本地知识图谱, 0 预算 + 知识图谱
 > **版本**: v1.0 draft — 等主人口中 review
 
 ---
@@ -10,7 +10,6 @@
 ## 1. 目标与边界
 
 ### 1.1 目标
-- **替换 Mnemosyne** (sqlite + sqlite-vec + fastembed 三层架构, 频繁 lock)
 - **本地方案, 0 预算** (Python + sqlite + NetworkX + fastembed)
 - **不只向量检索**: 知识图谱模式 (nodes + edges + 时间维度)
 - **支持 CRUD **: 增 / 删 / 改 / 查 一气呵成
@@ -34,7 +33,7 @@
 | GraphRAG (微软) | community detection + multi-hop retrieval |
 | Cognee | dual-layer graph (semantic + lexical) |
 | Notion / Obsidian | 双向链接 + backlinks |
-| Mnemosyne 7 个月数据 | schema 直接 export 看字段真实形状 |
+| 7 个月预生产数据 | schema 直接 export 看字段真实形状 |
 
 ---
 
@@ -59,7 +58,7 @@ CREATE TABLE entities (
     valid_until TEXT,                       -- soft delete 时填, NULL = 永久有效
     superseded_by TEXT,                     -- 指向新版本 entity id
     -- 元数据
-    source TEXT,                            -- 提取来源: 'mnemosyne-import' / 'manual' / 'trinity_daily' / 'cron'
+    source TEXT,                            -- 提取来源: 'imported' / 'manual' / 'trinity_daily' / 'cron'
     importance REAL DEFAULT 0.5,            -- 0.0-1.0, 用于排序
     recall_count INTEGER DEFAULT 0,         -- 被 recall 次数
     last_recalled TEXT
@@ -71,7 +70,7 @@ CREATE INDEX idx_entities_valid ON entities(valid_from, valid_until);
 CREATE INDEX idx_entities_supersede ON entities(superseded_by) WHERE superseded_by IS NOT NULL;
 ```
 
-**映射 (Mnemosyne → hm_entities)**:
+**映射 (→ hm_entities):**
 - `triples.subject/object` 中的 subject/object → entity (kind 提取)
 - `canonical_facts` (8 条) → kind='canonical_fact' 的 entity + properties_json 存 body
 - `annotations.kind+value` → 当 kind/value 是 stock/concept 时升级为 entity
@@ -84,12 +83,12 @@ LLM 处理前的原始文本 — recall 时"原文"层。
 CREATE TABLE chunks (
     id TEXT PRIMARY KEY,                    -- 'chunk_20260718_07_04_001'
     content TEXT NOT NULL,
-    source TEXT,                            -- 'cron' / 'master' / 'trinity_daily' / 'mnemosyne-import' / 'weng-monitor'
+    source TEXT,                            -- 'cron' / 'master' / 'trinity_daily' / 'imported' / 'weng-monitor'
     session_id TEXT DEFAULT 'default',
     timestamp TEXT NOT NULL,
     metadata_json TEXT,
     -- 更新语义
-    superseded_by TEXT,                     -- 指向新版本 chunk (与 Mnemosyne working_memory.superseded_by 一致)
+    superseded_by TEXT,                     -- 指向新版本 chunk
     valid_until TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -101,8 +100,8 @@ CREATE INDEX idx_chunks_valid ON chunks(valid_until) WHERE valid_until IS NOT NU
 ```
 
 **映射**:
-- `mnemosyne.working_memory` 3560 条 → chunks 主体
-- `mnemosyne.episodic_memory` 334 条 → 也是 chunk (但加 `metadata.is_summary=true`)
+- `imported working_memory` 3560 条 → chunks 主体
+- `imported episodic_memory` 334 条 → 也是 chunk (但加 `metadata.is_summary=true`)
 
 ### 3.3 `relations` — 关系 (4D 时态)
 
@@ -149,7 +148,7 @@ CREATE INDEX idx_relations_evidence ON relations(evidence_chunk_id);
 
 ### 3.4 `vectors` — 向量索引 (sqlite-vss)
 
-复用 Mnemosyne 的 bge-small-zh-v1.5 (512d, 90MB), 迁移不重新嵌入。
+用 bge-small-zh-v1.5 (512d, 90MB), 迁移不重新嵌入。
 
 ```sql
 CREATE VIRTUAL TABLE vectors USING vss0(
@@ -159,8 +158,8 @@ CREATE VIRTUAL TABLE vectors USING vss0(
 ```
 
 **映射**:
-- `mnemosyne.legacy_embeddings` 3103 条 → vectors 表
-- `mnemosyne.episodic_embeddings` 328 条 → vectors 表
+- `imported legacy_embeddings` 3103 条 → vectors 表
+- `imported episodic_embeddings` 328 条 → vectors 表
 - 新写入: `embedder.py` 用 fastembed 算
 
 ---
@@ -178,7 +177,7 @@ CREATE TABLE meta (
 -- INSERT INTO meta (key, value) VALUES ('schema_version', '1.0');
 -- INSERT INTO meta (key, value) VALUES ('embedding_model', 'BAAI/bge-small-zh-v1.5');
 -- INSERT INTO meta (key, value) VALUES ('embedding_dim', '512');
--- INSERT INTO meta (key, value) VALUES ('created_from', 'mnemosyne-7.17-migration');
+-- INSERT INTO meta (key, value) VALUES ('created_from', 'imported-7.17');
 ```
 
 ### 4.2 `recall_log` —  recall 审计
@@ -395,7 +394,7 @@ def memory_forget(target_id, reason='outdated', cascade=True):
 ### 7.2 更新 (主人口中"更新知识")
 
 **问题**: 直接 UPDATE = 失去历史
-**方案**: Append-only + superseded_by 链 (跟 Mnemosyne 一致)
+**方案**: Append-only + superseded_by 链
 
 ```python
 def memory_update(old_id, new_content=None, new_properties=None, new_importance=None, reason='updated'):
@@ -539,7 +538,7 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 - 概念: `翁氏_D∩W` / `Trinity_3层`
 - 事件: `2026-07-17-trinity-anchor` / `2026-08-14-anchor`
 - 人: `master_2077_ling`
-- 任务: `task_07_18_mnemosyne_migration`
+- 任务: `task_07_18_initial_import`
 
 ---
 
@@ -563,33 +562,16 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 | 2 | memory.db 初始化 + 触发器 | `scripts/init_db.py` | 15 分钟 |
 | 3 | embedder.py (复用 bge-small-zh-v1.5, 复用 venv) | `embedder.py` | 30 分钟 |
 | 4 | memory.py 核心 6 API | `memory.py` | 2-3 小时 |
-| 5 | import_from_mnemosyne.py (Mnemosyne → hm_ 全量迁移) | `scripts/import_from_mnemosyne.py` | 1-2 小时 |
+| 5 | import_legacy.py (旧系统 → hm_ 全量迁移) | `scripts/import_legacy.py` | 1-2 小时 |
 | 6 | entity_resolve.py (alias + 相似度合并) | `entity_resolve.py` | 1 小时 |
 | 7 | api/ 4 MCP tool (memory_remember / memory_recall / memory_relate / memory_forget) | `api/*.py` | 2 小时 |
-| 8 |  cron 接入: trinity_daily.py Part 3 + weng 早报 (替换 mnemosyne_*) | `cron/` | 1-2 小时 |
+| 8 |  cron 接入: trinity_daily.py Part 3 + weng 早报 | `cron/` | 1-2 小时 |
 | 9 | tests/ (CRUD + 3 路 recall + soft delete + 4D 时间) | `tests/test_*.py` | 1-2 小时 |
 
 总: 1-2 天可跑通基础闭环 (步骤 1-5)。
 
 ---
 
-## 11. 与 Mnemosyne 兼容层 (过渡期)
-
-: 主人口中拍板"接口不保留原名" — 但中如果 trinity_daily 还在调 `mnemosyne_remember`, 过渡期需要 shim:
-
-```python
-# $MNELO_MEMORY_DIR/api/mnemosyne_shim.py
-# 过渡期: 把 mnemosyne_* 调用映射到 hm_*
-def mnemosyne_remember(content, **kwargs):
-    return memory_remember(content=content, source='mnemosyne-shim', **kwargs)
-
-def mnemosyne_recall(query, **kwargs):
-    return memory_recall(query=query, **kwargs)
-```
-
-**期**: shim 只为兜底, **主路径全部用 memory_*** (1 周过渡, 之后删 shim).
-
----
 
 ## 12. 风险与限制
 
