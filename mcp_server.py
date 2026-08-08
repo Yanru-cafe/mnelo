@@ -530,23 +530,28 @@ def _resolve_server_defaults() -> tuple:
 
 # [7/19 P2-3] 简易 in-memory rate limit (防 runaway loop / 滥用)
 # key=tool 名, value=[window_start_ts, count_in_window]
-_RATE_LIMIT_WINDOW_SEC = 60
-_RATE_LIMIT_MAX_REQS = 60  # 每分钟每 tool 最多 60 次 (实测 recall ~50ms, 足够人用)
-
-
+# [8/9 P1-yanru] 60 → 600 (硬编码) → 提到 config.toml (rate_limit.max_per_window).
+# 默认 60/min 兼容旧行为; 当前生效值见 config.rate_limit_max_per_window.
 def _rate_limit_check(tool_name: str) -> None:
-    """In-process sliding-window rate limit. 超限抛 ValidationError."""
+    """In-process sliding-window rate limit. 超限抛 ValidationError.
+
+    Threshold from config: config.rate_limit_max_per_window / .rate_limit_window_sec.
+    改完需重启 mcp_server 进程 (config 是模块级单例, 启动时加载).
+    """
     import time as _time
+
+    max_reqs = config.rate_limit_max_per_window
+    window_sec = config.rate_limit_window_sec
 
     now_ts = _time.time()
     bucket = _RATE_BUCKETS.get(tool_name)
-    if bucket is None or now_ts - bucket[0] > _RATE_LIMIT_WINDOW_SEC:
+    if bucket is None or now_ts - bucket[0] > window_sec:
         _RATE_BUCKETS[tool_name] = [now_ts, 1]
         return
     bucket[1] += 1
-    if bucket[1] > _RATE_LIMIT_MAX_REQS:
+    if bucket[1] > max_reqs:
         raise ValidationError(
-            tool_name, f"rate limit: {_RATE_LIMIT_MAX_REQS} reqs / {_RATE_LIMIT_WINDOW_SEC}s exceeded"
+            tool_name, f"rate limit: {max_reqs} reqs / {window_sec}s exceeded"
         )
 
 
