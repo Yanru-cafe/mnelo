@@ -3,9 +3,12 @@
 mcp_server.py — mnelo MCP Server
 
 - 7/19 v0.5.0 breaking change: 变量名 `HERMES_MEMORY_*` → `MNELO_MEMORY_*`, `MNELO_HOME` → `MNELO_HOME`
-- 接口: memory_remember / memory_recall / memory_relate / memory_forget
-       / memory_update / memory_graph_query / memory_stats
-- 7 工具, 与 mnelo v0.5.x 6 API + 1 个 stats 完美对齐
+- 接口: 22 tools — 4 L1 入口 (memory_remember / memory_recall / memory_relate / memory_forget)
+       + memory_update / memory_graph_query / memory_stats / memory_entity_resolve /
+       memory_list_entities / memory_search_relations / memory_audit_list / memory_audit_undo /
+       memory_maintenance / memory_get_digest / memory_task_{create,transition,list,replay} /
+       memory_loop_{create,tick,update,list}
+- 22 tools, 与 mnelo 当前 TOOL_REGISTRY + TASK_TOOL_REGISTRY 实际一致 (grep '"name": "memory_' mcp_server.py = 22)
 - transports: SSE (/sse) / streamable-http (/mcp, MCP 2025-03-26) / dual — 推荐 streamable-http
 
 [运行]
