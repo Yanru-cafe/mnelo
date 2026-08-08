@@ -614,25 +614,37 @@ class Memory:
 
         # 4.5 [8/6 E 路线] PII advisory scan — 命中只写 audit_log, 不改 content 不 throw
         # mnelo 不读内容、不加密、不主动 block; 调用方自决 ("最多提醒一下").
+        #
+        # [8/9 fix] PII audit_log 假 fail bug: audit_log UNIQUE constraint
+        # (run_id, pass_name, action_type, ref_id, status) 防同 run 重复 apply.
+        # run_id 必须 idempotent per (chunk_id, pii_category) — 同一 chunk 同类 PII
+        # retry 时, INSERT OR IGNORE 撞 UNIQUE 静默跳过, 既保留去重 audit trail
+        # 又不让 IntegrityError 把整个 remember 拉下水.
+        # (历史 issue: 8/9 VPS 迁移阶段观察到 23 个 IntegrityError 重复写入同一 content)
         from validation import scan_pii_warnings as _scan_pii
         for hit in _scan_pii(content):
-            self._conn.execute(
-                "INSERT INTO audit_log (run_id, pass_name, action_type, ref_type, ref_id, "
-                "after_json, llm_used, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 0, 'applied', ?)",
-                (
-                    f"pii_advisory_{chunk_id}",
-                    "pii_audit",
-                    f"detected_{hit['category']}",
-                    "chunk",
-                    chunk_id,
-                    json.dumps(
-                        {"category": hit["category"], "offset": hit["offset"], "length": hit["length"]},
-                        ensure_ascii=False,
+            _audit_run_id = f"pii_advisory_{chunk_id}_{hit['category']}"
+            try:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO audit_log (run_id, pass_name, action_type, ref_type, ref_id, "
+                    "after_json, llm_used, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0, 'applied', ?)",
+                    (
+                        _audit_run_id,
+                        "pii_audit",
+                        f"detected_{hit['category']}",
+                        "chunk",
+                        chunk_id,
+                        json.dumps(
+                            {"category": hit["category"], "offset": hit["offset"], "length": hit["length"]},
+                            ensure_ascii=False,
+                        ),
+                        ts,
                     ),
-                    ts,
-                ),
-            )
+                )
+            except sqlite3.IntegrityError as _e:
+                # INSERT OR IGNORE 通常已吸收; 兜底 catch 防御 schema 变化引入新 UNIQUE.
+                logger.warning(f"[pii_audit] audit_log skip for {chunk_id}/{hit['category']}: {_e}")
 
         self._conn.commit()
         # Digest only depends on identity facts and high-importance decisions/episodes.
