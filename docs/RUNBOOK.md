@@ -207,7 +207,7 @@ Environment=MNELO_MEMORY_DIR=/path/to/mnelo-data
 Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
 # 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
 Environment=MNELO_MEMORY_SERVER_PORT=8086
-ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport sse --host 127.0.0.1
+ExecStart=/path/to/mnelo/.venv/bin/python mcp_server.py --transport streamable-http --host 127.0.0.1
 # usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
 Restart=always
 RestartSec=3
@@ -243,18 +243,20 @@ journalctl -u mnelo-mcp -e                 # 末尾 20 行
 ```bash
 cd /path/to/mnelo
 MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
-  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
+  setsid nohup .venv/bin/python mcp_server.py --transport streamable-http --host 127.0.0.1 --port 8086 \
   >> /tmp/mnelo-server.log 2>&1 &
 ss -tlnp | grep 8086      # 确认监听
 ```
 
 要开机自启需另配 cron `@reboot` 或外部进程管理器 (supervisor / Docker restart policy)。
 
-### 5.3 测试 SSE server
+### 5.3 测试 server (streamable-http)
 
 ```bash
-curl -sS http://127.0.0.1:8086/sse -m 1 | head
-# 应该收到 MCP SSE handshake
+# MCP /mcp endpoint — Bearer 校验 ON, 无 token 应 401 (= server up + auth 生效)
+curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8086/mcp   # → 401
+# health (无需鉴权)
+curl -sS http://127.0.0.1:8086/health | jq .status                    # → "ok"
 ```
 
 ---
@@ -309,8 +311,8 @@ ln -sf $MNELO_MEMORY_DIR/api/mnelo_client.py \
 ```yaml
 mcp_servers:
   mnelo:
-    transport: sse
-    url: http://127.0.0.1:8086/sse
+    transport: streamable-http
+    url: http://127.0.0.1:8086/mcp
     enabled_tools:
       - memory_recall
       - memory_remember
@@ -429,9 +431,9 @@ sleep 3
 ss -tlnp | grep 8086
 
 # 无 systemd (setsid nohup, 备用方式) — kill 旧进程后重新 nohup 启动
-pkill -f "mcp_server.py --transport sse" && sleep 2
+pkill -f "mcp_server.py --transport streamable-http" && sleep 2
 MNELO_MEMORY_DIR=/path/to/mnelo-data MNELO_MEMORY_SEARCH_BACKEND=usearch \
-  setsid nohup .venv/bin/python mcp_server.py --transport sse --host 127.0.0.1 --port 8086 \
+  setsid nohup .venv/bin/python mcp_server.py --transport streamable-http --host 127.0.0.1 --port 8086 \
   >> /tmp/mnelo-server.log 2>&1 &
 ```
 

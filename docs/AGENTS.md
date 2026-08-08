@@ -48,8 +48,8 @@ first use):
 
 Add a note to your `SOUL.md` / `CLAUDE.md` (or equivalent):
 
-> **Memory**: I use the mnelo MCP server (SSE at
-> `http://127.0.0.1:8086/sse`) as my memory system.
+> **Memory**: I use the mnelo MCP server (streamable-http at
+> `http://127.0.0.1:8086/mcp`) as my memory system.
 > - `memory_remember` — persist important facts & decisions, with a type
 >   (`preference`, `decision`, …)
 > - `memory_recall` — retrieve before answering anything that might not
@@ -204,7 +204,7 @@ Hand this to any AI coding agent (Claude Code, Hermes, Cursor, …):
 >    [search] backend = 'auto'|'usearch'|'zvec'`.
 > 4. After it's running, **update your own SOUL.md / CLAUDE.md** to
 >    declare: "I use the mnelo MCP server
->    (`http://127.0.0.1:8086/sse`) as my memory system —
+>    (streamable-http at `http://127.0.0.1:8086/mcp`) as my memory system —
 >    `memory_remember` to persist, `memory_recall` to retrieve,
 >    `memory_get_digest` for the session digest."
 

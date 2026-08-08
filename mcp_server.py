@@ -6,10 +6,10 @@ mcp_server.py — mnelo MCP Server
 - 接口: memory_remember / memory_recall / memory_relate / memory_forget
        / memory_update / memory_graph_query / memory_stats
 - 7 工具, 与 mnelo v0.5.x 6 API + 1 个 stats 完美对齐
-- SSE transport on 127.0.0.1:8086
+- transports: SSE (/sse) / streamable-http (/mcp, MCP 2025-03-26) / dual — 推荐 streamable-http
 
 [运行]
-    cd LIVE_ROOT && python3 mcp_server.py --transport sse
+    cd LIVE_ROOT && python3 mcp_server.py --transport streamable-http
     (port 走 config: env MNELO_MEMORY_SERVER_PORT > toml [server].port > 8086)
 """
 

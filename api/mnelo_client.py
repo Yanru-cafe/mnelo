@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-mnelo_client.py — 客户端 (SSE)
+mnelo_client.py — 客户端 (SSE / streamable-http 双 transport)
 
 - 主人口中 7/18 拍板 C 方案: trinity_daily.py 通过 MCP tool 调 mnelo
 - 替代直接 import memory.py (更解耦, mcp server 可独立升级)
@@ -30,16 +30,32 @@ if not logger.handlers:
     ))
     logger.addHandler(handler)
 
-# 默认 SSE endpoint
+# 默认 endpoint: streamable-http (MCP 2025-03-26 spec) — /mcp 路径
+DEFAULT_MCP_URL = 'http://127.0.0.1:8086/mcp'
+# legacy SSE endpoint (back-compat; URL 含 /sse 时自动用 sse transport)
 DEFAULT_SSE_URL = 'http://127.0.0.1:8086/sse'
 
 
 class MneloClient:
-    """MCP 客户端 — 7 个工具的同步包装."""
+    """MCP 客户端 — 7 个工具的同步包装 (SSE / streamable-http)."""
 
-    def __init__(self, sse_url: str = DEFAULT_SSE_URL, timeout: float = 30.0,
+    def __init__(self, sse_url: Optional[str] = None, url: Optional[str] = None,
+                 transport: Optional[str] = None, timeout: float = 30.0,
                  auth_token: Optional[str] = None):
-        self.sse_url = sse_url
+        """URL 优先级: url(新) > sse_url(旧别名) > env MNELO_MEMORY_URL > DEFAULT_MCP_URL.
+
+        transport 未显式指定 → 按 URL 自动判断 (/sse → sse, 其余 → streamable-http).
+        """
+        if url is None:
+            url = sse_url
+        if url is None:
+            url = os.environ.get('MNELO_MEMORY_URL', DEFAULT_MCP_URL)
+        if transport is None:
+            transport = 'sse' if '/sse' in url else 'streamable-http'
+        if transport not in ('sse', 'streamable-http'):
+            raise ValueError(f"transport must be 'sse' or 'streamable-http', got {transport!r}")
+        self.url = url
+        self.transport = transport
         self.timeout = timeout
         self._session: Optional[Any] = None
         # [2026-07-22 P0-fix] Bearer token auth (matches server load_auth_token).
@@ -50,6 +66,17 @@ class MneloClient:
             or os.environ.get('MNELO_AUTH_TOKEN')
             or self._read_token_file()
         )
+
+    @property
+    def sse_url(self) -> str:
+        """Back-compat alias for .url — 旧代码直接读写 .sse_url 属性仍有效."""
+        return self.url
+
+    @sse_url.setter
+    def sse_url(self, value: str) -> None:
+        self.url = value
+        if '/sse' in value:
+            self.transport = 'sse'
 
     def _read_token_file(self) -> Optional[str]:
         """~/.config/mnelo/auth_token 文件读取, mode 0600 ownership-preserving."""
@@ -62,23 +89,27 @@ class MneloClient:
         return None
 
     def _ensure_mcp(self) -> Tuple[Any, Any]:
-        """: 检查 MCP 库可用, 返回 (ClientSession, sse_client) 类引用."""
+        """: 检查 MCP 库可用, 返回 (ClientSession, client_factory). transport 决定 sse / streamable-http."""
         try:
             from mcp import ClientSession
-            from mcp.client.sse import sse_client
-            return ClientSession, sse_client
+            if self.transport == 'sse':
+                from mcp.client.sse import sse_client
+                return ClientSession, sse_client
+            # streamable_http_client (新名; 旧名 streamablehttp_client 已弃用)
+            from mcp.client.streamable_http import streamable_http_client
+            return ClientSession, streamable_http_client
         except ImportError:
             raise RuntimeError('MCP 客户端库不可用, 请先: pip install mcp[cli]')
 
     def _call(self, tool_name: str, arguments: Dict) -> Any:
-        """: SSE 连接 + 调用 + 关闭, [P2+ #5 7/18] 加重试防 cold-start race."""
-        ClientSession, sse_client = self._ensure_mcp()
+        """: MCP 连接 + 调用 + 关闭, [P2+ #5 7/18] 加重试防 cold-start race."""
+        ClientSession, client_factory = self._ensure_mcp()
         last_err = None
         # [P2+ #5] 重试 2 次: 失败后退避 0.3s, 再次尝试
-        #  race: MCP server 启动后 1 秒内有人调 (warm-up 时) 可能 SSE 拒绝
+        #  race: MCP server 启动后 1 秒内有人调 (warm-up 时) 可能拒绝
         for attempt in range(2):
             try:
-                return asyncio.run(self._async_call(tool_name, arguments, ClientSession, sse_client))
+                return asyncio.run(self._async_call(tool_name, arguments, ClientSession, client_factory))
             except Exception as e:
                 last_err = e
                 if attempt == 0:
@@ -89,38 +120,51 @@ class MneloClient:
         logger.error(f'MCP call {tool_name} failed after retries: {last_err}')
         raise last_err if last_err else RuntimeError('mcp call failed')
 
-    async def _async_call(self, tool_name: str, arguments: Dict, ClientSession, sse_client):
-        # [2026-07-22 P0-fix] Inject Bearer token in SSE handshake headers
-        kwargs = {}
-        if self._auth_token:
-            kwargs['headers'] = {'Authorization': f'Bearer {self._auth_token}'}
-        async with sse_client(self.sse_url, **kwargs) as (r, w):
-            async with ClientSession(r, w) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments)
-                # [2026-07-22 fix] Server returns 2 TextContent blocks:
-                # - [0] = 🌳 echo summary (human-readable one-liner)
-                # - [1] = canonical JSON (machine-parseable)
-                # Old client only read [0] and got an echo string instead of JSON.
-                # Try every block, prefer the one that parses as JSON.
-                if not result.content:
-                    return None
-                last_parsed = None
-                raw_text = None
-                for block in result.content:
-                    if not hasattr(block, 'text'):
-                        continue
-                    text = block.text
-                    raw_text = text
-                    try:
-                        last_parsed = json.loads(text)
-                        # Prefer parsed JSON over raw text
-                        if isinstance(last_parsed, (dict, list)):
-                            return last_parsed
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                # No JSON block — return raw text
-                return raw_text
+    async def _async_call(self, tool_name: str, arguments: Dict, ClientSession, client_factory):
+        # [2026-07-22 P0-fix] Inject Bearer token in MCP handshake headers
+        headers = {'Authorization': f'Bearer {self._auth_token}'} if self._auth_token else None
+        if self.transport == 'streamable-http':
+            # 新 SDK API: streamable_http_client(url, http_client=...) — 不收 headers/timeout,
+            # 需传配置好的 httpx.AsyncClient (Bearer + timeout 注入).
+            import httpx
+            async with httpx.AsyncClient(headers=headers,
+                                         timeout=httpx.Timeout(self.timeout)) as http_client:
+                # 新 API yield (read, write, session_id_fn) 三元组.
+                async with client_factory(self.url, http_client=http_client) as (r, w, *_):
+                    return await self._run_session(ClientSession, r, w, tool_name, arguments)
+        # legacy SSE (和旧 streamablehttp_client) — 直接收 headers/timeout.
+        async with client_factory(self.url, headers=headers or None,
+                                  timeout=self.timeout) as (r, w, *_):
+            return await self._run_session(ClientSession, r, w, tool_name, arguments)
+
+    async def _run_session(self, ClientSession, r, w, tool_name: str, arguments: Dict) -> Any:
+        """ClientSession initialize + call_tool + 解析 TextContent 块 (两 transport 共享)."""
+        async with ClientSession(r, w) as session:
+            await session.initialize()
+            result = await session.call_tool(tool_name, arguments)
+            # [2026-07-22 fix] Server returns 2 TextContent blocks:
+            # - [0] = 🌳 echo summary (human-readable one-liner)
+            # - [1] = canonical JSON (machine-parseable)
+            # Old client only read [0] and got an echo string instead of JSON.
+            # Try every block, prefer the one that parses as JSON.
+            if not result.content:
+                return None
+            last_parsed = None
+            raw_text = None
+            for block in result.content:
+                if not hasattr(block, 'text'):
+                    continue
+                text = block.text
+                raw_text = text
+                try:
+                    last_parsed = json.loads(text)
+                    # Prefer parsed JSON over raw text
+                    if isinstance(last_parsed, (dict, list)):
+                        return last_parsed
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            # No JSON block — return raw text
+            return raw_text
 
     # === 7 个工具封装 ===
 
@@ -233,7 +277,7 @@ _client_instance: Optional[MneloClient] = None
 
 
 def get_client() -> MneloClient:
-    """: 复用单例 client (SSE 短连接, 单次 7ms)."""
+    """: 复用单例 client (短连接, 单次 ~7ms)."""
     global _client_instance
     if _client_instance is None:
         _client_instance = MneloClient()

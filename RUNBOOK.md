@@ -158,11 +158,11 @@ launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
 **Token 配置**: 不在 plist 里 (plist 是 world-readable XML, 暴露 attack surface)。
 Token 走 `~/.config/mnelo/auth_token` (mode 600) 默认; 或手动 `export MNELO_AUTH_TOKEN=***` override。
 
-### 5.2 测试 SSE server
+### 5.2 测试 server (streamable-http)
 
 ```bash
-curl -sS http://127.0.0.1:8086/sse -m 1 | head
-# 应该收到 MCP SSE handshake
+curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8086/mcp   # → 401 (auth ON)
+curl -sS http://127.0.0.1:8086/health | jq .status                    # → "ok"
 ```
 
 ---
@@ -217,8 +217,8 @@ ln -sf ~/.hermes/memory/api/mnelo_client.py \
 ```yaml
 mcp_servers:
   mnelo:
-    transport: sse
-    url: http://127.0.0.1:8086/sse
+    transport: streamable-http
+    url: http://127.0.0.1:8086/mcp
     enabled_tools:
       - memory_recall
       - memory_remember

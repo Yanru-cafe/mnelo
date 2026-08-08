@@ -9,7 +9,7 @@
   不刷错误日志)。Claude Code SessionStart 钩子的 stdout 会被注入上下文; 本脚本
   只在成功取到摘要时输出。
 - **通用优先**: 走 MneloClient (MCP 标准), 不直接读 DB —— 任何部署形态 (server
-  常驻/手动起) 都能用; 客户端默认连 127.0.0.1:8086/sse, token 从
+  常驻/手动起) 都能用; 客户端默认连 127.0.0.1:8086/mcp (streamable-http), token 从
   MNELO_AUTH_TOKEN 或 ~/.config/mnelo/auth_token 读。
 - **输出格式**: `[mnelo-digest] ... [/mnelo-digest]` 包裹, 便于 Agent 识别为
   引用数据而非指令 (DESIGN §12 数据围栏同思想)。
@@ -71,16 +71,18 @@ def main() -> int:
     if _bootstrap_venv():
         return 0  # 已 re-exec, 不会到这
     try:
-        from mnelo_client import MneloClient, DEFAULT_SSE_URL
-        # [8/5 fix] 允许通过 MNELO_MEMORY_SSE_URL 覆盖默认 URL — 测试可注入死端口
-        # 模拟 MCP 不可达. 默认仍为 127.0.0.1:8086 (向后兼容).
-        sse_url = os.environ.get("MNELO_MEMORY_SSE_URL", DEFAULT_SSE_URL)
+        from mnelo_client import MneloClient, DEFAULT_MCP_URL
+        # [8/8] 默认走 streamable-http /mcp (新 transport)。覆盖优先级:
+        # MNELO_MEMORY_URL (新) > MNELO_MEMORY_SSE_URL (旧, 测试注入死端口用)。
+        # URL 含 /sse 时 client 自动回落 sse transport (向后兼容)。
+        url = os.environ.get("MNELO_MEMORY_URL") \
+            or os.environ.get("MNELO_MEMORY_SSE_URL") or DEFAULT_MCP_URL
 
         # 容错路径要真正静默: mnelo_client 在 import 时 setLevel(INFO)+挂 handler,
         # 必须在 import 之后压制 — mnelo 未跑时它会打 ERROR 日志, 对 SessionStart
         # 钩子是噪音 (期望失败场景不该刷错误)。
         logging.getLogger("mnelo_client").setLevel(logging.CRITICAL)
-        digest = MneloClient(sse_url=sse_url).get_digest()  # 默认 ref=None → 摘要压缩视图
+        digest = MneloClient(url=url).get_digest()  # 默认 ref=None → 摘要压缩视图
     except Exception:
         # mnelo 未跑/超时 → 静默退出, 不阻断会话
         return 0
