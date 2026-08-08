@@ -14,6 +14,7 @@ mcp_server.py — mnelo MCP Server
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -1044,18 +1045,65 @@ async def _mnelo_metrics_endpoint(request):
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
 
 
+def _ip_in_tailscale_cgnat(ip_str: str) -> bool:
+    """[8/8 Tailscale multi-agent] 检测 IP 是否在 Tailscale CGNAT 100.64.0.0/10.
+
+    Tailscale 给 mesh 设备分配 100.64.0.0/10 (实际可见 100.64.0.0 - 100.127.255.255).
+    这段是私网 + 跨 WAN mesh, 主人 8/8 拍板作为 multi-agent 远程通道.
+
+    Returns:
+        bool: True if IP in 100.64.0.0/10, False otherwise (含无效 IP).
+    """
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    # Tailscale CGNAT = 100.64.0.0/10
+    return ip in ipaddress.ip_network("100.64.0.0/10")
+
+
 def _validate_loopback_host(host: str) -> None:
-    """[P2-1] host 白名单 — 只接 loopback, 拒绝 0.0.0.0 / LAN IP.
+    """[8/8 Tailscale multi-agent] host 白名单 — 接受 loopback + Tailscale CGNAT.
+
+    [8/8 决策] 主人拍板 mnelo 改成 multi-agent 远程调用. P2-1 单机 loopback
+    限制解除, 接受:
+      - 127.0.0.0/8 (loopback, 单机本地)
+      - 100.64.0.0/10 (Tailscale CGNAT, 跨 vps mesh)
+      - localhost (DNS alias)
+
+    拒绝 (LAN/公网/IPv6 攻击面):
+      - 192.168.x.x / 10.x.x.x / 172.16-31.x.x (LAN)
+      - 公网 IP (8.8.8.8 等)
+      - IPv6 (Tailscale multi-agent 现阶段只走 IPv4)
+
+    单独路径 (不验证):
+      - 0.0.0.0 / :: (bind 任意, 启动后用 ipfilter 限来源)
 
     Raises:
-        ValueError: host 不在 loopback 范围
+        ValueError: host 不在白名单
     """
-    if host != "127.0.0.1" and host != "localhost" and not host.startswith("127."):
-        raise ValueError(
-            f"--host {host!r} not allowed. mnelo SSE is loopback-only for security. "
-            f"Pass 127.0.0.1 or localhost. For LAN access, "
-            f"use SSH tunnel or VPN instead."
-        )
+    # bind 任意地址 — 单独路径, 启动后由 ipfilter / OS firewall 限制来源
+    if host in ("0.0.0.0", "::"):
+        return
+    # localhost alias
+    if host == "localhost":
+        return
+    # IPv4 loopback (127.0.0.0/8)
+    if host.startswith("127."):
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip in ipaddress.ip_network("127.0.0.0/8"):
+                return
+        except ValueError:
+            pass
+    # Tailscale CGNAT
+    if _ip_in_tailscale_cgnat(host):
+        return
+    raise ValueError(
+        f"--host {host!r} not allowed. mnelo host must be loopback (127.0.0.0/8) "
+        f"or Tailscale CGNAT (100.64.0.0/10). For LAN/public access, "
+        f"add Tailscale to the agent machine and use the Tailscale IP."
+    )
 
 
 def _check_port_available(host: str, port: int) -> bool:
