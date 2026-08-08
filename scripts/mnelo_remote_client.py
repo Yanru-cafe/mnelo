@@ -289,3 +289,41 @@ if __name__ == "__main__":
     except MneloRemoteError as e:
         print(f"✗ mnelo error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+
+# ============================================================
+# HermesMneloClient — [8/9] hermes 端默认 source filter
+# ============================================================
+# 8/9 燕如 P5 反馈: mnelo 没有 row-level ACL. 跨 vps 客户端要自己在 wrapper 锁死
+# source, 不然 recall 不带 filter 会看到其它客户端 chunk. 燕如写了 YanruMneloClient
+# 锁死 source="yanru-vps". 我们 hermes 端镜像这个 pattern.
+#
+# 跟 macbook 本机的 hybrid path (path A via memory_recall MCP tool) 不同:
+# - path A (hermes core memory tool): 已经在 ~/.hermes/config.yaml mcp_servers.mnelo
+#   跑, hermes owner 通过 memory_recall('query') 返回 mnelo hits. 主人 8/9 拍板
+#   hermes 端 source 默认 'hermes-gw' (AGENTS.md §1.5 决策点).
+# - path B (mnelo_remote_client.py cross-vps): 同 hermes owner 调用, 默认 source
+#   'hermes-gw' (Tailscale 入口). 燕如 / 别的 agent 写 'yanru-vps/*' 隔离.
+
+class HermesMneloClient(MneloRemoteClient):
+    """[8/9] hermes 端 source 默认 'hermes-gw' filter, 防跨客户端污染."""
+
+    DEFAULT_SOURCE = "hermes-gw"
+
+    def recall(self, query, top_k=5, filters=None, strategy="rrf", asof=None):
+        # 锁死 source. 显式传 source 不用锁 (怕燕如 end 共享 hermes client 时
+        # 临时切身份, 但默认 union 'hermes-gw' filter).
+        merged_filters = dict(filters or {})
+        merged_filters.setdefault("source", self.DEFAULT_SOURCE)
+        return super().recall(
+            query, top_k=top_k, filters=merged_filters, strategy=strategy, asof=asof
+        )
+
+    def remember(self, content, source=None, **kwargs):
+        # 强制 source 前缀 (防裸 source / 空字符串漏掉 hermes-gw 命名)
+        if not source:  # None + empty string 都走 default
+            source = self.DEFAULT_SOURCE
+        elif not source.startswith(self.DEFAULT_SOURCE):
+            source = f"{self.DEFAULT_SOURCE}/{source}"
+        return super().remember(content, source=source, **kwargs)
