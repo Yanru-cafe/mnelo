@@ -3,8 +3,6 @@
 """
 init_db.py — 初始化 ~/.hermes/memory/memory.db
 
-[7/18 自建]
-- 主人口中 7/18 拍板自建 KG, 替换 Mnemosyne
 - WAL mode + busy_timeout=30s 防止 lock 复发
 - [7/19] embedding 模型 + dim 从 config 读 (config.toml [embedder] 或 env override)
 """

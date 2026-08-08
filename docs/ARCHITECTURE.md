@@ -13,7 +13,7 @@
 
 ## 1. 系统定位
 
-**mnelo** 是 Hermes Agent 的本地知识图谱记忆系统，2026-07-17 拍板自建、7/18 上线替换原 Mnemosyne。物理形态：
+**mnelo** 是 Hermes Agent 的本地知识图谱记忆系统，2026-07-17 自建、7/18 上线。物理形态：
 
 ```
 $MNELO_MEMORY_DIR/

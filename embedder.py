@@ -3,7 +3,6 @@
 embedder.py — fastembed wrapper (configurable model)
 
 - 默认模型: BAAI/bge-small-zh-v1.5 (Chinese-native, 512d)
-- 复用旧系统 (Mnemosyne) 同样的 embedding 模型, 避免迁移时重嵌入
 - 与 hermes-agent/venv 共用, 不重装
 
 Model location: fastembed uses the HuggingFace cache, which defaults to

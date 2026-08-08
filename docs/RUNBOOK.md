@@ -91,8 +91,7 @@ $MNELO_MEMORY_DIR/
 ├── scripts/
 │   ├── init_db.py            # 第一次创建 db (跑过一次即可)
 │   ├── health_check.py       # 每天自检 (source-of-truth)
-│   ├── repair_vectors.py     # 一次性 vec0 rowid 修复 (post-import)
-│   └── migrate_to_mnelo.py  # 从旧 Mnemosyne 迁移 (可选)
+│   └── repair_vectors.py     # 一次性 vec0 rowid 修复 (post-import)
 │
 ├── tests/
 │   ├── test_memory.py        # 50 测试覆盖 CRUD/recall/bounds/clamp
@@ -449,7 +448,7 @@ dr-backup 加 cron 后 (见 `~/.hermes/scripts/dr-backup.sh`) 自动 rsync 到 N
 
 ### 9.3 修复 vec0 (一次性)
 
-如果从老 Mnemosyne 迁移, vec0 rowid 可能 60-70% 错位. 一次性修复:
+如果从旧系统迁移, vec0 rowid 可能 60-70% 错位. 一次性修复:
 
 ```bash
 cd $MNELO_MEMORY_DIR
