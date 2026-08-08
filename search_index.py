@@ -398,9 +398,16 @@ class UsearchIndex(SearchIndex):
     """[A2 §4] usearch 后端 — HNSW, 硬件无关 (DESIGN §8.3 升级档, 本机 Ivy Bridge 可跑).
 
     [8/6 plan §2 精度] f16 量化 — Index(dtype='f16') 默认 2 字节/维,
-    add/search 自动 f32↔f16 cast, KNN 查询不受影响.
-    加载现有 f32 usearch.index 也兼容 (实测过 f32 file load f16 index OK),
-    但后续 add 会写 f16 — 下次 fresh 必须 unlink 旧 f32 文件.
+    add/search 自动 f32↔f16 cast, KNN 查询不受影响. f16 是永久契约.
+
+    [8/8 根因修复] 启动不再盲 load on-disk 索引: 原生 load 前先 Index.metadata()
+    读文件头预检 (损坏/截断/错 dtype → 干净 ValueError, 不触发原生图 load),
+    再比对 sidecar 指纹 (close 时写的 active chunk 集合签名) 判定 stale; 任一
+    不过 → 自动从 SQLite (唯一事实源) 重建 f16 索引, 坏文件改名 .corrupt-<ts>
+    留档. 由此根除两类启动事故:
+      - 损坏/截断索引盲 load → 原生 abort (free(): corrupted unsorted chunks)
+      - f32/f16 混合精度文件 load 后静默转 F32, 后续 add 写 f16 → 原生堆损坏
+      - stale 索引 (rowid 不再对应 chunks / 漏最新 chunk) → 静默漏召回
 
     内部 id = chunks.rowid (同 sqlite_vec, 无独立映射表 — 避免双写不一致).
     """
@@ -409,6 +416,9 @@ class UsearchIndex(SearchIndex):
         self.db_path = db_path
         self.dim = dim
         self._index_path = db_path.parent / "usearch.index"
+        # [8/8 根因修复] sidecar 指纹 — close() 记录 active chunk 集合签名,
+        # 启动时比对 SQLite (唯一事实源), 不一致 → 判定索引 stale → 自动重建.
+        self._meta_path = db_path.parent / "usearch.index.verified.json"
         # 映射查询用自有 sqlite 连接 (usearch 不在 memory.py 事务里)
         self._conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -431,17 +441,11 @@ class UsearchIndex(SearchIndex):
                 f"UsearchIndex 必须 f16 (主人口中 8/6 锁定), got dtype={actual_dtype_name!r}. "
                 "改 dtype 之前请先走 design review + RUNBOOK §usearch-f16 章节."
             )
-        if self._index_path.exists():
-            self._index.load(self._index_path)  # load 是实例方法
-            # [8/6 f16 断言] 磁盘文件若是 f32, load 后 Index 静默转 F32 模式,
-            # 后续 add 写 f16 → 混合精度文件 → 原生堆损坏 (free(): corrupted unsorted chunks).
-            # f16 是永久契约 — live 索引必须显式 f16 重建.
-            if self._index.dtype != ScalarKind.F16:
-                raise RuntimeError(
-                    f"[usearch] live 索引 {self._index_path} 精度 {self._index.dtype} ≠ f16, "
-                    "违反 f16 契约 (混合精度触发原生堆损坏). "
-                    "请重建: scripts/rebuild_index.py --backend usearch --fresh"
-                )
+        # [8/8 根因修复] 不再盲 load on-disk 索引 — 原生 load 前先读文件头预检
+        # (损坏/错 dtype 抛干净 ValueError, 不触发原生图 load), 再用 sidecar 指纹
+        # 比对 SQLite (唯一事实源) 判定 stale; 任一不过 → 自动重建. 由此启动永不因
+        # 坏索引 abort, 也永不静默漏数据.
+        self._init_from_disk()
 
     @property
     def name(self) -> str:
@@ -513,6 +517,8 @@ class UsearchIndex(SearchIndex):
 
     def close(self) -> None:
         self._index.save(self._index_path)  # 持久化 (f16 写入)
+        # [8/8] 先 save 索引再写 sidecar — 若中途崩, sidecar 旧 → 下次启动自动重建 (安全).
+        self._write_sidecar()
         self._conn.close()
 
     # -------- [8/6 plan §2] 新方法 --------
@@ -573,6 +579,162 @@ class UsearchIndex(SearchIndex):
         else:
             result["vectors_remaining"] = len(self._index.keys)
         return result
+
+    # -------- [8/8 根因修复] 启动预检 + 自动重建 (替代盲 load) --------
+
+    def _init_from_disk(self) -> None:
+        """加载磁盘索引前先校验, 校验不过自动重建.
+
+        根因: 旧实现见 usearch.index 就 self._index.load() — 文件损坏/截断/
+        错 dtype 时 load 本身原生 abort (free(): corrupted unsorted chunks);
+        stale (rowid 不再对应 chunks 或漏最新 chunk) 则静默漏召回. 现在:
+          1) Index.metadata(path) 读文件头预检 — 只解析头部, 损坏/垃圾文件
+             抛干净 ValueError, 不触发原生图 load;
+          2) sidecar 指纹比对 SQLite active 集合 — 不一致 = stale;
+          3) 任一不过 → 自动从 SQLite 重建, 坏文件改名 .corrupt-<ts> 留档.
+        由此启动永不因坏索引 abort, 也永不静默漏数据.
+        """
+        if not self._index_path.exists():
+            return  # 全新索引, 无磁盘状态
+        problems = self._validate_index_header()
+        stale = False if problems else self._is_stale()
+        if not problems and not stale:
+            try:
+                self._index.load(self._index_path)  # load 是实例方法
+            except Exception as e:
+                problems.append(f"load 异常: {type(e).__name__}: {e}")
+            else:
+                dtype_name = getattr(self._index.dtype, "name", str(self._index.dtype))
+                if dtype_name.upper() != "F16":
+                    problems.append(f"load 后精度 {dtype_name} ≠ f16 (混合精度触发原生堆损坏)")
+        if problems or stale:
+            self._auto_rebuild(problems or ["索引与 SQLite chunk 集合不一致 (stale)"])
+        elif self._read_sidecar() is None:
+            self._write_sidecar()  # 旧代码升级 / 手删 sidecar → 补写采纳 (避免下次误判 stale)
+
+    def _validate_index_header(self) -> List[str]:
+        """Index.metadata 只解析 usearch 文件头: 损坏/截断/垃圾 → 干净 ValueError
+        (不会原生 abort). 返回问题列表, 空 = 头部可信, 可安全 load."""
+        from usearch.index import Index
+        try:
+            meta = Index.metadata(self._index_path)
+        except ValueError as e:
+            return [f"文件头损坏/非 usearch 索引 (不盲 load): {e}"]
+        except Exception as e:
+            return [f"读文件头异常 {type(e).__name__}: {e}"]
+        scalar = getattr(meta.get("kind_scalar"), "name", str(meta.get("kind_scalar")))
+        if scalar.upper() != "F16":
+            return [f"索引精度 {scalar} ≠ f16 (混合精度触发原生堆损坏)"]
+        dims = meta.get("dimensions")
+        if dims is not None and int(dims) != self.dim:
+            return [f"索引维数 {dims} ≠ {self.dim} (embedding 模型/配置已变)"]
+        return []
+
+    def _is_stale(self) -> bool:
+        """索引是否落后于 SQLite (事实源). sidecar 签名优先; 无 sidecar
+        (旧代码升级/首次) 用文件头向量数 vs SQL active 数兜底."""
+        side = self._read_sidecar()
+        if side is not None:
+            return side != self._chunk_set_signature()
+        from usearch.index import Index
+        try:
+            meta = Index.metadata(self._index_path)
+            return meta.get("count_present") != len(self._active_chunks())
+        except Exception:
+            return True
+
+    def _active_chunks(self) -> List[str]:
+        """active chunk id 列表 (SQLite 是唯一事实源). chunks 表不存在 → []."""
+        if not self._chunks_table_exists():
+            return []
+        return [r["id"] for r in self._conn.execute(
+            "SELECT id FROM chunks WHERE valid_until IS NULL ORDER BY id"
+        )]
+
+    def _chunks_table_exists(self) -> bool:
+        row = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='chunks'"
+        ).fetchone()
+        return bool(row)
+
+    def _chunk_set_signature(self) -> str:
+        """active chunk 集合稳定签名 = md5(排序 id 拼接 + 总数)."""
+        import hashlib
+        ids = self._active_chunks()
+        return hashlib.md5(("|".join(ids) + f"|{len(ids)}").encode("utf-8")).hexdigest()
+
+    def _read_sidecar(self) -> Optional[str]:
+        try:
+            import json
+            return str(json.loads(self._meta_path.read_text(encoding="utf-8")).get("signature"))
+        except Exception:
+            return None
+
+    def _write_sidecar(self) -> None:
+        import json
+        import time as _t
+        data = {
+            "signature": self._chunk_set_signature(),
+            "dtype": "f16",
+            "dim": self.dim,
+            "built_at": _t.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        tmp = self._meta_path.with_name(self._meta_path.name + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(self._meta_path)
+
+    def _auto_rebuild(self, reasons: List[str]) -> None:
+        """从 SQLite 重建 f16 索引. 坏文件改名 .corrupt-<ts> 留档, 全新 f16
+        Index + 全量重嵌入 active chunks, 落盘 + 写 sidecar. 重建不可能
+        (无 chunks 表 / embedder 挂 / 全 0 向量) → 抛 RuntimeError 手动兜底."""
+        import time as _t
+        logger.warning(f"[usearch] 索引 {self._index_path} 预检不过 → 自动重建. 原因: {'; '.join(reasons)}")
+        if self._index_path.exists():
+            # with_suffix 会把 ".index" 当后缀替换掉 → 必须用 with_name 追加保留原名
+            backup = self._index_path.with_name(
+                self._index_path.name + f".corrupt-{_t.strftime('%Y%m%d_%H%M%S')}"
+            )
+            try:
+                self._index_path.rename(backup)
+                logger.warning(f"[usearch] 坏索引已备份 → {backup}")
+            except OSError as e:
+                logger.warning(f"[usearch] 备份坏索引失败 {e} — 直接覆盖重建")
+        from usearch.index import Index
+        self._index = Index(ndim=self.dim, metric="cos", dtype="f16")
+        try:
+            from embedder import embed
+        except ImportError as e:
+            raise RuntimeError(
+                f"[usearch] 自动重建需要 embedder 但 import 失败 ({e}). "
+                "请手动: scripts/rebuild_index.py --backend usearch --fresh"
+            ) from e
+        import struct
+        added, failed = 0, 0
+        active = self._active_chunks()
+        for cid in active:
+            row = self._conn.execute(
+                "SELECT content FROM chunks WHERE id = ?", (cid,)
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                vec = embed(row["content"])
+                self.add(cid, struct.pack(f"{len(vec)}f", *vec), conn=self._conn)
+                added += 1
+            except Exception as e:
+                logger.warning(f"[usearch] 重建嵌入失败 {cid}: {e}")
+                failed += 1
+        if active and added == 0:
+            raise RuntimeError(
+                f"[usearch] 自动重建 0/{len(active)} 向量 — embedder 或 DB 异常. "
+                "请手动: scripts/rebuild_index.py --backend usearch --fresh"
+            )
+        self._index.save(self._index_path)
+        self._write_sidecar()
+        if failed:
+            logger.warning(f"[usearch] 自动重建完成: added={added}, failed={failed}")
+        else:
+            logger.info(f"[usearch] 自动重建完成: {added} 向量 → {self._index_path.name}")
 
 
 # ============================================================
