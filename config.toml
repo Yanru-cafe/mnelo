@@ -14,3 +14,12 @@ warm_up_embedder = true    # Memory 启动时加载 embedding 模型到 RAM, 避
 # 提示: 也可通过环境变量覆盖 — MNELO_MEMORY_EMBEDDER_MODEL / MNELO_MEMORY_EMBEDDER_DIM
 model = 'BAAI/bge-small-zh-v1.5'
 dim = 512
+
+[rate_limit]
+# [8/9 P1-yanru] Per-tool sliding-window rate limit. 防 runaway loop / 滥用.
+# 60/60 (默认) ≈ 1 req/s 平均, 适合人正常用.
+# 600/60 = yanru 跨 VPS 跑 mnelo 记忆迁移所需 (≈10 req/s).
+# 也可通过环境变量覆盖 — MNELO_MEMORY_RATE_LIMIT_MAX_PER_WINDOW / MNELO_MEMORY_RATE_LIMIT_WINDOW_SEC
+# 改完需重启 MCP server (config 是模块级单例).
+max_per_window = 600
+window_sec = 60

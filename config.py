@@ -280,6 +280,34 @@ class Config:
             "MNELO_MEMORY_HEALTH_FLOOR_CHUNKS_THRESHOLD", "floor_chunks_threshold"
         )
 
+        # [8/9 P1-yanru] Rate limit 提到 config.toml — 不再硬编码.
+        # env MNELO_MEMORY_RATE_LIMIT_MAX_PER_WINDOW / MNELO_MEMORY_RATE_LIMIT_WINDOW_SEC
+        # > config.toml [rate_limit].max_per_window / .window_sec
+        # > 默认 60 / 60 (历史行为).
+        # 注意: 改完需重启 mcp_server 进程 (config 是模块级单例).
+        rate_limit_section = (
+            self._raw.get("rate_limit", {}) if isinstance(self._raw.get("rate_limit"), dict) else {}
+        )
+
+        def _rl_int(env_name: str, key: str, default: int, lo: int = 1) -> int:
+            raw = os.environ.get(env_name)
+            value = raw if raw is not None and raw != "" else rate_limit_section.get(key, default)
+            try:
+                parsed = int(value)
+                if parsed < lo:
+                    raise ValueError(f"must be >= {lo}")
+                return parsed
+            except (TypeError, ValueError) as e:
+                print(f'[config] WARN: rate_limit.{key} "{value}" invalid ({e}); 回落 {default}', file=sys.stderr)
+                return default
+
+        self.rate_limit_max_per_window = _rl_int(
+            "MNELO_MEMORY_RATE_LIMIT_MAX_PER_WINDOW", "max_per_window", 60
+        )
+        self.rate_limit_window_sec = _rl_int(
+            "MNELO_MEMORY_RATE_LIMIT_WINDOW_SEC", "window_sec", 60, lo=1
+        )
+
     @classmethod
     def load(cls) -> "Config":
         """Get the loaded config singleton."""
