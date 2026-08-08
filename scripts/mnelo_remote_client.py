@@ -38,7 +38,7 @@ import urllib.request
 from typing import Optional, List, Dict, Any
 
 
-DEFAULT_TAILSCALE_HOST = "100.83.50.99"  # 主人 macbook Tailscale IP (SOUL §mnelo ops)
+DEFAULT_TAILSCALE_HOST = "mnelo.tail6a710.ts.net"  # 主人 macbook Tailscale 域名 (8/9 主人确认 ts.net 才 work, 裸 IP 不走 Service reverse loopback)
 DEFAULT_PORT = 8086
 DEFAULT_TOKEN_PATH = os.path.expanduser("~/.config/mnelo/auth_token")
 
