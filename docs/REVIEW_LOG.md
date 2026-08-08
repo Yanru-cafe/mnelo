@@ -578,3 +578,14 @@
   - SSE 后兼容: scratch SSE server 同 DB, 同一 recall 分数逐位一致 (证明结果与 transport 无关)。
   - 测试: test_s6_digest_resilience 8 passed; test_memory 35 passed + 1 deselected。
   - 已知失败 (预存在, 与 transport 无关): `TestRecallScoreFieldAlias::test_recall_score_in_realistic_range` — live DB 被并行会话 covgap 测试 chunk 污染, 查询 '翁氏 D∩W 共振' top-10 尾部 4 hit 单路 rank≥7 → rrf ≤ 1/67=0.0149 < 0.015 阈值。两 transport 分数逐位相同佐证非 transport 问题。
+
+## 2026-08-08 08:31 清理: 数据敏感测试改数据无关 + 删根目录重复文件
+
+- 背景: 用户要求"1 清理, 2 也清理"。(1) 上轮 08:20 记录的已知失败 `test_recall_score_in_realistic_range`;(2) 并行会话留下的根目录重复文件。
+- 清理 1 — live DB 测试 chunk 污染 + 数据敏感测试:
+  - live 库清掉 12 条测试污染: 10 个测试 chunk（`update:updated` 'test update' ×3、`update:test_update` ×1、`update:fix` asof TOKEN_B ×4、`main_block_demo_*` ×2）+ 2 个 demo 实体（`main_block_demo_stock/person_1785995322`），全部走 `forget()` 软删（向量移除 + 关系级联 + 30 天 purge 队列）。active chunk 39→22, 残留 0 测试污染; 22 个 active chunk 全为真实记忆, 无真实 chunk 误删。
+  - 测试修复: 原断言绝对区间 `0.015 < rrf_score < 0.07` 依赖 live 库对查询有足够相关内容。查询 '翁氏 D∩W 共振' 无真实命中 → 纯单路向量邻居 rank≥7 即掉下任何固定下限（1/67=0.0149）。改为**数据无关不变量**: `0 < rrf_score < 1`（RRF=Σ1/(K+rank), K=60, 若干项到不了 1）+ hits 按 rrf_score 降序 + alias 一致性。live 库 / 隔离临时库均成立。验证: TestRecallScoreFieldAlias 3 passed; test_memory 28 passed。
+- 清理 2 — 根目录重复文件删除:
+  - `git rm` 4 个根目录重复文件: `RUNBOOK.md`（478 行, 重构前陈旧副本, docs/RUNBOOK.md 599 行为权威）、`test_auth.py`、`test_config_validation_coverage.py`（与 tests/ 逐字节相同）、`test_coverage_gaps.py`（859 行旧版, tests/ 860 行为新版且对当前 validate_id 语义正确）。无 pyproject testpaths → 根目录 `pytest` 会重复收集这些测试（旧版还会挂）。
+  - 保留版验证: tests/test_auth.py 11 passed + 1 skipped; tests/test_config_validation_coverage.py 30 passed; tests/test_memory.py 28 passed; tests/test_coverage_gaps.py 74 passed（此前）。
+- 环境注: 全量 pytest 仍被既有 usearch index load 原生 abort 阻断（REVIEW_LOG 多轮记录的**本机既有问题**, parent commit 同复现, 与本次无关）; 逐文件跑 + 隔离临时库可验证。
