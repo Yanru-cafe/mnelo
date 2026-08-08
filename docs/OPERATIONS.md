@@ -2,8 +2,7 @@
 
 ## Backup / restore
 
-See [TASKS_BACKUP_RESTORE.md](TASKS_BACKUP_RESTORE.md) for the full
-design rationale. Quick reference:
+Quick reference (full design rationale: see git history `docs/TASKS_BACKUP_RESTORE.md` removed in 8/8 cleanup):
 
 ```bash
 # Manual backup (writes to config [backup] snapshot_dir + sha256 sidebar)
