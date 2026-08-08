@@ -20,6 +20,68 @@ for your user, follow these operational steps.
   `MNELO_CRON_OUTPUT_DIR` (default `$MNELO_MEMORY_DIR/cron/output`,
   recreated by `health_check.py` on every run).
 
+## 1.5 Decide the listen mode (single-machine vs multi-agent) — affects mcp_server --host
+
+[8/8 Tailscale multi-agent] 主人拍板 mnelo 改成 multi-agent 远程调用.
+这一决策决定 mcp_server 监听的 bind address, **一旦选错就要重启
+mcp_server** (`launchctl kickstart -k ai.mnelo.mcp`).
+
+**Ask the user (or decide from context):**
+
+> "mnelo 只在这台机器本机用吗？还是其它 Tailscale 节点也要连？"
+
+| 场景 | `--host` | 理由 |
+|---|---|---|
+| **单机本地** (默认保守) | `127.0.0.1` | Tailscale / 反向代理 / 跨网都用不上, 最安全 |
+| **多机 / 多 agent** (Tailscale mesh) | `0.0.0.0` | 让 Tailscale interface 能转发, 跨 vps 跨 mesh 共享 |
+
+**白名单策略不变** (loopback + 100.64.0.0/10 CGNAT 接受, LAN/公网/IPv6
+拒绝). 变的只是 bind address — *不*监听就无意义, 监听则有 Tailscale
+转发兜底.
+
+**改 plist 步骤** (macOS):
+
+```bash
+# 编辑 ~/Library/LaunchAgents/ai.mnelo.mcp.plist
+# ProgramArguments 中 --host 127.0.0.1 → 0.0.0.0
+sed -i '' 's|<string>127.0.0.1</string>|<string>0.0.0.0</string>|' \
+  ~/Library/LaunchAgents/ai.mnelo.mcp.plist
+
+# 备份 (用 plist 装前 cp 一份, 走 customization hygiene)
+cp ~/Library/LaunchAgents/ai.mnelo.mcp.plist{,.bak.$(date +%Y%m%d)}
+
+# KeepAlive plist 重启
+launchctl unload ~/Library/LaunchAgents/ai.mnelo.mcp.plist
+launchctl load ~/Library/LaunchAgents/ai.mnelo.mcp.plist
+
+# 验证
+curl -sS -o /dev/null -w "127.0.0.1: %{http_code}\n" http://127.0.0.1:8086/health
+tailscale ip -4 | head -1 | xargs -I {} \
+  curl -sS -o /dev/null -w "Tailscale: %{http_code}\n" http://{}:8086/health
+```
+
+**已知坑** (SOUL §mnelo ops):
+- 主人 8/6 之前 `_validate_loopback_host` 拒绝 0.0.0.0; 8/8 已扩展白名单
+  含 Tailscale CGNAT (commit 3e538de, 33 tests 绿).
+- `launchctl kickstart -k` 在 KeepAlive plist 上 = *重启* 不是停. 真停
+  要 `launchctl unload` (后跟 `launchctl load`).
+- `mcp_server.py` 启动后由 OS firewall 兜底. macOS 默认
+  Application Firewall 不挡 8086; Tailscale mesh 端不依赖 LAN 防火墙.
+
+**Tailscale client 视角** (vps 端 agent):
+
+```bash
+# 假设 macbook Tailscale IP = 100.83.50.99
+MNELO_URL="http://100.83.50.99:8086/mcp"
+MNELO_TOKEN="$(cat ~/.config/mnelo/auth_token)"  # 共享 token
+curl -sS -X POST "$MNELO_URL" \
+  -H "Authorization: Bearer $MNELO_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"my-agent","version":"1.0"}}}' \
+  | head -5
+```
+
 ## 2. Choose the vector backend — based on the actual machine
 
 See [VECTOR_BACKENDS.md](VECTOR_BACKENDS.md) for the full comparison.
