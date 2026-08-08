@@ -16,6 +16,7 @@ __pycache__/
 # Backup files
 *.bak
 *.bak-*
+*.bak.*
 *.old
 .*.swp
 
@@ -27,6 +28,19 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# [8/8 P1 followup] mnelo runtime artifacts (索引 / 备份 / log)
+# search_index.zv/ = zvec 索引 (mcp_server 跑时锁住)
+# usearch.index* = usearch 索引 (测试 fixture / 早期部署)
+# snapshots/ = db + 索引快照 (dr-backup 产物, 30 天滚动)
+# .sync-backups/ = sync-backup 工具产物
+# logs/ = hygiene / hygiene dry-run json 输出
+search_index.zv/
+usearch.index*
+usearch.index*.verified.json
+snapshots/
+.sync-backups/
+logs/
 
 # Secrets / config override (用 config.toml.example 作模板)
 .env
