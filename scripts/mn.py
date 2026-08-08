@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mn.py — mnelo CLI 薄封装 (Claude Code agent 用).
 
-Claude Code 会话里用 Bash 驱动 mnelo 的标准入口. 底层走 MneloClient (MCP/SSE
+Claude Code 会话里用 Bash 驱动 mnelo 的标准入口. 底层走 MneloClient (MCP
 标准协议), token 自动从 ~/.config/mnelo/auth_token 读.
 
 用法:

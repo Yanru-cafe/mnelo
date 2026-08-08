@@ -28,7 +28,7 @@ Environment=MNELO_MEMORY_DIR=__LIVE_ROOT__
 Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
 # 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
 Environment=MNELO_MEMORY_SERVER_PORT=8086
-ExecStart=__VENV_PY__ __LIVE_ROOT__/mcp_server.py --transport sse --host 127.0.0.1
+ExecStart=__VENV_PY__ __LIVE_ROOT__/mcp_server.py --transport streamable-http --host 127.0.0.1
 # usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
 Restart=always
 RestartSec=3

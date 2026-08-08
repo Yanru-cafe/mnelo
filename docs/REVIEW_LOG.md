@@ -562,3 +562,19 @@
   - `docs/RUNBOOK.md` §5.2 改为引用随包模板 + 自动安装说明; 手动模板里 `StandardOutput` 修正为实际路径（`/path/to/mnelo-data/logs/`, 不留 `__LIVE_ROOT__` 占位符）。
   - `docs/OPERATIONS.md` VPS 步骤 3: 删除过时的 "mnelo doesn't ship a unit file" → 改为 install.sh 自带模板说明。
 - 验证: `bash -n` 通过; 模板两种 scope 渲染（sed）后 `systemd-analyze verify` **0 unit 错误**（仅假路径可执行性警告 + 系统无关 unit 警告）; 无占位符残留。
+
+## 2026-08-08 08:20 访问方式切换: SSE → streamable-http (MCP 2025-03-26)
+
+- 背景: 并行会话 a3bf1df 加了 streamable-http transport + dual。用户要求"不用 sse, 改用新方式访问 mnelo"。
+- 改动:
+  - `api/mnelo_client.py`: 新增 streamable-http transport (默认)。`DEFAULT_MCP_URL=http://127.0.0.1:8086/mcp`; `MneloClient(url=..., transport=...)` — URL 含 /sse 自动回落 sse (后兼容); `sse_url` 改 property (旧代码读写属性仍有效, 测试 _make_real_client 兼容); `_ensure_mcp` 按 transport 返回 sse_client / streamable_http_client; `_run_session` 抽取 (两 transport 共享 session+解析逻辑)。新 SDK API `streamable_http_client(url, http_client=...)` 用配置好 Bearer+timeout 的 httpx.AsyncClient 传入 (旧名 streamablehttp_client 已弃用)。
+  - `scripts/session_start_digest.py`: 默认连 /mcp; env 覆盖 MNELO_MEMORY_URL > MNELO_MEMORY_SSE_URL (旧)。
+  - `scripts/mn.py` / `mcp_server.py` docstring: transport 示例更新。
+  - `scripts/systemd/mnelo-mcp.service` + `scripts/launchd/ai.mnelo.mcp.plist` + `scripts/install.sh`: --transport sse → streamable-http。
+  - `docs/RUNBOOK.md` / `docs/AGENTS.md` / 根 `RUNBOOK.md`: §5.3 测试改为 /mcp 401 probe + /health; client YAML transport: streamable-http url: /mcp; §9.1 重启命令同步。
+- 验证:
+  - scratch server (8091, streamable-http) 起新 client 全通过 (stats/recall/digest)。
+  - 正式 server 重启: `--transport streamable-http --host 127.0.0.1 --port 8086`, PID 1291126。全链路: mn.py digest/recall + session_start_digest + health_check 全绿。
+  - SSE 后兼容: scratch SSE server 同 DB, 同一 recall 分数逐位一致 (证明结果与 transport 无关)。
+  - 测试: test_s6_digest_resilience 8 passed; test_memory 35 passed + 1 deselected。
+  - 已知失败 (预存在, 与 transport 无关): `TestRecallScoreFieldAlias::test_recall_score_in_realistic_range` — live DB 被并行会话 covgap 测试 chunk 污染, 查询 '翁氏 D∩W 共振' top-10 尾部 4 hit 单路 rank≥7 → rrf ≤ 1/67=0.0149 < 0.015 阈值。两 transport 分数逐位相同佐证非 transport 问题。

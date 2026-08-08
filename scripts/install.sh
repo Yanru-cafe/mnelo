@@ -196,7 +196,7 @@ else
             warn "systemd 模板不存在: $SYSTEMD_SRC (跳过; 手动跑见 docs/RUNBOOK.md §5.2)"
         fi
     else
-        log "无 systemctl (非 systemd 发行版) — 手动跑: MNELO_MEMORY_DIR=$LIVE_ROOT $VENV_PY $LIVE_ROOT/mcp_server.py --transport sse"
+        log "无 systemctl (非 systemd 发行版) — 手动跑: MNELO_MEMORY_DIR=$LIVE_ROOT $VENV_PY $LIVE_ROOT/mcp_server.py --transport streamable-http"
     fi
 fi
 

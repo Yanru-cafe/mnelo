@@ -9,7 +9,7 @@
         <string>/Users/apple/hermes-agent/venv/bin/python3</string>
         <string>/Users/apple/.hermes/memory/mcp_server.py</string>
         <string>--transport</string>
-        <string>sse</string>
+        <string>streamable-http</string>
         <string>--host</string>
         <string>127.0.0.1</string>
     </array>
