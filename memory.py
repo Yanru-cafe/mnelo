@@ -189,6 +189,83 @@ def _with_row_factory(conn, factory):
         conn.row_factory = old
 
 
+# [8/8 P1] Entity namespace guard.
+# 防御历史 importer 残留 (HonchoImporter anno:* NER mentions) + 随机 token
+# (TOKEN_C_*) + 整句当 entity name. 只允许显式 namespace 前缀 + 无冒号的
+# person / provider / event / task 类短 name. master_* prefix 是 SOUL §mnelo
+# ops #4 拍板使用的主语前缀.
+_ALLOWED_ENTITY_NAMESPACES = frozenset({
+    "identity:",   # identity_fact (主人身份, immutable)
+    "stock:",      # A 股 / 美股代码
+    "holding:",    # position_snapshot (持仓快照)
+    "loop:",       # cron loop entity (DESIGN §5.6)
+    "task:",       # task entity (DESIGN §5.5)
+})
+_ALLOWED_ENTITY_PREFIXES = ("master_",)  # SOUL §mnelo ops #4: master_<subject>
+# [8/8 P1] concept kind 允许的 name 长度上限 — 防"imported sleep runs at..." 这种
+# 整句灌进 entity. 其他 kind (stock/identity_fact 等) 已有结构化字段, 不限.
+_MAX_CONCEPT_NAME_LEN = 50
+
+
+def _enforce_entity_namespace_guard(ent: Dict) -> None:
+    """[8/8 P1] _upsert_entity 入口处拒绝历史 importer 残留命名空间.
+
+    Raises ValidationError when entity id / name 命中以下任一:
+      - id namespace 在黑名单 (anno:, TOKEN_C_, ...)
+      - id 不在白名单 namespace 前缀且不含 ':' (无 namespace 必须配 person/provider/event/task/setup/system/host/position_snapshot/concept 等结构化 kind)
+      - concept kind + name > 50 chars (整句当 name)
+    """
+    from validation import ValidationError  # 局部 import 避免循环
+
+    eid = ent["id"]
+    kind = ent["kind"]
+    name = ent.get("name") or ""
+
+    # 1) 黑名单: anno:* 是 HonchoImporter NER 历史残留, 直接拒
+    if eid.startswith("anno:"):
+        raise ValidationError(
+            "entity.id",
+            "namespace 'anno:*' is reserved for legacy HonchoImporter imports; "
+            "use chunk metadata (properties_json.annotation_kind) instead",
+        )
+    # 2) 黑名单: 随机 token id (TOKEN_C_*, TOKEN_*, ...)
+    if eid.startswith("TOKEN_"):
+        raise ValidationError(
+            "entity.id",
+            "namespace 'TOKEN_*' (random session tokens) is not a valid entity id; "
+            "use a stable, human-readable id",
+        )
+
+    # 3) 白名单: 显式 namespace 前缀
+    has_allowed_ns = (
+        any(eid.startswith(ns) for ns in _ALLOWED_ENTITY_NAMESPACES)
+        or eid.startswith(_ALLOWED_ENTITY_PREFIXES)
+    )
+    if has_allowed_ns:
+        return  # 显式 namespace 必走结构化 kind, 跳过 name length check
+
+    # 4) 无 namespace id 必须配结构化 kind
+    _NAMELESS_KINDS = frozenset({
+        "person", "provider", "event", "task", "setup", "system", "host",
+        "position_snapshot", "concept", "canonical_fact",
+    })
+    if ":" not in eid and kind not in _NAMELESS_KINDS:
+        raise ValidationError(
+            "entity.id",
+            f"non-namespaced id {eid!r} requires kind in {sorted(_NAMELESS_KINDS)}; "
+            f"got kind={kind!r}",
+        )
+
+    # 5) concept kind 禁长句子 name
+    if kind == "concept" and len(name) > _MAX_CONCEPT_NAME_LEN:
+        raise ValidationError(
+            "entity.name",
+            f"concept entity name must be <= {_MAX_CONCEPT_NAME_LEN} chars; "
+            f"got {len(name)} chars. Use chunk content for sentences, "
+            f"entity.name for short labels only.",
+        )
+
+
 class Memory:
     """核心 CRUD 接口."""
 
@@ -1424,6 +1501,9 @@ class Memory:
         """
         # [7/19 P1-1 + P1-2 + P1-5] entity 整体清洗 (id 验证 + name/summary/kind 剥离控制 + bidi)
         ent = validate_entity_payload(ent)
+        # [8/8 P1] namespace 防御 — 阻止历史 importer 残留 (Honcho anno:*) + 随机 ID (TOKEN_C_*)
+        # + 句子当 entity.name. 白名单只允许: 显式 namespace prefix / master_* / 无冒号的 person 类短 name.
+        _enforce_entity_namespace_guard(ent)
         existing = self._conn.execute(
             "SELECT id, kind FROM entities WHERE id = ? AND valid_until IS NULL", (ent["id"],)
         ).fetchone()
