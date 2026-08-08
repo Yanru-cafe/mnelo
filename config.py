@@ -308,6 +308,72 @@ class Config:
             "MNELO_MEMORY_RATE_LIMIT_WINDOW_SEC", "window_sec", 60, lo=1
         )
 
+        # [8/9 P1-yanru] validation.py 5 个 MAX_* 常量 — 提到 config.
+        # env MNELO_MEMORY_VALIDATION_MAX_* > config.toml [validation].max_* > 默认.
+        # 默认等于原硬编码值 (行为不变, 仅可调).
+        validation_section = (
+            self._raw.get("validation", {}) if isinstance(self._raw.get("validation"), dict) else {}
+        )
+
+        def _val_int(env_name: str, key: str, default: int, lo: int = 1) -> int:
+            raw = os.environ.get(env_name)
+            value = raw if raw is not None and raw != "" else validation_section.get(key, default)
+            try:
+                parsed = int(value)
+                if parsed < lo:
+                    raise ValueError(f"must be >= {lo}")
+                return parsed
+            except (TypeError, ValueError) as e:
+                print(f'[config] WARN: validation.{key} "{value}" invalid ({e}); 回落 {default}', file=sys.stderr)
+                return default
+
+        self.validation_max_chunk_content_bytes = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_CHUNK_CONTENT_BYTES", "max_chunk_content_bytes", 8 * 1024
+        )
+        self.validation_max_query_bytes = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_QUERY_BYTES", "max_query_bytes", 1024
+        )
+        self.validation_max_id_len = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_ID_LEN", "max_id_len", 256
+        )
+        self.validation_max_entity_name_len = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_ENTITY_NAME_LEN", "max_entity_name_len", 200
+        )
+        self.validation_max_entity_summary_len = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_ENTITY_SUMMARY_LEN", "max_entity_summary_len", 1000
+        )
+        self.validation_max_holding_field_len = _val_int(
+            "MNELO_MEMORY_VALIDATION_MAX_HOLDING_FIELD_LEN", "max_holding_field_len", 200
+        )
+
+        # [8/9 P1-yanru] task_states.py stale_days_threshold — 提到 config.
+        # env MNELO_MEMORY_TASK_STALE_DAYS_THRESHOLD > config.toml [task].stale_days_threshold > 7.
+        task_section = (
+            self._raw.get("task", {}) if isinstance(self._raw.get("task"), dict) else {}
+        )
+        _stale_env = os.environ.get("MNELO_MEMORY_TASK_STALE_DAYS_THRESHOLD")
+        if _stale_env is not None and _stale_env != "":
+            try:
+                self.task_stale_days_threshold = int(_stale_env)
+                if self.task_stale_days_threshold < 1:
+                    raise ValueError("must be >= 1")
+            except (TypeError, ValueError) as e:
+                print(f'[config] WARN: task.stale_days_threshold "{_stale_env}" invalid ({e}); 回落 7', file=sys.stderr)
+                self.task_stale_days_threshold = 7
+        else:
+            self.task_stale_days_threshold = int(task_section.get("stale_days_threshold", 7) or 7)
+
+        # [8/9 P1-yanru] mnelo_remote_client.py DEFAULT_TAILSCALE_HOST — 提到 config.
+        # env MNELO_MEMORY_CLIENT_TAILSCALE_HOST > config.toml [client].tailscale_host > 默认.
+        client_section = (
+            self._raw.get("client", {}) if isinstance(self._raw.get("client"), dict) else {}
+        )
+        self.client_tailscale_host = (
+            os.environ.get("MNELO_MEMORY_CLIENT_TAILSCALE_HOST")
+            or client_section.get("tailscale_host")
+            or "mnelo.tail6a710.ts.net"
+        )
+
     @classmethod
     def load(cls) -> "Config":
         """Get the loaded config singleton."""

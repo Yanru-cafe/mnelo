@@ -16,13 +16,16 @@ validation.py — input sanitization for memory MCP tool arguments.
 import re
 from typing import Any, Dict, List
 
-# === Size caps ===
-MAX_CHUNK_CONTENT_BYTES = 8 * 1024  # 8 KB
-MAX_QUERY_BYTES = 1024  # 1 KB
-MAX_ID_LEN = 256
-MAX_ENTITY_NAME_LEN = 200
-MAX_ENTITY_SUMMARY_LEN = 1000
-MAX_HOLDING_FIELD_LEN = 200
+# [8/9 P1-yanru] Size caps — 值从 config 读, 旧常量保留作 alias 兼容测试 import.
+# 默认值等于原硬编码值, 行为不变.
+from config import config
+
+MAX_CHUNK_CONTENT_BYTES = config.validation_max_chunk_content_bytes
+MAX_QUERY_BYTES = config.validation_max_query_bytes
+MAX_ID_LEN = config.validation_max_id_len
+MAX_ENTITY_NAME_LEN = config.validation_max_entity_name_len
+MAX_ENTITY_SUMMARY_LEN = config.validation_max_entity_summary_len
+MAX_HOLDING_FIELD_LEN = config.validation_max_holding_field_len
 
 # === Character classes to strip ===
 # 控制字符 (< 0x20) 除 \n \t \r 外全部拒

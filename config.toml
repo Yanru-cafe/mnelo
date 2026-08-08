@@ -23,3 +23,27 @@ dim = 512
 # 改完需重启 MCP server (config 是模块级单例).
 max_per_window = 600
 window_sec = 60
+
+[validation]
+# [8/9 P1-yanru] 5 个 MAX_* 边界 (validation.py). 默认等于原硬编码值, 行为不变.
+# 调小会拒掉某些客户端的输入, 改完需重启 mcp_server 进程.
+# env 覆盖: MNELO_MEMORY_VALIDATION_MAX_CHUNK_CONTENT_BYTES / MAX_QUERY_BYTES / MAX_ID_LEN /
+#   MAX_ENTITY_NAME_LEN / MAX_ENTITY_SUMMARY_LEN / MAX_HOLDING_FIELD_LEN
+max_chunk_content_bytes = 8192   # 8 KB, 单 chunk content 上限
+max_query_bytes = 1024           # 1 KB, query 字符串上限
+max_id_len = 256                 # entity/chunk id 字符上限
+max_entity_name_len = 200        # entity name 字符上限
+max_entity_summary_len = 1000    # entity summary 字符上限
+max_holding_field_len = 200      # 持仓字段 (股票代码等) 字符上限
+
+[task]
+# [8/9 P1-yanru] task_states.py stale_days_threshold.
+# active task 超过 N 天没 transition 算 stale, 触发 review 建议.
+# env 覆盖: MNELO_MEMORY_TASK_STALE_DAYS_THRESHOLD
+stale_days_threshold = 7
+
+[client]
+# [8/9 P1-yanru] mnelo_remote_client.py DEFAULT_TAILSCALE_HOST.
+# 跨 VPS mnelo 调用默认 host. 默认 Tailscale Service 域名 (mesh 内 forward 到 macbook 127.0.0.1:8086).
+# env 覆盖: MNELO_MEMORY_CLIENT_TAILSCALE_HOST
+tailscale_host = "mnelo.tail6a710.ts.net"

@@ -38,9 +38,19 @@ import urllib.request
 from typing import Optional, List, Dict, Any
 
 
-DEFAULT_TAILSCALE_HOST = "mnelo.tail6a710.ts.net"  # 主人 macbook Tailscale 域名 (8/9 主人确认 ts.net 才 work, 裸 IP 不走 Service reverse loopback)
+DEFAULT_TAILSCALE_HOST = "mnelo.tail6a710.ts.net"  # [8/9 P1-yanru] 占位 fallback — 实际从 config.client_tailscale_host 读
 DEFAULT_PORT = 8086
 DEFAULT_TOKEN_PATH = os.path.expanduser("~/.config/mnelo/auth_token")
+
+
+def _get_tailscale_host() -> str:
+    """[8/9 P1-yanru] Tailscale host 解析链: env MNELO_MEMORY_CLIENT_TAILSCALE_HOST
+    > config.toml [client].tailscale_host > 默认 mnelo.tail6a710.ts.net."""
+    try:
+        from config import config as _cfg  # 延迟 import, scripts/ 路径下也安全
+        return _cfg.client_tailscale_host
+    except Exception:
+        return DEFAULT_TAILSCALE_HOST
 
 
 class MneloRemoteError(Exception):
@@ -58,7 +68,7 @@ class MneloRemoteClient:
     def __init__(self, url: Optional[str] = None, token: Optional[str] = None, timeout: int = 30):
         self.url = url or os.environ.get(
             "MNELO_REMOTE_URL",
-            f"http://{DEFAULT_TAILSCALE_HOST}:{DEFAULT_PORT}/mcp",
+            f"http://{_get_tailscale_host()}:{DEFAULT_PORT}/mcp",
         )
         token = token or os.environ.get("MNELO_REMOTE_TOKEN")
         if not token:
@@ -201,10 +211,8 @@ def main():
         description="Tailscale mesh 跨 vps 调 mnelo MCP server (8/8 multi-agent)",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    # [8/8] parser-level args 必须在 subparsers 之前 (argparse 限制)
-    # 实测: --url 放在 subparsers 之后, argparse 拒绝. 移到 subparser 共享.
     # 用法: mnelo_remote_client.py [--url X] [--token Y] [--timeout 30] <cmd> [args]
-    parser.add_argument("--url", help=f"MCP URL (default: $MNELO_REMOTE_URL or http://{DEFAULT_TAILSCALE_HOST}:{DEFAULT_PORT}/mcp)")
+    parser.add_argument("--url", help=f"MCP URL (default: $MNELO_REMOTE_URL or http://{_get_tailscale_host()}:{DEFAULT_PORT}/mcp)")
     parser.add_argument("--token", help="Bearer token (default: $MNELO_REMOTE_TOKEN or ~/.config/mnelo/auth_token)")
     parser.add_argument("--timeout", type=int, default=30, help="HTTP timeout (s)")
 
