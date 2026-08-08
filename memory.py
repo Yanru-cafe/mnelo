@@ -550,6 +550,16 @@ class Memory:
         content = validate_chunk_content(content)
         # [7/19 P1-1] id 来源 = generate_id (服务端生成), 无需 validate_id
 
+        # 0.5 [8/8 P1 fix] 预校验 entities — 必须在 INSERT chunk 之前
+        # 否则 namespace guard 抛 ValidationError 时 chunk INSERT 已进 SQLite WAL,
+        # mcp_server 单例 Memory conn 复用下次 commit 可能连同提交, 留下孤儿 chunk.
+        # relation 验证依赖 chunk_id (evidence_chunk_id), 留到 step 3 之后再做.
+        for ent in entities or []:
+            _ent = dict(ent)
+            _ent.setdefault("memory_type", memory_type)
+            validate_entity_payload(_ent)
+            _enforce_entity_namespace_guard(_ent)
+
         # 1. 写 chunk
         self._conn.execute(
             """
