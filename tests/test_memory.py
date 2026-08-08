@@ -533,14 +533,29 @@ class TestRecallScoreFieldAlias(unittest.TestCase):
                                      f"score={h.get('score')} != rrf_score={h['rrf_score']}")
 
     def test_recall_score_in_realistic_range(self):
-        """rrf_score should be in [0.015, 0.07] — k=60 RRF formula baseline."""
+        """rrf_score is a genuine RRF sum — data-independent invariants.
+
+        Locks in rrf_score magnitude semantics WITHOUT depending on live DB
+        content (which varies by machine / pollution level):
+          - 0 < rrf_score < 1     (RRF = Σ 1/(K+rank) per lane, K=60; a few
+                                   terms can never reach 1)
+          - hits sorted descending by rrf_score (server fusion order)
+
+        No absolute floor on purpose: that would require the live DB to hold
+        relevant content for every top-10 hit to rank high in a lane. It broke
+        when unrelated test chunks diluted the pool — a query with no real
+        match returns single-lane vector neighbors at 1/61..1/70 (rank ≥ 7
+        already falls below any fixed floor like 0.015).
+        """
         hits = self.client.recall('翁氏 D∩W 共振', top_k=10)
-        if hits:
-            for h in hits:
-                if 'rrf_score' in h:
-                    score = h['rrf_score']
-                    self.assertGreater(score, 0.015, f"rrf_score below k=60 baseline: {score}")
-                    self.assertLess(score, 0.07, f"rrf_score suspiciously high: {score}")
+        scores = [h['rrf_score'] for h in hits if 'rrf_score' in h]
+        if not scores:
+            return
+        for s in scores:
+            self.assertGreater(s, 0.0, f'rrf_score must be > 0, got {s}')
+            self.assertLess(s, 1.0, f'rrf_score must be < 1, got {s}')
+        for a, b in zip(scores, scores[1:]):
+            self.assertGreaterEqual(a, b, 'hits must be sorted descending by rrf_score')
 
 
 if __name__ == '__main__':
