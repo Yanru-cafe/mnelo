@@ -120,17 +120,45 @@ if [ ! -f "$TOKEN_FILE" ]; then
 else
     log "token 已存在: $TOKEN_FILE"
 fi
+# ---- 9.5 listen mode (决定 mcp_server --host) ----
+# [8/8 Tailscale multi-agent] 主人拍板 mnelo 支持 multi-agent 远程调用.
+# 询问主人监听模式, 决定 plist/systemd 的 --host 参数.
+BIND_HOST="127.0.0.1"  # 保守默认
+if [ -t 0 ] && [ "${MNELO_INSTALL_NONINTERACTIVE:-0}" != "1" ]; then
+    log "mcp_server 监听模式决定 (--host 参数)..."
+    echo "  mnelo 只在这台机器本机用吗？还是其它 Tailscale 节点也要连？"
+    echo "    1) 单机本地 (loopback, --host 127.0.0.1) — 推荐默认"
+    echo "    2) 多机 / 多 agent (Tailscale mesh, --host 0.0.0.0)"
+    echo "       需 Tailscale 已在 mesh, 变 plist --host 0.0.0.0"
+    echo "       白名单策略不变 (loopback + 100.64.0.0/10 CGNAT 接受, LAN/公网/IPv6 拒绝)"
+    read -r -p "  选择 [1/2] (Enter=1): " listen_mode
+    case "$listen_mode" in
+        2)
+            BIND_HOST="0.0.0.0"
+            ok "多 agent Tailscale mesh 模式: --host 0.0.0.0"
+            warn "确认 Tailscale 已在 mesh, 后续可用 setup_tailscale_mnelo.sh 验证"
+            ;;
+        *)
+            BIND_HOST="127.0.0.1"
+            ok "单机本地模式: --host 127.0.0.1"
+            ;;
+    esac
+else
+    log "非交互模式 或 MNELO_INSTALL_NONINTERACTIVE=1 — 使用默认 listen mode: $BIND_HOST"
+fi
+export BIND_HOST
 
 # ---- 10. 服务安装: macOS → launchd plist / Linux → systemd unit ----
 if [ "$(uname -s)" = "Darwin" ]; then
     if [ -f "$PLIST_SRC" ]; then
         log "装 launchd plist: $PLIST_DST"
         mkdir -p "$(dirname "$PLIST_DST")"
-        # 替换 plist 里的 LIVE_ROOT / VENV_PY 占位符
+        # 替换 plist 里的 LIVE_ROOT / VENV_PY / BIND_HOST 占位符
         sed -e "s|__LIVE_ROOT__|$LIVE_ROOT|g" \
             -e "s|__VENV_PY__|$VENV_PY|g" \
             -e "s|__VENV_DIR__|$VENV_DIR|g" \
             -e "s|__MNELO_HOME__|$MNELO_HOME|g" \
+            -e "s|__BIND_HOST__|$BIND_HOST|g" \
             "$PLIST_SRC" > "$PLIST_DST"
         chmod 644 "$PLIST_DST"
 
@@ -169,6 +197,7 @@ else
                 -e "s|__MNELO_HOME__|$MNELO_HOME|g" \
                 -e "s|__USER_LINE__|$USER_LINE|g" \
                 -e "s|__WANTED_BY__|$WANTED_BY|g" \
+                -e "s|__BIND_HOST__|$BIND_HOST|g" \
                 "$SYSTEMD_SRC" > "$SD_DST"
             chmod 644 "$SD_DST"
 

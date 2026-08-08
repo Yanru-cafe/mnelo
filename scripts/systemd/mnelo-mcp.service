@@ -2,7 +2,7 @@
 #
 # 本文件由 scripts/install.sh 渲染 (sed 替换占位符) 后安装, 勿手改安装产物.
 # 占位符: LIVE_ROOT / VENV_PY / MNELO_HOME / USER_LINE / WANTED_BY (带双下划线前缀).
-#
+# 占位符: BIND_HOST (127.0.0.1 / 0.0.0.0 — install.sh 询问决定, 默认 127.0.0.1)
 # 安装位置 (由 install.sh 按权限决定):
 #   root      → /etc/systemd/system/mnelo-mcp.service   (系统级 unit)
 #                 User 行 = 运行用户, WantedBy=multi-user.target
@@ -28,7 +28,8 @@ Environment=MNELO_MEMORY_DIR=__LIVE_ROOT__
 Environment=MNELO_MEMORY_SEARCH_BACKEND=usearch
 # 不传 --port: argparse default 走 config.server_port; 或用 MNELO_MEMORY_SERVER_PORT
 Environment=MNELO_MEMORY_SERVER_PORT=8086
-ExecStart=__VENV_PY__ __LIVE_ROOT__/mcp_server.py --transport streamable-http --host 127.0.0.1
+# [8/8 Tailscale multi-agent] bind host: 127.0.0.1 (loopback) / 0.0.0.0 (Tailscale mesh)
+ExecStart=__VENV_PY__ __LIVE_ROOT__/mcp_server.py --transport streamable-http --host __BIND_HOST__
 # usearch 原生堆在无 AVX2 CPU 上有偶发启动崩溃 — Restart=always 崩溃后自动拉起
 Restart=always
 RestartSec=3
