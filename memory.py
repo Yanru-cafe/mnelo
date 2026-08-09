@@ -300,10 +300,13 @@ class Memory:
         # cache_size 单位是 page (default 4 KB); -64000 = -64*1024 KB
         self._conn.execute("PRAGMA cache_size = -64000")
         self._conn.execute("PRAGMA foreign_keys = ON")
-        # [8/9 P1 follow-up] enable_load_extension 在某些 Python build 里被禁用
-        # (CI hostedtoolcache macOS arm64 sandbox; 7/19 实测 fail AttributeError).
-        # sqlite_vec 提供 SQLite extension 二进制 vec0.dylib/.so, 直接 ctypes 加载
-        # 后用 conn.load_extension() 注入即可 — 不依赖 enable_load_extension.
+        # [8/9 P1 follow-up] enable_load_extension / conn.load_extension 在某些
+        # Python build 里被 strip 或干脆没加 (CI hostedtoolcache macOS arm64
+        # sandbox; 7/19 实测 fail AttributeError; Python <3.12 还没 conn.load_extension).
+        # sqlite_vec 提供 SQLite extension 二进制 vec0.dylib/.so, 直接 ctypes
+        # 加载 vec0 后用 vec0 自带的 entry point sqlite3_vec_init() 通过 ctypes
+        # 调用 sqlite3 C API 的 sqlite3_auto_extension 即可 — 之后 sqlite3.open()
+        # 自动启用 vec0, 不依赖 Python 端 enable_load_extension / load_extension 接口.
         # 本地 venv Python (3.11.15 + sqlite 3.53) 走原路径; CI hostedtoolcache
         # Python 走 ctypes fallback 路径. 不改应用行为, 修应用代码兼容更多 Python build.
         try:
@@ -311,7 +314,9 @@ class Memory:
             sqlite_vec.load(self._conn)
             self._conn.enable_load_extension(False)
         except AttributeError:
-            # CI / restricted Python: enable_load_extension 被 strip. 用 ctypes 直接 load.
+            # CI / restricted Python: enable_load_extension 被 strip. 走两步:
+            # 1) ctypes 加载 vec0.{so,dylib,dll}, 拿到 sqlite3_vec_init entry.
+            # 2) 调 vec0 的 init 函数直接对当前 conn 注入, 不依赖 auto_extension.
             import ctypes as _ct
             import platform as _platform
 
@@ -323,11 +328,42 @@ class Memory:
             else:
                 _lib_name = "vec0.so"
             _lib_path = os.path.join(_pkg_dir, _lib_name)
-            _ct.CDLL(_lib_path)
-            # 现在 enable_load_extension 在 ctypes-loaded lib 后可能能用 (sqlite-vec 注册了它)
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
+            _vec = _ct.CDLL(_lib_path)
+            # sqlite3_vec_init 签名: int sqlite3_vec_init(sqlite3*, char**, const sqlite3_api_routines*)
+            # 拿 sqlite3_db_handle 走 sqlite3_db_config / sqlite3_auto_extension.
+            # 最简单的方式: 让 vec0 调 sqlite3_auto_extension(itself),
+            # 后续每个 sqlite3_open 自动 init. 我们手动调一次 vec0 自带的 init 来
+            # 给当前 conn 启用, 再用 sqlite3_auto_extension 让未来 conn 也用.
+            _init_fn = _vec.sqlite3_vec_init
+            _init_fn.restype = _ct.c_int
+            _init_fn.argtypes = [
+                _ct.c_void_p,  # sqlite3*
+                _ct.POINTER(_ct.c_char_p),  # char** errmsg
+                _ct.c_void_p,  # const sqlite3_api_routines*
+            ]
+            # 拿 conn 的底层 sqlite3* handle (Py sqlite3 暴露 via conn._db_handle() 或类似).
+            # Py 3.11 没公开 API; 用 ctypes 调 sqlite3_db_handle(sqlite3*) 也无, 但
+            # conn 内部 sqlite3* 存在. 退路: sqlite3_db_handle(sqlite3*) 在 sqlite3.h,
+            # 找不到时直接 pass (后续 conn 走 auto_extension 即可).
+            try:
+                # Py sqlite3 内部: connection.__init__ 调 sqlite3_open_v2 拿到 sqlite3*
+                # 存在 self._conn._Connection__db_handle 或 self._conn._db_handle (private).
+                _db_handle = getattr(self._conn, "_db_handle", None)
+                if _db_handle is None:
+                    _db_handle = getattr(self._conn, "_Connection__db_handle", None)
+                if _db_handle is not None:
+                    _err = _ct.c_char_p()
+                    _rc = _init_fn(_db_handle(), _ct.byref(_err), None)
+                    if _rc != 0:
+                        raise RuntimeError(f"vec0 init failed rc={_rc}: {_err.value}")
+                # 顺手注册 auto-extension 让未来 conn 自动 init.
+                _libsqlite3 = _ct.CDLL(_platform.system() == "Windows" and "sqlite3.dll" or ("libsqlite3.dylib" if _platform.system() == "Darwin" else "libsqlite3.so.0"))
+                _libsqlite3.sqlite3_auto_extension.argtypes = [_ct.c_void_p]
+                _libsqlite3.sqlite3_auto_extension(_init_fn)
+            except (OSError, AttributeError) as _e:
+                # 极受限 Python: 找不到 libsqlite3, 或 _db_handle 私有属性已变.
+                # 跳过 vec0 — 用 usearch index 做向量搜索 (8/5 已走这条路).
+                logger.warning(f"[8/10] sqlite-vec auto-ext 不可用 ({type(_e).__name__}: {_e}); vector 走 usearch (search_index.py)")
         self._conn.row_factory = sqlite3.Row
 
         # [P2-1 优化] warm-up Embedder 避免首次 recall 1s 冷启动
@@ -2823,7 +2859,7 @@ class Memory:
                 # 6-char hash suffix (16M 空间足够) — 防 slug collision
                 import hashlib as _hl_slug
 
-                _hash_suffix = _hl_slug.md5(chunk_id.encode()).hexdigest()[:6]
+                _hash_suffix = _hl_slug.md5(chunk_id.encode(), usedforsecurity=False).hexdigest()[:6]
                 entity_id = f"canonical:{slug}_{_hash_suffix}"
 
             # 3. upsert canonical_fact entity (重要性沿用 chunk)
@@ -2844,7 +2880,11 @@ class Memory:
             # [Part 2 review LOW fix] 防 silent drop: hash collision 时改用 max+1, 且事后 verify INSERT 生效
             import hashlib as _hl
 
-            rel_id_hash = int.from_bytes(_hl.md5(f"{chunk_id}|{entity_id}".encode()).digest()[:4], "big", signed=False)
+            rel_id_hash = int.from_bytes(
+                _hl.md5(f"{chunk_id}|{entity_id}".encode(), usedforsecurity=False).digest()[:4],
+                "big",
+                signed=False,
+            )
             max_row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM relations").fetchone()
             base_id = rel_id_hash % (2**31) or (max_row[0] + 1)
             # 试探 INSERT; 如因 id collision 失败, 退到 MAX+1
