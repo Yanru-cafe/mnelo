@@ -1087,11 +1087,29 @@ def _validate_loopback_host(host: str) -> None:
     单独路径 (不验证):
       - 0.0.0.0 / :: (bind 任意, 启动后用 ipfilter 限来源)
 
+    [8/9 review B6] host=0.0.0.0 / :: 走任意 bind 路径, 网络层只有 Bearer
+    token 单点认证. 加 stderr warn 明示: 没 ipfilter = Bearer 是唯一防线.
+    主人需要可在 [server] config.toml 加 ipfilter_cidrs (CIDR list) 限制
+    来源 IP. 当前实现: warn only, 不强制, 不破坏 backward compat.
+
     Raises:
         ValueError: host 不在白名单
     """
     # bind 任意地址 — 单独路径, 启动后由 ipfilter / OS firewall 限制来源
     if host in ("0.0.0.0", "::"):
+        # [8/9 review B6] 明示风险: 无 ipfilter, Bearer 是唯一防线.
+        print(
+            f"[WARN] bind '{host}' = 任意接口. 当前仅 Bearer token 鉴权.",
+            file=sys.stderr,
+        )
+        print(
+            "[WARN]   建议: config.toml [server] 加 ipfilter_cidrs 限制来源 IP,",
+            file=sys.stderr,
+        )
+        print(
+            "[WARN]         例: ipfilter_cidrs = ['100.64.0.0/10'] (Tailscale CGNAT only)",
+            file=sys.stderr,
+        )
         return
     # localhost alias
     if host == "localhost":
