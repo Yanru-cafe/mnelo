@@ -146,12 +146,12 @@ CREATE INDEX idx_relations_evidence ON relations(evidence_chunk_id);
 'triggered_by'        (signal --triggered_by--> 翁氏 anchor)
 ```
 
-### 3.4 `vectors` — 向量索引 (sqlite-vss)
+### 3.4 `vectors` — 向量索引 (sqlite-vec)
 
 用 bge-small-zh-v1.5 (512d, 90MB), 迁移不重新嵌入。
 
 ```sql
-CREATE VIRTUAL TABLE vectors USING vss0(
+CREATE VIRTUAL TABLE vectors USING vec0(
     embedding FLOAT[512],
     chunk_id TEXT
 );
@@ -279,7 +279,7 @@ def memory_recall(
     """返回 [{chunk_id, score, related_entities, graph_path}, ...]
     
     三路:
-      1. 向量 (sqlite-vss)
+      1. 向量 (sqlite-vec)
       2. 图遍历 (NetworkX 内存层)
       3. 元数据 (精确 LIKE + 时间近)
     
@@ -450,7 +450,7 @@ def memory_update(old_id, new_content=None, new_properties=None, new_importance=
 
 ```python
 def memory_recall(query, top_k=5, graph_hops=2, filters=None):
-    # === 路 1: 向量 (sqlite-vss) ===
+    # === 路 1: 向量 (sqlite-vec) ===
     q_emb = embed(query)
     vector_results = cur.execute("""
         SELECT c.id, c.content, c.importance, vss_distance
@@ -530,7 +530,7 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 | `entities.id` |  ID 例如 `sh600089` / `翁氏_D∩W` / `2026-08-14-anchor` |
 | `chunks.id` | UUID 风格 (`chunk_20260718_07_04_001`) |
 | `relations.id` | AUTOINCREMENT INTEGER |
-| `vectors.rowid` | AUTOINCREMENT (sqlite-vss 内部) |
+| `vectors.rowid` | AUTOINCREMENT (sqlite-vec 内部) |
 | `meta.key` | 系统级 key-value |
 
 ** ID 命名规则 (entities)**:
@@ -562,7 +562,7 @@ def memory_recall(query, top_k=5, graph_hops=2, filters=None):
 | 2 | memory.db 初始化 + 触发器 | `scripts/init_db.py` | 15 分钟 |
 | 3 | embedder.py (复用 bge-small-zh-v1.5, 复用 venv) | `embedder.py` | 30 分钟 |
 | 4 | memory.py 核心 6 API | `memory.py` | 2-3 小时 |
-| 5 | import_legacy.py (旧系统 → hm_ 全量迁移) | `scripts/import_legacy.py` | 1-2 小时 |
+| 5 | _(已删除 — 7/18 起 main_block_demo + 8/9 namespace migration 替换, 见 scripts/migrate_stock_namespace_2026_08_09.py + scripts/cleanup_demo_entities_2026_08_09.py)_ | — | — |
 | 6 | entity_resolve.py (alias + 相似度合并) | `entity_resolve.py` | 1 小时 |
 | 7 | api/ 4 MCP tool (memory_remember / memory_recall / memory_relate / memory_forget) | `api/*.py` | 2 小时 |
 | 8 |  cron 接入: trinity_daily.py Part 3 + weng 早报 | `cron/` | 1-2 小时 |
