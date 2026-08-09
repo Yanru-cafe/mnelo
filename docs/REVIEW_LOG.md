@@ -144,3 +144,15 @@
   - **[中] 0748cc5 e2e 测试 schema 模板来源错误**: macOS 硬编码消除了（`ROOT=__file__.parent.parent`），但 `src_db = ROOT/memory.db` 依赖 repo 根存在完整 schema 的 memory.db——本机该文件是 4096 字节空残留（gitignore，无 schema 表），复制后 `no such table: entities` 仍失败。模板应从 `config.resolve_db_path()` 拿（如 mcp 测试 `_isolated_db`），而非猜 repo 根文件。另: 该测试模块级 `os.environ['MNELO_MEMORY_DIR']=tmpdir` 污染后续收集的文件（m36 读到 e2e 的 tmpdir → 报缺 schema）
   - **[中] 2635ca0 mcp 回查仍失败（got 0）**: 表名修对了（OperationalError 消失），但 `_isolated_db` 创建的回查 `mem` 用 `tmp_path/memory.db`，而 `mcp._call_tool` 走 `_get_mem()` 单例连 **config/env 库**——task_create/transition 实际写 env 库，回查查 tmp_path 空库 → 断言 0 行。7be2f00 的「tmp_path 隔离」未真正实现: mcp 单例未切到 tmp_path，测试仍写 config 库（若 config 是 live 则污染 live）。修复: `_isolated_db` 内 `mcp._mem_instance = mem`（monkeypatch 单例），或统一 env 后重载
 - 附注: 本机 repo 根 `/root/work/mnelo/memory.db` 是 4096 空残留文件（被 .gitignore），非代码
+
+
+---
+
+## 2026-08-09 11:00 修复两处测试代码（授权直接 push）
+
+- 范围: 本地 2 个测试文件（针对 2635ca0 批 2 处不完整 + 1 处新发现的断言逻辑错）
+- 改动:
+  - **test_mcp_task_transition.py**: `_isolated_db` 加 `mcp._mem_instance = mem` —— mcp._call_tool 单例切到隔离库, task_create/transition/回查同库, 隔离真正生效; 两个测试 finally 恢复 `mcp._mem_instance = None` 防污染后续. 另修正 invalid 用例断言: 非法 transition 后 task_states 应为 **1** 行（task_create 写入的初始 open 窗保留, 无副作用）, 原期望 0 是逻辑错误（7be2f00 引入, 被表名 OperationalError 掩盖）
+  - **test_forget_junk_undo_e2e.py**: `src_db` 改从 `config.resolve_db_path()` 拿 schema 模板（原 `ROOT/memory.db` 本机是 4096 空残留, 复制后 `no such table`）; 整个脚本包 `try/finally` 恢复模块级修改的 `MNELO_MEMORY_*` env（防污染后续收集的 test_m36）
+- 验证: 3 文件 13 passed（e2e + mcp_transition + m36 互不干扰）; 全受影响组 36 passed / 1 failed
+- 遗留（非本次范围）: **a7 repair 自动重建维度不匹配** —— `test_a7_repair_actually_removes_orphan_when_not_dry_run` 用 dim=4 构造临时索引, repair 脚本触发自动重建时用 512 维 embedder → `The number of vector dimensions doesn't match`. 脚本健壮性问题（非回归, 原失败原因先后是 macOS 路径 / 0 向量 RuntimeError）
