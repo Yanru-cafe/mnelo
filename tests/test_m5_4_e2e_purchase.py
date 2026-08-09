@@ -146,11 +146,14 @@ def test_e2e_purchase_consumables_full_cycle():
         # Step 9: replay task → 完整生命周期 4 行状态窗 (open / in_progress / waiting / done)
         # 用直接 SQL: list_tasks 在 asof 下虽然过滤宽松, 但仍有逻辑边界. 直接查
         # task_states 表按 valid_from 排序, 拿到完整生命周期更稳.
+        # [8/9 P1 follow-up] task_states.transition (task_states.py:272 RF17) 把 valid_from
+        # 推进 1ms 防 0-长窗. NOW_REF 同值 4 transition → 状态窗 valid_from 递增
+        # NOW_REF, NOW_REF+1ms, NOW_REF+2ms, NOW_REF+3ms. NOW_REF + 5s buffer 抓到所有.
         rows = m._conn.execute(
             """SELECT state FROM task_states
                WHERE task_id=? AND valid_from <= ?
                ORDER BY valid_from ASC""",
-            (tid, NOW_REF),
+            (tid, (_dt.fromisoformat(NOW_REF) + _td(seconds=5)).isoformat(timespec="milliseconds")),
         ).fetchall()
         states_seen = [r[0] for r in rows]
         # 期望状态序列 (replay 返回的窗口按时间顺序):
