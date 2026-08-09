@@ -90,3 +90,22 @@
     - test_install_sh 的 plist_host_is_loopback 裸 grep 恒通过；test_remember_rollback 的 test_failed_remember_does_not_leak_audit 非判别性（变异后仍绿）；namespace guard allowed 系列只"不抛=pass"不验证写入行存在
 
 - 测试: 新增 80 个测试通过 + install.sh 33/33 + 状态机 24 + 索引/PII/config 81。a6/a7 4 个失败为硬编码 macOS 路径（环境）。numpy SIGILL（Ivy Bridge 无 AVX2）导致 ~10 个历史测试 core dump——环境限制，与本次 diff 无关，需 `MNELO_MEMORY_SEARCH_BACKEND=usearch`
+
+---
+
+## 2026-08-09 09:50 修复验证 d9c92c8..f34830a
+
+- 范围: d9c92c8..f34830a（7 个 review-fix 提交，对应 B1/B2/B5/B6/B7/B8）
+- 方法: 隔离 DB 端到端实测（`.backup` 快照 → `--yes` 真跑 → 一致性/guard/undo 复核）+ 逐文件 diff 审读
+- 结论: **6/7 修复生效，2 处残留未修完整**
+- 验证通过:
+  - **B1 namespace 迁移** ✅ scripts/migrate_stock_namespace_2026_08_09.py：dry-run 默认、事务原子、audit_log+revert_sql 留痕。隔离实测 10 实体 → `stock:` 前缀、400 relations 同步 0 残留、guard 放行新格式仍拒裸 id。FK 关闭无约束问题。注意默认 `--db` 指向已废弃 `~/.hermes/memory/memory.db`，本机须显式传 `--db /root/work/mnelo-data/memory.db`
+  - **B2 forget()** ✅ 改发 `{"target_id": chunk_id}` 对齐 schema。但 3557e91 只改 2 文件，commit 声称的 mock 测试未落地 → 无测试覆盖（低）
+  - **B5 config stale_days** ✅ try/except + `>=1` 校验 + 回落 7
+  - **B5 l2_sop 部分** ✅ VENV_PY env 化 + passes 走 env 解析（去 `'$PASSES'` 注入面）+ dry-run/destructive 共用 PASSES。但见下方残留
+  - **B6 0.0.0.0 bind** ✅ stderr warn + ipfilter_cidrs 建议，warn-only 不破坏兼容
+  - **B7 cleanup_demo** ✅ 改走 Memory.forget 接口（自动 audit_log + purged_queue），ISO 8601 时间戳，无 macOS 路径残留
+- 残留（验证发现，未修）:
+  - **[中] l2_destructive_sop.sh 仍硬编码 `MNELO_HOME=/Users/apple/.hermes`**（第 84 行 dry-run + 139 行 destructive）。VENV_PY/passes 修了，这条漏了。run_hygiene.py:23 用 MNELO_HOME 路由 DB/config → 本机（live=/root/work/mnelo-data，`~/.hermes` 已移除）跑该脚本连错/找不到 DB。建议改 `${MNELO_MEMORY_DIR:-...}` 或移除该行让 wrapper 走标准 config
+  - **[中] B8 forget_junk revert_sql 用 `INSERT OR IGNORE`，undo 静默失效**。实测：forget_one 软删后原行仍在（valid_until 非空），revert_sql 的 `INSERT OR IGNORE INTO entities` 撞主键被静默跳过 → `audit_undo` 后实体未恢复（COUNT=0）。`memory.audit_undo` 直接 executescript 不前置清理。从"ValueError 崩溃"改善为"静默不生效"，修复不完整。正确应为 UPDATE 风格（还原 valid_until=NULL + 恢复字段）。相关测试（test_digest.py:157）只覆盖 UPDATE 风格 revert_sql，INSERT 风格路径无测试钉住
+  - **[低] config.toml.example 仍未同步 [client]/[task] sections**（3557e91 新增 DEFAULT_TAILSCALE_HOST 配置项）
