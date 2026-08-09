@@ -57,6 +57,31 @@ def forget_one(conn: sqlite3.Connection, eid: str, reason: str) -> tuple[int, in
     Returns: (updated_entities, edges_invalidated).
     """
     ts = now_iso()
+    # [8/9 review B8 fix] 在 UPDATE 前 SELECT 完整 entity 行, 存 before_json.
+    # 原代码 before_json=None → memory_audit_undo 读 revert_sql 为空 → ValueError.
+    # before_json 存 entity 完整 JSON 快照, undo 时 INSERT OR IGNORE 还原.
+    before_row = conn.execute(
+        "SELECT id, kind, name, summary, properties_json, aliases_json, "
+        "source, importance, user_confirmed, created_at, valid_from "
+        "FROM entities WHERE id = ? AND valid_until IS NULL",
+        (eid,),
+    ).fetchone()
+    if before_row is None:
+        return (0, 0)
+    import json as _json
+    before_json = _json.dumps({
+        "id": before_row[0],
+        "kind": before_row[1],
+        "name": before_row[2],
+        "summary": before_row[3],
+        "properties_json": before_row[4],
+        "aliases_json": before_row[5],
+        "source": before_row[6],
+        "importance": before_row[7],
+        "user_confirmed": before_row[8],
+        "created_at": before_row[9],
+        "valid_from": before_row[10],
+    }, ensure_ascii=False)
     cur = conn.execute(
         "UPDATE entities SET valid_until = ? "
         "WHERE id = ? AND valid_until IS NULL",
@@ -76,22 +101,31 @@ def forget_one(conn: sqlite3.Connection, eid: str, reason: str) -> tuple[int, in
         "VALUES (?, 'entity', datetime('now', '+30 days'), 0)",
         (eid,),
     )
-    # 写 audit_log (跟 L2 hygiene pass 同结构, status='applied')
+    # 写 audit_log (跟 L2 hygiene pass 同结构, status='applied').
+    # before_json 是 entity 完整快照, undo 走 memory_audit_undo 还原.
     import uuid
     run_id = f"junk_forget_{uuid.uuid4().hex[:8]}_{int(time.time())}"
     conn.execute(
         "INSERT INTO audit_log (run_id, pass_name, action_type, ref_type, ref_id, "
-        "before_json, after_json, llm_used, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'applied', ?)",
+        "before_json, after_json, llm_used, status, created_at, revert_sql) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'applied', ?, ?)",
         (
             run_id,
             "manual_junk_forget",
             f"soft_delete_{reason}",
             "entity",
             eid,
-            None,  # before = original state (skipped for brevity)
-            f'{{"valid_until": "{ts}", "edges_invalidated": {edges}}}',
+            before_json,
+            _json.dumps({"valid_until": ts, "edges_invalidated": edges}, ensure_ascii=False),
             ts,
+            # revert_sql: undo 时 INSERT OR IGNORE 还原 entity 行 (含 created_at).
+            f"INSERT OR IGNORE INTO entities (id, kind, name, summary, properties_json, "
+            f"aliases_json, source, importance, user_confirmed, created_at, valid_from) "
+            f"VALUES ({_json.dumps(before_row[0])}, {_json.dumps(before_row[1])}, "
+            f"{_json.dumps(before_row[2])}, {_json.dumps(before_row[3])}, "
+            f"{_json.dumps(before_row[4])}, {_json.dumps(before_row[5])}, "
+            f"{_json.dumps(before_row[6])}, {before_row[7]}, {before_row[8]}, "
+            f"{_json.dumps(before_row[9])}, {_json.dumps(before_row[10])})",
         ),
     )
     return (updated, edges)
