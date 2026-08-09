@@ -15,6 +15,17 @@ forget_junk_entities.py — 批量 soft-delete HonchoImporter 噪声 entity.
 
 用法:
   MNELO_HOME=~/.hermes python3 scripts/forget_junk_entities.py [--dry-run] [--limit N] [--pattern anno:]
+
+[8/9 review B8 fix] audit_log 补 before_json + revert_sql (原 before_json=None
+→ memory_audit_undo 读 revert_sql 为空 → ValueError).
+
+[8/10 主人验证报告 fix] 原 revert_sql 用 INSERT OR IGNORE 撞 PK 静默跳过
+(原行 valid_until 已非空, INSERT OR IGNORE 命中 → 0 恢复). 改为 UPDATE 风格
+还原 valid_until = NULL, 跟 memory.py audit_undo UPDATE 路径一致.
+
+[8/10 B2 review followup] undo 路径缺回归测试 — 主人提示 test_digest.py
+只覆盖 UPDATE 风格, 这条路径没钉住. 整改建议: 在 tests/ 加 forget_junk
+undo 端到端 (隔离 DB + forget_one + audit_undo + 验证 valid_until=NULL).
 """
 import argparse
 import os
@@ -59,7 +70,6 @@ def forget_one(conn: sqlite3.Connection, eid: str, reason: str) -> tuple[int, in
     ts = now_iso()
     # [8/9 review B8 fix] 在 UPDATE 前 SELECT 完整 entity 行, 存 before_json.
     # 原代码 before_json=None → memory_audit_undo 读 revert_sql 为空 → ValueError.
-    # before_json 存 entity 完整 JSON 快照, undo 时 INSERT OR IGNORE 还原.
     before_row = conn.execute(
         "SELECT id, kind, name, summary, properties_json, aliases_json, "
         "source, importance, user_confirmed, created_at, valid_from "
@@ -105,6 +115,19 @@ def forget_one(conn: sqlite3.Connection, eid: str, reason: str) -> tuple[int, in
     # before_json 是 entity 完整快照, undo 走 memory_audit_undo 还原.
     import uuid
     run_id = f"junk_forget_{uuid.uuid4().hex[:8]}_{int(time.time())}"
+    # [8/10 主人验证报告 fix] revert_sql 用 UPDATE 风格 (还原 valid_until=NULL),
+    # 不是 INSERT OR IGNORE. 原因是 forget_one 是软删 (原行 valid_until 非空),
+    # INSERT OR IGNORE 撞 PK 静默跳过 → 0 恢复. UPDATE 走 ts 复合条件,
+    # 跟 memory.py audit_undo UPDATE 路径一致, 跟 test_digest.py 已覆盖的
+    # undo 风格对齐.
+    eid_q = _json.dumps(eid)  # 转义 JSON 字符串防注入
+    revert_sql = (
+        f"UPDATE entities SET valid_until = NULL "
+        f"WHERE id = {eid_q} AND valid_until = {_json.dumps(ts)}; "
+        f"UPDATE relations SET valid_until = NULL "
+        f"WHERE (source_id = {eid_q} OR target_id = {eid_q}) "
+        f"AND valid_until = {_json.dumps(ts)};"
+    )
     conn.execute(
         "INSERT INTO audit_log (run_id, pass_name, action_type, ref_type, ref_id, "
         "before_json, after_json, llm_used, status, created_at, revert_sql) "
@@ -118,14 +141,7 @@ def forget_one(conn: sqlite3.Connection, eid: str, reason: str) -> tuple[int, in
             before_json,
             _json.dumps({"valid_until": ts, "edges_invalidated": edges}, ensure_ascii=False),
             ts,
-            # revert_sql: undo 时 INSERT OR IGNORE 还原 entity 行 (含 created_at).
-            f"INSERT OR IGNORE INTO entities (id, kind, name, summary, properties_json, "
-            f"aliases_json, source, importance, user_confirmed, created_at, valid_from) "
-            f"VALUES ({_json.dumps(before_row[0])}, {_json.dumps(before_row[1])}, "
-            f"{_json.dumps(before_row[2])}, {_json.dumps(before_row[3])}, "
-            f"{_json.dumps(before_row[4])}, {_json.dumps(before_row[5])}, "
-            f"{_json.dumps(before_row[6])}, {before_row[7]}, {before_row[8]}, "
-            f"{_json.dumps(before_row[9])}, {_json.dumps(before_row[10])})",
+            revert_sql,
         ),
     )
     return (updated, edges)
