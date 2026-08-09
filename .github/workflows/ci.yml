@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/**']
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -92,9 +92,12 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           # [7/21 fix] PYTHONPATH 让 tests 能 import api/mnelo_client。
           # 之前从 ~/.hermes/memory 跑 tests/ 找不到 tests/ 目录。
-          export MNELO_MEMORY_DIR="$HOME/.hermes/memory"
+          export MNELO_MEMORY_DIR="$RUNNER_TEMP/mnelo-test-db"
+          export MNELO_TEST_FRESH=1
+          rm -rf "$MNELO_MEMORY_DIR"
+          mkdir -p "$MNELO_MEMORY_DIR"
           export PYTHONPATH="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE/api"
-          python -m pytest tests/ -q --timeout=30 \
+          python scripts/ci_per_file_runner.py tests/ -q --timeout=30 \
             --cov=mcp_server --cov=memory --cov=embedder \
             --cov=entity_resolve --cov=validation --cov=auth \
             --cov=config --cov=mnelo_locale --cov=i18n_messages \

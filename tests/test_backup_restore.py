@@ -269,6 +269,8 @@ class TestEndToEnd(BackupRestoreBase):
         real_db = _config.db_path
         if not Path(real_db).exists():
             self.skipTest(f"live db 不存在: {real_db}")
+        if os.environ.get("MNELO_TEST_FRESH"):
+            self.skipTest("requires a populated live DB; fresh CI DB is covered by fixture round-trip tests")
         live_copy = Path(self.tmp) / "live_copy.db"
         shutil.copy2(str(real_db), str(live_copy))
         tmp_snap = Path(self.tmp) / "snaps"
