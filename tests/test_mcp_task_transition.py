@@ -41,9 +41,14 @@ mcp = _load("mcp_server")
 
 
 def _isolated_db(tmp_path):
-    """[8/9 B13] 用 tmp_path 隔离 DB, 不污染 live. 临时建 memory instance."""
+    """[8/9 B13] 用 tmp_path 隔离 DB, 不污染 live. 临时建 memory instance.
+
+    [8/10 主人验证 fix] 同时把 mcp._get_mem() 单例切到隔离 mem —— 否则
+    task_create/transition 走 mcp 单例写 config/env 库, 回查 mem(tmp_path
+    库) 永远 0 行, 隔离不生效 (且 config 指向 live 时会污染 live).
+    测试 finally 恢复 mcp._mem_instance = None.
+    """
     import shutil
-    from config import Config
     from memory import Memory
     # 隔离 DB 路径
     db_path = tmp_path / "memory.db"
@@ -52,6 +57,7 @@ def _isolated_db(tmp_path):
     if src_db.exists():
         shutil.copy(src_db, db_path)
     mem = Memory(db_path=db_path)
+    mcp._mem_instance = mem
     return mem, db_path
 
 
@@ -127,6 +133,7 @@ def test_call_tool_task_transition_normal(tmp_path):
         n = _count_state_transitions_for_task(mem, task_id)
         assert n == 2, f"CAS 副作用应写 2 行 (关旧 + 开新), got {n}"
     finally:
+        mcp._mem_instance = None
         mem.close()
 
 
@@ -151,10 +158,12 @@ def test_call_tool_task_transition_invalid_rejected(tmp_path):
         # 走 mcp_server 错误路径: ValidationError 之类
         assert "error" in data or data.get("type") == "error", f"unexpected {data}"
 
-        # [8/9 B13] 回查: 非法 transition 应写 0 行 (回退)
+        # [8/10 fix] 回查: 非法 transition 无副作用 —— task_states 应保持
+        # task_create 写入的 1 行初始 open 窗 (不新增, 不开新窗).
         n = _count_state_transitions_for_task(mem, task_id)
-        assert n == 0, f"非法 transition 应 0 副作用, got {n}"
+        assert n == 1, f"非法 transition 应保持初始 1 行 (open 窗), got {n}"
     finally:
+        mcp._mem_instance = None
         mem.close()
 
 
