@@ -49,7 +49,7 @@ def main() -> int:
                     "summary": "An example concept entity for demonstration",
                 },
                 {
-                    "id": "example_stock_002",
+                    "id": "host:example_stock_002",
                     "kind": "stock",
                     "name": "Example Stock 002",
                     "summary": "A demo stock entity (not a real ticker)",
