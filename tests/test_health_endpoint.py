@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -9,6 +10,34 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import mcp_server
+
+
+def _make_fake_memory(hygiene_values: dict):
+    """[8/9 P1 follow-up] mcp_server.py:1017 直接用 target._conn.execute 拿 PII 24h count.
+
+    FakeMemory mock 必须提供 _conn. 用真 Memory() instance + 临时 db_path, 走
+    schema.sql (audit_log 表存在) 避免 pii_24h query 抛 "no such table".
+    check_same_thread=False 跟 memory.py:282 Memory() 一样, health endpoint 在
+    starlette 另一 thread 跑.
+    """
+
+    class FakeMemory:
+        def __init__(self):
+            self.values = hygiene_values
+            # [8/9] 用真 Memory() instance (非空 :memory: db) — 避免 pii_24h query
+            # 抛 "no such table: audit_log" 整 try 死. check_same_thread=False
+            # 跟 memory.py:282 Memory() 一样, 因为 health endpoint 在 starlette 另一 thread 跑.
+            import tempfile
+            from pathlib import Path
+            from memory import Memory
+            tmpdir = tempfile.mkdtemp(prefix="health_fake_")
+            self._real_mem = Memory(db_path=Path(tmpdir) / "memory.db")
+            self._conn = self._real_mem._conn
+
+        def stats(self):
+            return {"hygiene": self.values}
+
+    return FakeMemory()
 
 
 def test_health_route_is_registered_and_reports_hygiene():
@@ -34,12 +63,7 @@ def test_health_endpoint_returns_json():
 def test_health_recommends_maintenance_when_degraded(monkeypatch):
     from starlette.testclient import TestClient
 
-    class FakeMemory:
-        values = {"purge_backlog": 200, "decay_floor_chunks": 150, "freshness": 0.5}
-        def stats(self):
-            return {"hygiene": self.values}
-
-    fake = FakeMemory()
+    fake = _make_fake_memory({"purge_backlog": 200, "decay_floor_chunks": 150, "freshness": 0.5})
     monkeypatch.setattr(mcp_server, "_mem_instance", fake)
     monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 100)
     monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 100)
@@ -61,11 +85,8 @@ def test_health_recommends_maintenance_when_degraded(monkeypatch):
 def test_health_recommendation_payload_contract(monkeypatch):
     from starlette.testclient import TestClient
 
-    class FakeMemory:
-        def stats(self):
-            return {"hygiene": {"purge_backlog": 0, "decay_floor_chunks": 0, "freshness": 1.0}}
-
-    monkeypatch.setattr(mcp_server, "_mem_instance", FakeMemory())
+    fake = _make_fake_memory({"purge_backlog": 0, "decay_floor_chunks": 0, "freshness": 1.0})
+    monkeypatch.setattr(mcp_server, "_mem_instance", fake)
     monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 100)
     monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 100)
     body = TestClient(mcp_server._build_sse_app("test-token")).get("/health").json()
