@@ -235,7 +235,7 @@ def seed_chunks(memory, n: int, source_prefix: str) -> float:
             importance=0.3 + (i % 7) * 0.1,
             entities=[
                 {
-                    "id": ticker,
+                    "id": f"host:{ticker}",
                     "kind": "stock",
                     "name": name,
                     "aliases": [name, ticker],
@@ -245,7 +245,7 @@ def seed_chunks(memory, n: int, source_prefix: str) -> float:
             relations=[
                 {
                     "source_id": "benchmark_user",
-                    "target_id": ticker,
+                    "target_id": f"host:{ticker}",
                     "relation": f"_{action}_于",
                     "weight": 0.5 + (i % 5) * 0.1,
                     "properties": {"quantity": qty, "price": price},

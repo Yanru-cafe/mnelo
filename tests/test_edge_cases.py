@@ -49,6 +49,12 @@ from embedder import get_embedder, EMBED_MODEL_NAME, EMBED_DIM
 
 DB_PATH = Path('/Users/apple/.hermes/memory/memory.db')  # intentionally points at live DB — 测试 against real data
 
+import os as _os_test
+if _os_test.environ.get('MNELO_TEST_FRESH'):
+    DATABASE_MODE = 'fresh'
+else:
+    DATABASE_MODE = 'live'  # 默认 live, 主人 ~/.hermes/memory/memory.db
+
 
 class TestRelateEdgeCases(unittest.TestCase):
     """relate 边界 / weight / duplicate edges."""
@@ -176,6 +182,8 @@ class TestRecallEdgeCases(unittest.TestCase):
 
     def test_07_recall_filters_specific(self):
         """用更具区分性 query + filter 应命中."""
+        if DATABASE_MODE == 'fresh':
+            self.skipTest('fresh DB 无 trinity_daily:part1 source')
         results = self.mem.recall('Trinity 三层报告', top_k=3, strategy='vector_only',
                                    filters={'source': 'trinity_daily:part1'})
         # : vector_only + 区分性 query 应能命中
@@ -206,6 +214,8 @@ class TestGraphQueryEdgeCases(unittest.TestCase):
 
     def test_02_graph_query_max_hops_zero(self):
         """max_hops=0 应返回只 start_node 自身."""
+        if DATABASE_MODE == 'fresh':
+            self.skipTest('fresh DB 无 master_2077_ling entity')
         g = self.mem.graph_query('master_2077_ling', max_hops=0)
         # : 只有 start node, 无 edges
         self.assertGreaterEqual(len(g['nodes']), 1)
@@ -338,7 +348,9 @@ class TestStatsIntegrity(unittest.TestCase):
               f'vectors {s["vectors"]}, recall_log {s["recall_log"]}')
 
     def test_02_stats_reasonable_numbers(self):
-        """stats 数字应 > 下限 (db 已加载数据)."""
+        """stats 数字应 > 下限 (fresh DB skip; live DB 已加载数据)."""
+        if DATABASE_MODE == 'fresh':
+            self.skipTest('fresh DB 无 100+ entities/1000+ relations')
         s = self.mem.stats()
         self.assertGreater(s['entities']['total'], 100, '数据 entities 应 > 100')
         self.assertGreater(s['chunks']['total'], 100, '数据 chunks 应 > 100')

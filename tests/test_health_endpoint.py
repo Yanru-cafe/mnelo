@@ -98,12 +98,7 @@ def test_health_recommendation_payload_contract(monkeypatch):
 def test_health_threshold_boundary_is_configurable(monkeypatch):
     from starlette.testclient import TestClient
 
-    class FakeMemory:
-        values = {"purge_backlog": 10, "decay_floor_chunks": 20, "freshness": 0.5}
-        def stats(self):
-            return {"hygiene": self.values}
-
-    fake = FakeMemory()
+    fake = _make_fake_memory({"purge_backlog": 10, "decay_floor_chunks": 20, "freshness": 0.5})
     monkeypatch.setattr(mcp_server, "_mem_instance", fake)
     monkeypatch.setattr(mcp_server.config, "health_purge_backlog_threshold", 10)
     monkeypatch.setattr(mcp_server.config, "health_floor_chunks_threshold", 20)
@@ -134,11 +129,7 @@ def test_health_endpoint_error_schema_is_stable(monkeypatch):
 def test_health_endpoint_reuses_singleton(monkeypatch):
     from starlette.testclient import TestClient
 
-    class FakeMemory:
-        def stats(self):
-            return {"hygiene": {"purge_backlog": 0, "decay_floor_chunks": 0, "freshness": 1.0}}
-
-    fake = FakeMemory()
+    fake = _make_fake_memory({"purge_backlog": 0, "decay_floor_chunks": 0, "freshness": 1.0})
     calls = []
     monkeypatch.setattr(mcp_server, "_mem_instance", None)
     monkeypatch.setattr(mcp_server, "_get_mem", lambda: calls.append(1) or fake)
