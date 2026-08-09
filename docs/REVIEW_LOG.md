@@ -109,3 +109,24 @@
   - **[中] l2_destructive_sop.sh 仍硬编码 `MNELO_HOME=/Users/apple/.hermes`**（第 84 行 dry-run + 139 行 destructive）。VENV_PY/passes 修了，这条漏了。run_hygiene.py:23 用 MNELO_HOME 路由 DB/config → 本机（live=/root/work/mnelo-data，`~/.hermes` 已移除）跑该脚本连错/找不到 DB。建议改 `${MNELO_MEMORY_DIR:-...}` 或移除该行让 wrapper 走标准 config
   - **[中] B8 forget_junk revert_sql 用 `INSERT OR IGNORE`，undo 静默失效**。实测：forget_one 软删后原行仍在（valid_until 非空），revert_sql 的 `INSERT OR IGNORE INTO entities` 撞主键被静默跳过 → `audit_undo` 后实体未恢复（COUNT=0）。`memory.audit_undo` 直接 executescript 不前置清理。从"ValueError 崩溃"改善为"静默不生效"，修复不完整。正确应为 UPDATE 风格（还原 valid_until=NULL + 恢复字段）。相关测试（test_digest.py:157）只覆盖 UPDATE 风格 revert_sql，INSERT 风格路径无测试钉住
   - **[低] config.toml.example 仍未同步 [client]/[task] sections**（3557e91 新增 DEFAULT_TAILSCALE_HOST 配置项）
+
+
+---
+
+## 2026-08-09 10:30 第二轮修复验证 e0ac9c1
+
+- 范围: 1475c7b..e0ac9c1（9 个提交，针对 review B2/B9/B10/B11/B12/B13/B14 + 上一轮 2 处残留）
+- 方法: 隔离 DB 端到端实测（undo 恢复 / guard 行为 / 5 测试文件针对性跑）+ diff 审读
+- 结论: **6 项修复生效，3 个修复引入新 bug**
+- 生效:
+  - **l2_sop MNELO_HOME env 化** ✅ e17b0e4: `${MNELO_HOME:-$HOME/.hermes}`（不再硬编码 macOS）
+  - **forget_junk revert_sql UPDATE 风格** ✅ fbc10a0: 隔离实测 forget_one 软删 entity+relation → audit_undo 全恢复（0→1, 0→1）。`ts` 复合条件精确还原本次软删，`_json.dumps` 转义防注入
+  - **a6/a7 macOS 路径 → sys.executable** ✅ 2647937（3/4 过，a7 另有脚本健壮性问题见下）
+  - **SCHEMA.md 修正** ✅ cd832f4（sqlite-vss → vec0、import_legacy.py 标注）
+  - **config.toml.example 同步** ✅ 058c36e（[client]/[task]/[rate_limit]/[validation] sections）
+  - **classify 行为断言** ✅ 37465f8（test_e1_classify_normalize 全过）
+- 引入的新 bug（修复自身缺陷）:
+  - **[中] 8e6c498 m36 guard `n_total==0 → 拒` 反伤隔离空库**: 修复假设"init_db seed 1 个 manual chunk"，但 `scripts/init_db.py`（112 行）只建表+验证，**不 seed 任何 chunk**。隔离 `init_db` 后 chunks=0 → 新 guard 拒 `DB 0 chunk` → 按文档 `MNELO_MEMORY_DIR=$(mktemp -d) && init_db && pytest` 流程 test_m36 直接 SystemExit，与修复意图（放行 init_db 种子库）相反。旧逻辑（拒绝含真实 chunk 的库）反而放行隔离空库
+  - **[中] e0ac9c1 新测试 test_forget_junk_undo_e2e.py 三处 macOS 硬编码**: ROOT=`/Users/apple/.hermes/memory`、src_db 路径、脚本 import 路径。Linux/CI collection 直接 FileNotFoundError，本机无法跑。逻辑本身正确（端到端验 undo），应改 repo 相对路径
+  - **[中] 7be2f00 mcp_task_transition 回查断言查错表**: `_count_state_transitions_for_task` 用 `SELECT ... FROM state_transitions WHERE task_id=?`，但 state_transitions 是**转移规则表**（列 id/scope/from_state/to_state，无 task_id），task 状态窗在 **task_states** 表（有 task_id）。2 个测试 `OperationalError: no such column: task_id`。应改查 task_states
+  - **[低] a7 repair 对 tmp 小库（0 向量）抛 RuntimeError**: 路径修复后暴露 `[usearch] 自动重建 0/1 向量` RuntimeError。脚本健壮性问题，非回归（原失败原因是路径）
