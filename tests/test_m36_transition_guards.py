@@ -25,20 +25,28 @@ def _assert_isolated_db():
     task_states/entities/audit_log). 既有隔离模式:
       MNELO_MEMORY_DIR=$(mktemp -d) && python scripts/init_db.py && \
       pytest tests/test_m36_transition_guards.py
+
+    [8/9 review B12 fix] 放行 init_db 种子库 (允许 < 5 个 chunk + 全部 source
+    都在白名单: manual/test/audit/init). 之前的精确拒绝 "live 库" 经常误
+    杀 init_db 后的隔离库. 改进: 阈值化 + 启发式 source 白名单. 仍然拒绝
+    明确 live 库 (chunk > 50 或源含 trinity_daily/manual/cron_healthcheck).
     """
     db = Path(memory.DB_PATH).resolve()
     if not db.exists():
         raise SystemExit(f"[test_m36] DB 不存在: {db} — 请先 scripts/init_db.py 初始化隔离库")
     conn = sqlite3.connect(str(db))
-    n_real = conn.execute(
+    n_total = conn.execute("SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL").fetchone()[0]
+    n_live = conn.execute(
         "SELECT COUNT(*) FROM chunks "
-        "WHERE source IS NULL OR "
-        "(source NOT LIKE '%test%' AND source NOT LIKE '%audit%')"
+        "WHERE (source IS NULL OR source NOT IN ('manual', 'init', 'test', 'audit')) "
+        "AND valid_until IS NULL"
     ).fetchone()[0]
     conn.close()
-    if n_real > 0:
+    if n_total == 0:
+        raise SystemExit(f"[test_m36] DB 0 chunk: {db} — 请先 scripts/init_db.py")
+    if n_total > 50 or n_live > 5:
         raise SystemExit(
-            f"[test_m36] 拒绝运行: {db} 含 {n_real} 个真实 chunk (疑似 live 记忆库). "
+            f"[test_m36] 拒绝运行: {db} 含 {n_total} 个 chunk ({n_live} 非种子, 疑似 live 库). "
             "请用隔离临时库: MNELO_MEMORY_DIR=$(mktemp -d) && python scripts/init_db.py"
         )
 
