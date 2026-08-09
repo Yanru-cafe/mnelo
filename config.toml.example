@@ -64,3 +64,26 @@ inject_on_initialize = false # 默认显式调用 (避免每次连接拉摘要 t
 # 默认 ['stock'] 兼容旧行为; 设你领域的 kind (如 ['product','category']) 或 [] 禁用。
 # 环境变量覆盖: MNELO_MEMORY_RECALL_BOOST_KINDS='product,location'
 # boost_kinds = ['stock']
+
+# [8/9 增量] config.toml 新增 4 sections — commit 4b09bfb / 42d7954 提到 config.
+# 这些 section 如缺, config 走 hardcoded default.
+
+[rate_limit]
+# [42d7954] mcp_server 限流配置. 主人 8/9 部署 60 req / 60s 单 tool sliding window.
+# env MNELO_MEMORY_RATE_LIMIT_MAX_REQS 覆盖.
+max_reqs = 60
+window_seconds = 60
+
+[validation]
+# [4b09bfb] PII / namespace 校验配置. 主人 8/9 默认开 strict.
+# env MNELO_MEMORY_VALIDATION_STRICT 覆盖 (true / false).
+strict = true
+
+[task]
+# [4b09bfb] task_states stale 阈值. env MNELO_MEMORY_TASK_STALE_DAYS_THRESHOLD 覆盖.
+# 非法 (非数字 / < 1) 回落 7 (跟 8/9 review B2 fix 一致).
+stale_days_threshold = 7
+
+[client]
+# [4b09bfb] mnelo_remote_client.py 配置. env MNELO_MEMORY_CLIENT_TAILSCALE_HOST 覆盖.
+tailscale_host = "mnelo.tail6a710.ts.net"
