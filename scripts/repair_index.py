@@ -7,6 +7,12 @@ ROLLBACK, 索引留下指向不存在 chunk 的向量.
 
 [8/6 plan] 向量库二选一: 删 SQLiteVecIndex 分支. backend ∈ {auto, usearch, zvec}.
 
+[8/9 a7 fix] 不再硬编码 dim=512 — 探测磁盘已有 usearch 索引的真实维度
+(从 usearch 文件头 Index.metadata 读). 否则磁盘索引维度 ≠ 512 时,
+UsearchIndex.__init__ 预检不过 → 触发 _auto_rebuild 全量重建 (孤儿被
+顺带丢掉, repair 报 deleted:0 误导; 重建 embedder 512 维写低维索引还会崩).
+repair 语义是"清孤儿", 不该顺带重建.
+
 usage: python scripts/repair_index.py [--backend usearch|zvec|auto] [--dry-run]
 """
 from __future__ import annotations
@@ -40,12 +46,47 @@ def _iter_index_ids_zvec(idx: ZvecIndex):
         return []
 
 
+def _resolve_backend(requested: str) -> str:
+    """最终后端解析, 镜像 search_index._pick_backend 优先级 (auto: zvec > usearch).
+
+    repair 需要先知道最终后端, 才能决定探测哪个索引文件 (usearch.index 头 vs zvec 集合).
+    """
+    if requested == "auto":
+        return "zvec" if zvec_available() else "usearch"
+    if requested in ("usearch", "zvec"):
+        return requested
+    # 未知值 → _pick_backend 的兜底也是 auto 链
+    return "zvec" if zvec_available() else "usearch"
+
+
+def _probe_usearch_dim(db_path: Path) -> int:
+    """探测磁盘已有 usearch 索引的真实维度 (文件头), 防硬编码 512 触发 _auto_rebuild.
+
+    读不到/损坏 → 回落 512 (此时 UsearchIndex 预检失败, _auto_rebuild 正常兜底重建).
+    """
+    idx_path = db_path.parent / "usearch.index"
+    if not idx_path.exists():
+        return 512
+    try:
+        from usearch.index import Index
+        dims = Index.metadata(idx_path).get("dimensions")
+        if dims is not None:
+            return int(dims)
+    except Exception as e:
+        print(f"[repair_index] 探测 usearch 索引维度失败 ({e}), 回落 512", file=sys.stderr)
+    return 512
+
+
 def repair(backend: str, db_path: Path, dry_run: bool = False) -> dict:
     """遍历索引 → 查 SQLite 活跃 chunks → 删无对应项 (orphan). Returns stats."""
     if not db_path.exists():
         raise FileNotFoundError(f"db not found: {db_path}")
 
-    idx = build_search_index(backend, db_path, dim=512)
+    resolved = _resolve_backend(backend)
+    # [8/9 a7 fix] usearch 探真实维度 (孤儿删除在磁盘索引上做, 不应触发重建);
+    # zvec 集合 schema 固定 512 (embedder 默认), 且无维度校验重建, 保持原样.
+    dim = _probe_usearch_dim(db_path) if resolved == "usearch" else 512
+    idx = build_search_index(resolved, db_path, dim=dim)
     deleted = 0
     kept = 0
     try:

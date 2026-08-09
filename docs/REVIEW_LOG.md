@@ -156,3 +156,24 @@
   - **test_forget_junk_undo_e2e.py**: `src_db` 改从 `config.resolve_db_path()` 拿 schema 模板（原 `ROOT/memory.db` 本机是 4096 空残留, 复制后 `no such table`）; 整个脚本包 `try/finally` 恢复模块级修改的 `MNELO_MEMORY_*` env（防污染后续收集的 test_m36）
 - 验证: 3 文件 13 passed（e2e + mcp_transition + m36 互不干扰）; 全受影响组 36 passed / 1 failed
 - 遗留（非本次范围）: **a7 repair 自动重建维度不匹配** —— `test_a7_repair_actually_removes_orphan_when_not_dry_run` 用 dim=4 构造临时索引, repair 脚本触发自动重建时用 512 维 embedder → `The number of vector dimensions doesn't match`. 脚本健壮性问题（非回归, 原失败原因先后是 macOS 路径 / 0 向量 RuntimeError）
+
+
+---
+
+## 2026-08-09 11:15 修复 a7 repair 维度不匹配（授权直接 push）
+
+- 范围: `scripts/repair_index.py` 单文件（针对上轮遗留: a7 repair 自动重建维度不匹配）
+- 根因（多层）:
+  1. `repair()` 硬编码 `build_search_index(backend, db_path, dim=512)`
+  2. 磁盘索引维度 ≠ 512 时, `UsearchIndex.__init__` 预检失败 → `_auto_rebuild` 全量重建 —— 违背 repair 语义（只该清孤儿, 不该顺带重建）; 重建把孤儿顺带丢掉, repair 报 `deleted: 0` 误导
+  3. 重建 embedder 输出 512 维 → 写进低维索引 → `The number of vector dimensions doesn't match!`; a7 测试末尾 `UsearchIndex(db, dim=4)` reload 再触发重建 → RuntimeError
+- 修复:
+  - `_resolve_backend()`: 镜像 `_pick_backend` 优先级解析最终后端（auto: zvec > usearch）
+  - `_probe_usearch_dim()`: 从 usearch 文件头 `Index.metadata().dimensions` 探测磁盘索引真实维度; 读不到/损坏 → 回落 512（此时 `_auto_rebuild` 正常兜底）
+  - `repair()`: usearch 探真实维度, zvec 保持 512（zvec 集合 schema 固定, 且无维度校验重建）
+- 验证:
+  - `test_a5_a6_a7_usearch_integration.py` 5 passed（a7 真删孤儿场景通过）
+  - repair 输出 `{'kept': 1, 'deleted': 1}` —— 孤儿被 repair 真删（此前重建路径报 deleted:0）; reload dim=4 索引 keys=1 ✓
+  - 受影响组 8 passed（a5/a6/a7 + mcp_task_transition + forget_junk_undo_e2e）
+  - 基线对比: 对 repair_index.py 改动 stash 前后, test_digest/test_drift_fix_round15/test_backup_restore/test_benchmark_round15/test_edge_cases/test_asof_replay 失败/段错误逐文件一致 —— **零回归**（均为预存问题: usearch f16 SIGSEGV、namespace guard 拒裸 stock id 等, 见 07:50 审查章）
+- Risk 复盘: 探测读损坏索引头 → 回落 512 → 预检失败 → `_auto_rebuild` 兜底（与修复前行为一致）; auto 后端残留旧 usearch.index 时用 `_resolve_backend` 门控, 只有解析为 usearch 才探测, 不污染 zvec 维度
