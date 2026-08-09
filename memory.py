@@ -3349,8 +3349,11 @@ if __name__ == "__main__":
         # with real data in LIVE DB. The 'main_block_demo_<ts>:' suffix
         # ensures each run starts fresh.
         ts = int(time.time())
-        demo_stock = f"main_block_demo_stock_{ts}"
-        demo_person = f"main_block_demo_person_{ts}"
+        # [8/9 P1 follow-up] demo_stock 用 host: namespace 防 validation reject.
+        # 旧 non-namespaced id + kind='stock' 触发 ValidationError (require namespace
+        # 或 kind IN whitelist). 改 host: namespace — 8/9 决定 host prefix 表外部 data.
+        demo_stock = f"host:stock_demo_{ts}"
+        demo_person = f"host:person_demo_{ts}"
         demo_source = f"main_block_demo_{ts}"
 
         # 1. remember
