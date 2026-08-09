@@ -23,12 +23,14 @@ import mcp_server  # noqa: E402
 
 
 def _setup_minimal_digest(mem):
+    # [8/9 P1 follow-up] 加 identity: namespace 防 _enforce_entity_namespace_guard
+    # 拒 non-namespaced id + kind='identity_fact' (不在 _NAMELESS_KINDS 白名单).
     cid = mem.remember(
         content="identity: S1 test subject",
         source="s1_test",
         importance=1.0,
         entities=[{
-            "id": "s1_test_id",
+            "id": "identity:s1_test_id",
             "kind": "identity_fact",
             "name": "S1 Tester",
             "summary": "S1 Tester",
@@ -42,7 +44,7 @@ def _cleanup_s1(mem):
     # 子查询空, vectors 残留. helper 先 _index.remove 再 DELETE chunks.
     from helpers import cleanup_chunks
     cleanup_chunks(mem, source='s1_test')
-    mem._conn.execute("DELETE FROM entities WHERE id='s1_test_id'")
+    mem._conn.execute("DELETE FROM entities WHERE id='identity:s1_test_id'")
     mem._conn.execute("DELETE FROM meta WHERE key IN ('digest_chunk_id', 'digest_dirty')")
     mem._conn.commit()
 
