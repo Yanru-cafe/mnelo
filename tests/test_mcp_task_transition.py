@@ -7,7 +7,12 @@ CREATE task_states + entities 实体, 跑完清理但仍留 mcp._call_tool defau
 
 [回查断言] 旧版只断言 transition 返回 JSON dict, 从不回查 task_states 表
 验证 CAS 关旧窗 (valid_until = now) + 开新窗 (valid_from = now).
-新版断言 transition 后 SQLite state_transitions 表实际 2 行 (1 关 1 开).
+新版断言 transition 后 SQLite task_states 表实际 2 行 (1 关 1 开).
+
+[8/10 主人验证报告 fix] 旧版 _count_state_transitions_for_task 查
+state_transitions (规则矩阵表, 无 task_id 列) — OperationalError.
+正解: transition 写 task_states (UPDATE 关旧 + INSERT 开新),
+state_transitions 是设计阶段 seed 的规则不放实例.
 """
 import json
 import sys
@@ -74,9 +79,16 @@ def _setup_isolated(mem):
 
 
 def _count_state_transitions_for_task(mem, task_id):
-    """[8/9 B13] 回查 task_states 表: 转 1 次 = 2 行 (关旧 + 开新)."""
+    """[8/9 B13 + 8/10 fix] 回查 task_states 表: 转 1 次 = 2 行 (关旧 + 开新).
+
+    [8/10 主人验证报告 fix] 之前查 state_transitions (转移规则矩阵表,
+    无 task_id 列), OperationalError: no such column. 实际 task 状态窗
+    在 task_states 表 (transition() UPDATE 关旧窗 + INSERT 开新窗).
+    state_transitions 是设计阶段的转移规则 (scope/from_state/to_state)
+    seed 进去, 不放每次 transition 实例.
+    """
     return mem._conn.execute(
-        "SELECT COUNT(*) FROM state_transitions WHERE task_id = ?", (task_id,)
+        "SELECT COUNT(*) FROM task_states WHERE task_id = ?", (task_id,)
     ).fetchone()[0]
 
 
