@@ -24,7 +24,7 @@ _DEFAULT_DB_PATH = _config_mod.db_path
 def _run_script(script_name, *args):
     """跑 scripts/<script_name>.py, 返 (returncode, stdout)."""
     r = subprocess.run(
-        ["/Users/apple/hermes-agent/venv/bin/python3",
+        [sys.executable,
          str(ROOT / "scripts" / script_name), *args],
         capture_output=True, text=True, timeout=120,
         cwd=str(ROOT),
@@ -114,7 +114,7 @@ def test_a7_repair_actually_removes_orphan_when_not_dry_run(tmp_path):
     import os
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
     rc = subprocess.run(
-        ["/Users/apple/hermes-agent/venv/bin/python3",
+        [sys.executable,
          str(ROOT / "scripts" / "repair_index.py"),
          "--backend", "usearch", "--db", str(db)],
         capture_output=True, text=True, timeout=60,

@@ -13,7 +13,7 @@ test_edge_cases.py — mnelo v0.5.x 边界/异常/性能 测试
 7. 批量 / 性能 (recall < 1s for 10 hits)
 
 [运行]
-  /Users/apple/hermes-agent/venv/bin/python3 /Users/apple/.hermes/memory/tests/test_edge_cases.py
+  python3 -m pytest /Users/apple/.hermes/memory/tests/test_edge_cases.py
 """
 import sys
 import time

@@ -12,7 +12,7 @@ test_memory.py — mnelo v0.5.x 测试
 6. shim 已删 (7/18 , 走 mnelo MCP 客户端)
 
 [运行]
-  /Users/apple/hermes-agent/venv/bin/python3 /Users/apple/.hermes/memory/tests/test_memory.py
+  python3 -m pytest /Users/apple/.hermes/memory/tests/test_memory.py
 """
 
 import sys
