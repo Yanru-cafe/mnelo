@@ -229,11 +229,13 @@ class TestMCPServerRateLimit:
         assert 'test_tool_rl' in _RATE_BUCKETS
 
     def test_rate_limit_exceeded_raises(self):
-        from mcp_server import _rate_limit_check, _RATE_BUCKETS, _RATE_LIMIT_MAX_REQS
+        from mcp_server import _rate_limit_check, _RATE_BUCKETS
+        from mcp_server import config as _mcp_cfg
+        RATE_LIMIT_MAX_REQS = _mcp_cfg.rate_limit_max_per_window
         from validation import ValidationError
         _RATE_BUCKETS.clear()
         # 触发 limit: 调 N+1 次
-        for _ in range(_RATE_LIMIT_MAX_REQS + 1):
+        for _ in range(RATE_LIMIT_MAX_REQS + 1):
             try:
                 _rate_limit_check('test_tool_overflow')
             except ValidationError as e:
@@ -243,7 +245,7 @@ class TestMCPServerRateLimit:
         pytest.fail('expected ValidationError')
 
     def test_window_reset(self, monkeypatch):
-        """超 _RATE_LIMIT_WINDOW_SEC 后 bucket 重置"""
+        """超 _mcp_repo.config.rate_limit_window_sec 后 bucket 重置"""
         from mcp_server import _rate_limit_check, _RATE_BUCKETS
         _RATE_BUCKETS.clear()
         _rate_limit_check('test_tool_window')

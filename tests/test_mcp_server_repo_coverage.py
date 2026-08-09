@@ -182,8 +182,8 @@ class TestRateLimitBranches:
 
     def test_rate_limit_constants_defined(self):
         """Rate limit constants present."""
-        assert _mcp_repo._RATE_LIMIT_MAX_REQS > 0
-        assert _mcp_repo._RATE_LIMIT_WINDOW_SEC > 0
+        assert _mcp_repo.config.rate_limit_max_per_window > 0
+        assert _mcp_repo.config.rate_limit_window_sec > 0
 
 
 class TestResolveServerDefaults:
