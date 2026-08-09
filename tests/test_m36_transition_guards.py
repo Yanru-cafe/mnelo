@@ -26,14 +26,32 @@ def _assert_isolated_db():
       MNELO_MEMORY_DIR=$(mktemp -d) && python scripts/init_db.py && \
       pytest tests/test_m36_transition_guards.py
 
-    [8/9 review B12 fix] 放行 init_db 种子库 (允许 < 5 个 chunk + 全部 source
-    都在白名单: manual/test/audit/init). 之前的精确拒绝 "live 库" 经常误
-    杀 init_db 后的隔离库. 改进: 阈值化 + 启发式 source 白名单. 仍然拒绝
-    明确 live 库 (chunk > 50 或源含 trinity_daily/manual/cron_healthcheck).
+    [8/10 主人验证报告 fix] 之前误假设 init_db seed 1 个 'manual' chunk,
+    实际 init_db.py 只 CREATE TABLE + 验证, 不 seed chunk. 旧 guard
+    n_total==0 拒绝 = 误杀 init_db 后隔离库 (空). 改成:
+      - 验证必要表存在 (task_states / entities / chunks) — init_db 必建
+      - 仍拒绝 n_total > 50 明确 live 库
+      - 仍拒绝 n_live > 5 (大量异源 source)
+      - n_total == 0 放行 (init_db 后的空库, 测试自己 _create_task + transition)
     """
     db = Path(memory.DB_PATH).resolve()
     if not db.exists():
         raise SystemExit(f"[test_m36] DB 不存在: {db} — 请先 scripts/init_db.py 初始化隔离库")
+    conn = sqlite3.connect(str(db))
+    # [8/10 fix] 验证 init_db 必要表存在, 而不是靠 chunk 数推断
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('task_states','entities','chunks')"
+    )
+    tables = {r[0] for r in cur.fetchall()}
+    conn.close()
+    required = {"task_states", "entities", "chunks"}
+    missing = required - tables
+    if missing:
+        raise SystemExit(
+            f"[test_m36] DB {db} 缺 schema 表: {sorted(missing)}. "
+            "请先 scripts/init_db.py 初始化隔离库"
+        )
+    # [8/10 fix] 仍走 n_total + n_live 阈值 (防连到真 live 库)
     conn = sqlite3.connect(str(db))
     n_total = conn.execute("SELECT COUNT(*) FROM chunks WHERE valid_until IS NULL").fetchone()[0]
     n_live = conn.execute(
@@ -42,8 +60,6 @@ def _assert_isolated_db():
         "AND valid_until IS NULL"
     ).fetchone()[0]
     conn.close()
-    if n_total == 0:
-        raise SystemExit(f"[test_m36] DB 0 chunk: {db} — 请先 scripts/init_db.py")
     if n_total > 50 or n_live > 5:
         raise SystemExit(
             f"[test_m36] 拒绝运行: {db} 含 {n_total} 个 chunk ({n_live} 非种子, 疑似 live 库). "
