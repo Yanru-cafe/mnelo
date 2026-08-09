@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -31,6 +30,10 @@ def main() -> int:
         db.mkdir(parents=True)
         env = os.environ.copy()
         env["MNELO_MEMORY_DIR"] = str(db)
+        # [8/10 fix] CI hostedtoolcache arm64 Python sqlite_vec load() 静默失败
+        # (OperationalError: no such module: vec0). zvec 也没装. 强制 usearch 后端.
+        env.setdefault("MNELO_MEMORY_SEARCH_BACKEND", "usearch")
+        env.setdefault("MNELO_TEST_FRESH", "1")
         print(f"===== {test_file} =====", flush=True)
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", str(test_file), *args],

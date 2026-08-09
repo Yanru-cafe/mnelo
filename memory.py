@@ -393,7 +393,40 @@ class Memory:
                 _sql = _schema_path.read_text(encoding="utf-8")
                 _sql = _sql.replace("{EMBED_DIM}", str(_cfg.embedder_dim))
                 _sql = _sql.replace("{EMBED_MODEL}", _cfg.embedder_model)
-                self._conn.executescript(_sql)
+                # [8/10 fix] vec0 CREATE VIRTUAL TABLE 单独 exec, 失败 (CI hostedtoolcache
+                # 没 sqlite-vec wheel / module 不可用) 不阻塞核心表 (meta/chunks/...).
+                # 走 usearch backend 时 vec0 表本来就没用, 这段失败应该 warn 而不是 fail.
+                # schema.sql:85 的 vec0 段直接从 SQL 切掉, 避免 executescript 中断后续 DDL.
+                import re as _re
+                _vec0_stmt = _re.search(
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                    _sql,
+                    flags=_re.IGNORECASE | _re.DOTALL,
+                )
+                _vec0_sql = _vec0_stmt.group(0) if _vec0_stmt else None
+                _sql_no_vec0 = _re.sub(
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                    "",
+                    _sql,
+                    flags=_re.IGNORECASE | _re.DOTALL,
+                ) if _vec0_sql else _sql
+                # 先 exec 其他 DDL (entities/chunks/relations/meta/recall_log/...
+                # task_states/state_transitions + 索引), vec0 单独 exec.
+                try:
+                    self._conn.executescript(_sql_no_vec0)
+                except Exception:
+                    raise
+                if _vec0_sql:
+                    try:
+                        self._conn.executescript(_vec0_sql)
+                    except sqlite3.OperationalError as _e:
+                        if "no such module: vec0" in str(_e) or "vec0" in str(_e).lower():
+                            logger.warning(
+                                f"[8/10] sqlite-vec 不可用 ({type(_e).__name__}: {_e}); "
+                                "跳过 vec0 虚拟表创建, vector 走 usearch (search_index.py)"
+                            )
+                        else:
+                            raise
         self._migrate_schema()
 
         # [zvec 集成] SearchIndex 适配器 (DESIGN §3.6) — 默认 sqlite_vec,
