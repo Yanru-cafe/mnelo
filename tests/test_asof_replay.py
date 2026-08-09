@@ -28,8 +28,8 @@ class TestAsofHistoricalReplay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mem = Memory()
-        cls.token_old = _uniq("TOKEN_A")
-        cls.token_new = _uniq("TOKEN_B")
+        cls.token_old = _uniq("asof_old")
+        cls.token_new = _uniq("asof_new")
         cls.old_content = f"asof_old {cls.token_old} 原始版本"
         cls.new_content = f"asof_new {cls.token_new} 修正版本"
         cls.cid1 = cls.mem.remember(cls.old_content, source="test_asof_replay", importance=0.5)
@@ -79,7 +79,7 @@ class TestAsofVectorAndEntity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mem = Memory()
-        cls.token = _uniq("TOKEN_C")
+        cls.token = _uniq("asof_entity")
         cls.cid = cls.mem.remember(
             f"asof_entity {cls.token} 关联测试",
             source="test_asof_replay",
