@@ -54,7 +54,7 @@ def main() -> int:
             importance=0.7,
             entities=[
                 {
-                    "id": "example_03_stock_alpha",
+                    "id": "host:example_03_stock_alpha",
                     "kind": "stock",
                     "name": "Example Stock Alpha",
                     "summary": "Demo entity for graph lane",
