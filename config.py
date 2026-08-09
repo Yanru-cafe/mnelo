@@ -361,7 +361,13 @@ class Config:
                 print(f'[config] WARN: task.stale_days_threshold "{_stale_env}" invalid ({e}); 回落 7', file=sys.stderr)
                 self.task_stale_days_threshold = 7
         else:
-            self.task_stale_days_threshold = int(task_section.get("stale_days_threshold", 7) or 7)
+            try:
+                self.task_stale_days_threshold = int(task_section.get("stale_days_threshold", 7) or 7)
+                if self.task_stale_days_threshold < 1:
+                    raise ValueError("must be >= 1")
+            except (TypeError, ValueError) as e:
+                print(f'[config] WARN: task.stale_days_threshold "{task_section.get("stale_days_threshold")}" invalid ({e}); 回落 7', file=sys.stderr)
+                self.task_stale_days_threshold = 7
 
         # [8/9 P1-yanru] mnelo_remote_client.py DEFAULT_TAILSCALE_HOST — 提到 config.
         # env MNELO_MEMORY_CLIENT_TAILSCALE_HOST > config.toml [client].tailscale_host > 默认.

@@ -191,7 +191,7 @@ class MneloRemoteClient:
 
     def forget(self, chunk_id: str) -> Dict[str, Any]:
         """[8/8] 软删跨 vps 记忆."""
-        return self._tools_call("memory_forget", {"id": chunk_id})
+        return self._tools_call("memory_forget", {"target_id": chunk_id})
 
     def get_digest(self) -> Dict[str, Any]:
         """[8/8] 拉 session 摘要."""
