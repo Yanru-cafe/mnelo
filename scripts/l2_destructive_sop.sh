@@ -31,7 +31,9 @@
 set -euo pipefail
 
 REPO_ROOT="/Users/apple/.hermes/memory"
-VENV_PY="/Users/apple/hermes-agent/venv/bin/python3"
+# [8/9 review B5 fix 2] python 路径走 env 链, 不硬编码 macOS 路径.
+# env 顺序: MNELO_VENV_PY (主人 override) > system python3 (Linux/cron 兜底)
+VENV_PY="${MNELO_VENV_PY:-$(command -v python3)}"
 WRAPPER="$REPO_ROOT/scripts/run_hygiene.py"
 DB="$REPO_ROOT/memory.db"
 LOG_DIR="$REPO_ROOT/logs"
@@ -75,10 +77,13 @@ log "=== [1/5] DRY-RUN hygiene pass ($PASSES) ==="
 DRY_LOG="$LOG_DIR/l2-sop.dry-run.$(date +%Y%m%d_%H%M%S).json"
 log "输出 → $DRY_LOG"
 
+# [8/9 review B5 fix 1] dry-run 跟 destructive 共用同一 PASSES, 不要默认 hygiene.
+# (原代码 DRY_RESULT 没传 passes, 永远跑 default 'hygiene', 不能反映 destructive 实际行为)
 DRY_RESULT=$(
     cd "$REPO_ROOT" && \
     MNELO_HOME=/Users/apple/.hermes \
     MNELO_MEMORY_SEARCH_BACKEND=usearch \
+    MNELO_DRY_RUN_PASSES="$PASSES" \
     "$VENV_PY" "$WRAPPER"
 ) || {
     err "dry-run 失败. 重跑加 stderr 看错误"; exit 1
@@ -127,21 +132,28 @@ fi
 log "=== [3/5] DESTRUCTIVE 真跑 ==="
 REAL_LOG="$LOG_DIR/l2-sop.destructive.$(date +%Y%m%d_%H%M%S).json"
 
+# [8/9 review B5 fix 3] PASSES / DB_PATH 走 env var, 不嵌进 python -c 字符串.
+# 原代码 '$PASSES' '$DB' 直接字符串拼接, 注入面 (e.g. --pass "foo']);import os;os.system('rm -rf /');p=['").
 REAL_RESULT=$(
     cd "$REPO_ROOT" && \
     MNELO_HOME=/Users/apple/.hermes \
     MNELO_MEMORY_SEARCH_BACKEND=usearch \
+    MNELO_DESTRUCTIVE_PASSES="$PASSES" \
+    MNELO_DB_PATH="$DB" \
     "$VENV_PY" -c "
 import sys
+import os
 sys.path.insert(0, '$REPO_ROOT')
 sys.path.insert(0, '$REPO_ROOT/scripts')
-import os
 os.environ.setdefault('MNELO_MEMORY_SEARCH_BACKEND', 'usearch')
 from memory import Memory
-m = Memory(db_path=__import__('pathlib').Path('$DB'))
+m = Memory(db_path=__import__('pathlib').Path(os.environ['MNELO_DB_PATH']))
 import json
+# passes 从 env 解析, 逗号分隔. 之前嵌 '$PASSES' 替换是 shell injection surface.
+passes_raw = os.environ.get('MNELO_DESTRUCTIVE_PASSES', 'hygiene')
+passes = [p.strip() for p in passes_raw.split(',') if p.strip()]
 result = m.run_maintenance(
-    passes=['$PASSES'],
+    passes=passes,
     dry_run=False,
     confirm_destructive=True,
 )
