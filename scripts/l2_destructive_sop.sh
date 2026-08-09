@@ -81,7 +81,7 @@ log "输出 → $DRY_LOG"
 # (原代码 DRY_RESULT 没传 passes, 永远跑 default 'hygiene', 不能反映 destructive 实际行为)
 DRY_RESULT=$(
     cd "$REPO_ROOT" && \
-    MNELO_HOME=/Users/apple/.hermes \
+    MNELO_HOME="${MNELO_HOME:-$HOME/.hermes}" \
     MNELO_MEMORY_SEARCH_BACKEND=usearch \
     MNELO_DRY_RUN_PASSES="$PASSES" \
     "$VENV_PY" "$WRAPPER"
@@ -136,7 +136,7 @@ REAL_LOG="$LOG_DIR/l2-sop.destructive.$(date +%Y%m%d_%H%M%S).json"
 # 原代码 '$PASSES' '$DB' 直接字符串拼接, 注入面 (e.g. --pass "foo']);import os;os.system('rm -rf /');p=['").
 REAL_RESULT=$(
     cd "$REPO_ROOT" && \
-    MNELO_HOME=/Users/apple/.hermes \
+    MNELO_HOME="${MNELO_HOME:-$HOME/.hermes}" \
     MNELO_MEMORY_SEARCH_BACKEND=usearch \
     MNELO_DESTRUCTIVE_PASSES="$PASSES" \
     MNELO_DB_PATH="$DB" \
