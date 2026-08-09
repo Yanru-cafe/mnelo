@@ -24,10 +24,11 @@ import memory
 import task_states
 
 # [8/9 P1 follow-up] 测试 hard-coded "2026-08-06T15:00" 在 8/9 跑会边界 fail (now-7d == threshold,
-# propose_stale_tasks 用 < 严格小于). 改用 NOW_REF 跟 test 内部 _create_task(days_ago=10) 配对 —
-# 选 now - 7d + 1s 让 age = 7d 1s > threshold 7d, 必 stale.
+# propose_stale_tasks 用 < 严格小于). 改用 NOW_REF = now + 1s (未来 1 秒), 跟 _create_task(days_ago=10)
+# 配对 → valid_from = now - 10d, NOW_REF = now + 1s, age = 10d + 1s > threshold 7d (state=open), 必 stale.
+# 任何时区/时间漂移都不会边界 fail, 跟 8/9 业务日期解耦.
 import datetime as _dt
-NOW_REF = (_dt.datetime.now() - _dt.timedelta(days=7) + _dt.timedelta(seconds=1)).isoformat(timespec="milliseconds")
+NOW_REF = (_dt.datetime.now() + _dt.timedelta(seconds=1)).isoformat(timespec="milliseconds")
 
 
 def _setup():
