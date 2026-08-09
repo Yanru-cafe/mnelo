@@ -23,6 +23,12 @@ os.environ.setdefault("MNELO_MEMORY_SEARCH_BACKEND", "usearch")
 import memory
 import task_states
 
+# [8/9 P1 follow-up] 测试 hard-coded "2026-08-06T15:00" 在 8/9 跑会边界 fail (now-7d == threshold,
+# propose_stale_tasks 用 < 严格小于). 改用 NOW_REF 跟 test 内部 _create_task(days_ago=10) 配对 —
+# 选 now - 7d + 1s 让 age = 7d 1s > threshold 7d, 必 stale.
+import datetime as _dt
+NOW_REF = (_dt.datetime.now() - _dt.timedelta(days=7) + _dt.timedelta(seconds=1)).isoformat(timespec="milliseconds")
+
 
 def _setup():
     """[M5.2 fix] Clean m5-stale test fixtures (含 audit_log + test-other)."""
@@ -49,7 +55,6 @@ def _create_task(name: str, state: str = "open", days_ago: int = 10) -> str:
       blocked → in_progress / waiting / done / cancelled
     open 不能直跳 waiting/blocked, 必须经 in_progress.
     """
-    import datetime as _dt
     m = memory.Memory()
     try:
         back = _dt.datetime.now() - _dt.timedelta(days=days_ago)
@@ -87,7 +92,7 @@ def test_m5_2_1_propose_writes_audit_log_proposed():
     tid = _create_task("m5-stale-propose", days_ago=10)
     m = memory.Memory()
     try:
-        result = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        result = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         assert result["scanned"] >= 1
         assert result["proposed"] >= 1
         # 校验 audit_log 行
@@ -124,7 +129,7 @@ def test_m5_2_2_threshold_buckets():
 
     m = memory.Memory()
     try:
-        result = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        result = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         proposed_ids = {p["task_id"] for p in result["proposals"]}
         assert t_open in proposed_ids, f"open >7d 应 stale"
         assert t_waiting in proposed_ids, f"waiting >14d 应 stale"
@@ -160,13 +165,13 @@ def test_m5_2_3_idempotent_skip_existing():
 
     m = memory.Memory()
     try:
-        r1 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        r1 = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         # 本 task 第一次必被提议
         r1_ids = [p["task_id"] for p in r1["proposals"]]
         assert tid in r1_ids
 
         # 第二次扫, 本 task 已有 pending 应跳过 (其他 task 不管)
-        r2 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        r2 = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         r2_ids = [p["task_id"] for p in r2["proposals"]]
         assert tid not in r2_ids, f"本 task 二次扫应跳过, got {tid} in {r2_ids}"
         # skipped_existing 至少 1 (本 task 自身)
@@ -184,7 +189,7 @@ def test_m5_2_4_apply_marks_applied():
 
     m = memory.Memory()
     try:
-        scan = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        scan = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         # 找 proposal_id
         rows = m._conn.execute(
             """SELECT id FROM audit_log
@@ -252,7 +257,7 @@ def test_m5_2_5b_apply_wrong_pass_name():
                 before_json, after_json, confidence, status, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             ("test-other", "loop_tick_cron", "tick_due", "loop", "loop:fake",
-             None, "{}", 1.0, "proposed", "2026-08-06T15:00"),
+             None, "{}", 1.0, "proposed", NOW_REF),
         )
         m._conn.commit()
         fake_id = m._conn.execute(
@@ -279,7 +284,7 @@ def test_m5_2_6_list_stale_proposals_filtered():
 
     m = memory.Memory()
     try:
-        task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         rs = task_states.list_stale_proposals(m._conn, status="proposed")
         assert rs["count"] >= 1
         # 校验本 task 在 pending 列表中
@@ -300,7 +305,7 @@ def test_m5_2_7_proposal_prompt_text():
     tid = _create_task("m5-stale-prompt", days_ago=10)
     m = memory.Memory()
     try:
-        task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         after = m._conn.execute(
             """SELECT after_json FROM audit_log
                WHERE pass_name='stuck_task' AND ref_id=?""",
@@ -332,7 +337,7 @@ def test_m5_2_8_propose_does_not_mutate_task_state():
         assert len(rows_before) == 1
 
         # 跑 propose
-        task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        task_states.propose_stale_tasks(m._conn, now=NOW_REF)
 
         # 校验: 仍然 1 行 open state (没插新状态窗)
         rows_after = m._conn.execute(
@@ -359,7 +364,7 @@ def test_m5_2_9_fresh_task_not_proposed():
     tid = _create_task("m5-stale-fresh", days_ago=1)
     m = memory.Memory()
     try:
-        result = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        result = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         proposed_ids = {p["task_id"] for p in result["proposals"]}
         assert tid not in proposed_ids, f"fresh task (1d) 不应被提议"
     finally:
