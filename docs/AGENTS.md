@@ -22,18 +22,25 @@ for your user, follow these operational steps.
 
 ## 1.5 Decide the listen mode (single-machine vs multi-agent) — affects mcp_server --host
 
-[8/8 Tailscale multi-agent] 主人拍板 mnelo 改成 multi-agent 远程调用.
+[8/9 Tailscale multi-agent] 主人拍板 mnelo 改成 multi-agent 远程调用.
 这一决策决定 mcp_server 监听的 bind address, **一旦选错就要重启
 mcp_server** (`launchctl kickstart -k ai.mnelo.mcp`).
 
 **Ask the user (or decide from context):**
 
-> "mnelo 只在这台机器本机用吗？还是其它 Tailscale 节点也要连？"
+> "mnelo 是用 Tailscale Service (admin console 注册 *.ts.net 域名) 发布,
+> 还是裸 Tailscale IP (100.x.x.x) 发布?"
 
 | 场景 | `--host` | 理由 |
 |---|---|---|
 | **单机本地** (默认保守) | `127.0.0.1` | Tailscale / 反向代理 / 跨网都用不上, 最安全 |
-| **多机 / 多 agent** (Tailscale mesh) | `0.0.0.0` | 让 Tailscale interface 能转发, 跨 vps 跨 mesh 共享 |
+| **多机 / 多 agent via Tailscale Service** (admin console 注册端口) | `127.0.0.1` | Tailscale daemon forward Service 流量到本机 loopback, 服务端 socket 接得到 |
+| **多机 / 多 agent via 裸 Tailscale IP** (mesh peer 直连 IP) | `0.0.0.0` | utun* 接口路由, 客户端走 mesh 内 IP, 服务端 socket 必须在 0.0.0.0 上才收得到 |
+| **公网 / 任意可达网络** | (不要 Tailscale; 用 auth + ACL + 公开证书) | 威胁模型不同 |
+
+**判断方法**: 看 Tailscale admin console → Services 节点.
+- 有该端口条目 → Service 模式, 绑 127.0.0.1 (Tailscale daemon forward 兜底)
+- 只有 mesh peer + Tailscale IP → 裸 IP 模式, 绑 0.0.0.0
 
 **白名单策略不变** (loopback + 100.64.0.0/10 CGNAT 接受, LAN/公网/IPv6
 拒绝). 变的只是 bind address — *不*监听就无意义, 监听则有 Tailscale
