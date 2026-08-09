@@ -56,13 +56,15 @@ class TestMemoryCRUD(unittest.TestCase):
             source="test_crud",
             importance=0.9,
             entities=[
-                {"id": f"{self.test_id_prefix}_sh600089", "kind": "stock", "name": "特变电工-test"},
+                # [8/9 P1 follow-up] 加 host: namespace 防 _enforce_entity_namespace_guard
+                # 拒 non-namespaced id + kind='stock'. kind='person' 仍在 _NAMELESS_KINDS.
+                {"id": f"host:{self.test_id_prefix}_sh600089", "kind": "stock", "name": "特变电工-test"},
                 {"id": f"{self.test_id_prefix}_master", "kind": "person", "name": "主人口中-test"},
             ],
             relations=[
                 {
                     "source_id": f"{self.test_id_prefix}_master",
-                    "target_id": f"{self.test_id_prefix}_sh600089",
+                    "target_id": f"host:{self.test_id_prefix}_sh600089",
                     "relation": "_建仓_于",
                     "weight": 1.0,
                     "properties": {"quantity": 12000, "price": 18.96},
@@ -76,7 +78,7 @@ class TestMemoryCRUD(unittest.TestCase):
         """新建边."""
         rid = self.mem.relate(
             f"{self.test_id_prefix}_master",
-            f"{self.test_id_prefix}_sh600089",
+            f"host:{self.test_id_prefix}_sh600089",
             "_关注",
             weight=0.7,
         )
@@ -126,7 +128,7 @@ class TestMemoryCRUD(unittest.TestCase):
     def test_06_graph_query(self):
         """图遍历."""
         g = self.mem.graph_query(
-            f"{self.test_id_prefix}_sh600089",
+            f"host:{self.test_id_prefix}_sh600089",
             max_hops=2,
         )
         self.assertIn("nodes", g)
@@ -485,10 +487,12 @@ class TestP0BoundsCheck(unittest.TestCase):
         # 先 query existing id, 用不存在的 id
         ent_id = generate_id("test_ent")
         # 直接调 _upsert_entity, 它会走 INSERT 分支 (id 不存在)
+        # [8/9 P1 follow-up] kind='stock' + non-namespaced id 被 _enforce_entity_namespace_guard
+        # 拒. 改 kind='concept' (在 _NAMELESS_KINDS 白名单).
         self.mem._upsert_entity(
             {
                 "id": ent_id,
-                "kind": "stock",
+                "kind": "concept",
                 "name": "test",
                 "importance": 10.0,  # 应被 clamp 到 1.0
             }
