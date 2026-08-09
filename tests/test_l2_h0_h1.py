@@ -200,6 +200,8 @@ class TestHygienePass(unittest.TestCase):
 
     def test_06_proposals_written_as_proposed_status(self):
         """[§5.9.1] decay proposals 写 audit_log 是 'proposed' 状态"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("requires live DB decay candidates; fresh DB has none")
         # 跑一次 + 看最新 hygiene 行的 status
         self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         recent = self.mem.list_audit(pass_name="hygiene", status="proposed", limit=10)
