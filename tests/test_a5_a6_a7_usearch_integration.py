@@ -22,13 +22,21 @@ _DEFAULT_DB_PATH = _config_mod.db_path
 
 
 def _run_script(script_name, *args):
-    """跑 scripts/<script_name>.py, 返 (returncode, stdout)."""
+    """跑 scripts/<script_name>.py, 返 (returncode, stdout, stderr).
+
+    [8/10 fix] 透传 MNELO_MEMORY_DIR / MNELO_TEST_FRESH — CI fresh DB 隔离下,
+    subprocess 默认走 config.py default (owner live path), 会撞 enable_load_extension
+    sandbox 限制 + 用错 db. 透传确保 subprocess 跟 host 走同一份 fresh DB.
+    """
+    passthrough = {k: os.environ[k] for k in
+                   ("MNELO_MEMORY_DIR", "MNELO_TEST_FRESH", "MNELO_CI_PYTHON")
+                   if k in os.environ}
     r = subprocess.run(
         [sys.executable,
          str(ROOT / "scripts" / script_name), *args],
         capture_output=True, text=True, timeout=120,
         cwd=str(ROOT),
-        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        env={**os.environ, **passthrough, "PYTHONPATH": str(ROOT)},
     )
     return r.returncode, r.stdout, r.stderr
 
