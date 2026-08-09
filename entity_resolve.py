@@ -23,8 +23,8 @@ from typing import List, Optional, Tuple
 
 # [P2 审计] 复用 memory.now() 而非自己 datetime.now()
 sys.path.insert(0, str(Path(__file__).parent))
-from memory import now
 from config import resolve_db_path as _resolve_db_path
+from memory import now
 
 # [7/21 fix] DB 路径不再硬编码 — 从 config 解析 (env > config.toml > ~/.hermes/memory/memory.db)
 DB_PATH = _resolve_db_path()
@@ -67,9 +67,7 @@ def get_aliases(conn: sqlite3.Connection, entity_id: str) -> List[str]:
         List of alias strings. Returns [] if entity not found, soft-deleted,
         or has no name/aliases_json. JSON parse errors are silently swallowed.
     """
-    row = conn.execute(
-        "SELECT name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (entity_id,)
-    ).fetchone()
+    row = conn.execute("SELECT name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (entity_id,)).fetchone()
     if not row:
         return []
     aliases = []
@@ -205,12 +203,8 @@ def merge_entities(
     """
     if primary_id == secondary_id:
         return False
-    primary = conn.execute(
-        "SELECT id, name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (primary_id,)
-    ).fetchone()
-    secondary = conn.execute(
-        "SELECT id, name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (secondary_id,)
-    ).fetchone()
+    primary = conn.execute("SELECT id, name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (primary_id,)).fetchone()
+    secondary = conn.execute("SELECT id, name, aliases_json FROM entities WHERE id = ? AND valid_until IS NULL", (secondary_id,)).fetchone()
     if not primary or not secondary:
         return False
 

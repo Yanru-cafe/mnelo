@@ -62,6 +62,10 @@ jobs:
           cache: 'pip'
 
       - name: Install runtime + test deps
+        # [8/9 P1 follow-up] hostedtoolcache Python (macos-latest arm64) 编译不带
+        # enable_load_extension. memory.py 现走 ctypes fallback (直接 CDLL vec0.dylib
+        # 然后 sqlite_vec.load), 不依赖 stdlib enable_load_extension, 也不再需要
+        # pysqlite3-binary (这 wheel 还没 macOS arm64 build).
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -76,13 +80,12 @@ jobs:
           key: ${{ runner.os }}-hf-bge-small-zh
 
       - name: Init test DB
+        # [8/9 P1 follow-up] Memory() class 自己初始化 DB (memory.py:298 + run schema.sql),
+        # init_db.py 是冗余的; CI 强制 init_db.py 会因 hostedtoolcache Python build 不带
+        # enable_load_extension (macOS arm64 sandbox) 而 fail. 让 test 阶段 Memory() 自建库.
         run: |
           mkdir -p ~/.hermes/memory
-          cd "$GITHUB_WORKSPACE"
-          # [7/21 fix] 从仓库根运行; DB 路径通过 MNELO_MEMORY_DIR 指向 live 目录。
-          # 之前 `cd ~/.hermes/memory && python scripts/init_db.py` 找不到 scripts/,
-          # 且 init_db.py 硬编码路径 — CI 实际从未成功建库。
-          MNELO_MEMORY_DIR="$HOME/.hermes/memory" python scripts/init_db.py
+          echo "⏭️  init_db.py 跳过 — Memory() class 自建库 (memory.py:298)"
 
       - name: Run tests with coverage
         run: |

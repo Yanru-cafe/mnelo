@@ -28,8 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from auth import AuthError, load_auth_token, verify_bearer
-from task_states import TaskLoopError
 from config import config  # [Round 2] server host/port 配置
+from task_states import TaskLoopError
 from validation import ValidationError
 
 # 路径 — [7/21 fix] 插入本文件所在目录 (repo root), 不再硬编码 live 路径
@@ -39,15 +39,14 @@ logger = logging.getLogger("mnelo.mcp")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
     handler = logging.StreamHandler()
-    handler.setFormatter(
-        logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-    )
+    handler.setFormatter(logging.Formatter("[%(asctime)s] %(name)s %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(handler)
 
 # Guarded import
 try:
-    import uvicorn
     from contextlib import asynccontextmanager
+
+    import uvicorn
     from mcp.server import Server
     from mcp.server.sse import SseServerTransport
     from mcp.server.stdio import stdio_server
@@ -80,7 +79,8 @@ def _get_mem() -> Any:
     """单例 Memory."""
     global _mem_instance
     if _mem_instance is None:
-        from memory import Memory, DB_PATH as _DB_PATH
+        from memory import DB_PATH as _DB_PATH
+        from memory import Memory
 
         _mem_instance = Memory()
         logger.info(f"mnelo MCP ready (db: {_DB_PATH})")
@@ -105,17 +105,16 @@ TOOLS = [
                 "importance": {"type": "number", "description": "0.0-1.0, 默认 0.5", "default": 0.5},
                 "memory_type": {
                     "type": "string",
-                    "description": "[P0 §3.0] fact / preference / episode / decision / procedure / ephemeral. [P1a E4 8/4] 默认 None 触发 P1a 规则自动分类; 显式传值永远尊重 (None=未指定, 触发分类器).",
+                    "description": (
+                        "[P0 §3.0] fact / preference / episode / decision / procedure / ephemeral. [P1a E4 8/4] 默认 None 触发 P1a 规则自动分类; 显式传值永远尊重 (None=未指定, 触发分类器)."
+                    ),
                     "default": None,
                     "enum": ["fact", "preference", "episode", "decision", "procedure", "ephemeral", None],
                 },
                 "entities": {"type": "array", "description": "[{id, kind, name, summary?, aliases?, properties?}]"},
                 "relations": {
                     "type": "array",
-                    "description": (
-                        "[{source_id, target_id, relation, weight?, properties?, "
-                        "valid_from?, valid_until?, evidence_chunk_id?}]"
-                    ),
+                    "description": ("[{source_id, target_id, relation, weight?, properties?, valid_from?, valid_until?, evidence_chunk_id?}]"),
                 },
                 "tags": {"type": "array", "description": '["finance", "weng-resonance"]'},
                 "session_id": {"type": "string", "default": "default"},
@@ -126,7 +125,7 @@ TOOLS = [
     },
     {
         "name": "memory_recall",
-        "description": "3 路召回 (向量 + 图遍历 + 元数据) + RRF 融合.",
+        "description": ("4 路召回 (向量 + 图遍历 + 元数据 + 实体) + RRF 融合."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -296,7 +295,11 @@ TOOLS = [
     # 任一 MCP 客户端可用, 跟 G7 resources/list+read 是同一个通用层薄包装.
     {
         "name": "memory_get_digest",
-        "description": "[S1 8/5] 常驻记忆摘要 (DESIGN §4.5 + 可逆压缩 v0.13 + TASKS_L2_DIGEST §1.1). 缺省/省略 ref → 摘要压缩视图 (content + line_refs); 传 ref=<行号> → 展开该行源 chunk. 非法 ref → {error: ...}.",
+        "description": (
+            "[S1 8/5] 常驻记忆摘要 (DESIGN §4.5 + 可逆压缩 v0.13 + TASKS_L2_DIGEST §1.1). "
+            "缺省/省略 ref → 摘要压缩视图 (content + line_refs); 传 ref=<行号> → 展开该行源 chunk. "
+            "非法 ref → {error: ...}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -328,7 +331,11 @@ TOOLS = [
     # === [8/6 M3 Step 8] memory_task_transition ===
     {
         "name": "memory_task_transition",
-        "description": "CAS 关旧窗 + 开新窗 (DESIGN §4.2). task_id 必填, to_state/reason 必填, evidence_chunk_id 可选但若提供须存在. force=True 绕过转移图 (D8 纠正门). 终端 (cancelled) 拒收. 并发 / 重复提交报 NotCurrentStateError.",
+        "description": (
+            "CAS 关旧窗 + 开新窗 (DESIGN §4.2). task_id 必填, to_state/reason 必填, "
+            "evidence_chunk_id 可选但若提供须存在. force=True 绕过转移图 (D8 纠正门). "
+            "终端 (cancelled) 拒收. 并发 / 重复提交报 NotCurrentStateError."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -345,7 +352,12 @@ TOOLS = [
     # === [8/6 M3 Step 9] memory_task_list ===
     {
         "name": "memory_task_list",
-        "description": "列出活跃任务 (DESIGN §5.1). 默认 state 过滤 active (state NOT IN done/cancelled/dormant/paused). state 参数当前状态精确过滤 (state=in_progress). loop_id 过滤父 loop. asof 时间切片. stale_days 算窗口年龄.",
+        "description": (
+            "列出活跃任务 (DESIGN §5.1). 默认 state 过滤 active "
+            "(state NOT IN done/cancelled/dormant/paused). "
+            "state 参数当前状态精确过滤 (state=in_progress). loop_id 过滤父 loop. "
+            "asof 时间切片. stale_days 算窗口年龄."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -405,7 +417,11 @@ TOOLS = [
     # === [8/6 M3 Step 12] memory_loop_update ===
     {
         "name": "memory_loop_update",
-        "description": "改 loop properties (DESIGN §5.1). enabled/trigger/interval_hours/priority/owner_id 任一可改; None 字段不动. enabled 切换落 dormant/running 状态窗. 不动 active_task_id (那是 task_create 的领域).",
+        "description": (
+            "改 loop properties (DESIGN §5.1). enabled/trigger/interval_hours/priority/owner_id "
+            "任一可改; None 字段不动. enabled 切换落 dormant/running 状态窗. "
+            "不动 active_task_id (那是 task_create 的领域)."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -448,14 +464,14 @@ TOOLS = [
 _TASK_TOOL_REGISTRY = {
     # name -> (task_states attr, id_field for response wrapping)
     # 8 个 tool per DESIGN §5.1; Step 8-11 分批 ship.
-    "memory_task_create":    ("task_create",    "task_id"),
-    "memory_task_transition": ("transition",    None),
-    "memory_task_list":      ("list_tasks",     None),
-    "memory_task_replay":    ("replay_task",    None),
-    "memory_loop_create":    ("loop_create",    "loop_id"),
-    "memory_loop_update":    ("loop_update",    "loop_id"),
-    "memory_loop_list":      ("list_loops",     None),
-    "memory_loop_tick":      ("loop_tick",      None),
+    "memory_task_create": ("task_create", "task_id"),
+    "memory_task_transition": ("transition", None),
+    "memory_task_list": ("list_tasks", None),
+    "memory_task_replay": ("replay_task", None),
+    "memory_loop_create": ("loop_create", "loop_id"),
+    "memory_loop_update": ("loop_update", "loop_id"),
+    "memory_loop_list": ("list_loops", None),
+    "memory_loop_tick": ("loop_tick", None),
 }
 
 
@@ -553,9 +569,7 @@ def _rate_limit_check(tool_name: str) -> None:
         return
     bucket[1] += 1
     if bucket[1] > max_reqs:
-        raise ValidationError(
-            tool_name, f"rate limit: {max_reqs} reqs / {window_sec}s exceeded"
-        )
+        raise ValidationError(tool_name, f"rate limit: {max_reqs} reqs / {window_sec}s exceeded")
 
 
 _RATE_BUCKETS: Dict[str, list] = {}
@@ -747,12 +761,14 @@ if _MCP_AVAILABLE:
     async def list_resources() -> List[Resource]:
         if not config.digest_inject_on_initialize:
             return []
-        return [Resource(
-            uri=AnyUrl(_DIGEST_URI),
-            name="Session digest",
-            description="Currently cached 常驻摘要 (memory_get_digest, ref=None).",
-            mimeType="text/plain",
-        )]
+        return [
+            Resource(
+                uri=AnyUrl(_DIGEST_URI),
+                name="Session digest",
+                description="Currently cached 常驻摘要 (memory_get_digest, ref=None).",
+                mimeType="text/plain",
+            )
+        ]
 
     @server.read_resource()
     async def read_resource(uri: AnyUrl) -> str:
@@ -978,26 +994,28 @@ async def _mnelo_health_endpoint(request):
                 reasons.append(f"purge backlog {backlog} > {backlog_limit}")
             if floor_count > floor_limit:
                 reasons.append(f"floor chunks {floor_count} > {floor_limit}")
-            recommendations = [{
-                "tool": "memory_maintenance",
-                "safe": True,
-                "reason": "; ".join(reasons),
-                "args": {
-                    "passes": ["hygiene"],
-                    "dry_run": True,
-                    "confirm_destructive": False,
+            recommendations = [
+                {
+                    "tool": "memory_maintenance",
+                    "safe": True,
+                    "reason": "; ".join(reasons),
+                    "args": {
+                        "passes": ["hygiene"],
+                        "dry_run": True,
+                        "confirm_destructive": False,
+                    },
                 },
-            }, {
-                "tool": "memory_audit_list",
-                "safe": True,
-                "reason": "review recent hygiene proposals before destructive runs",
-                "args": {"pass_name": "hygiene", "limit": 20},
-            }]
+                {
+                    "tool": "memory_audit_list",
+                    "safe": True,
+                    "reason": "review recent hygiene proposals before destructive runs",
+                    "args": {"pass_name": "hygiene", "limit": 20},
+                },
+            ]
         # [8/6 E 路线] PII advisory 24h count (audit_log, pass_name=pii_audit).
         # 不 block, 仅 surface 提醒调用方. 阈值高于 0 → 推荐用户自检.
         pii_24h = target._conn.execute(  # noqa: SLF001 (intentional private access for /health)
-            "SELECT COUNT(*) FROM audit_log "
-            "WHERE pass_name='pii_audit' AND created_at >= datetime('now', '-1 day')"
+            "SELECT COUNT(*) FROM audit_log WHERE pass_name='pii_audit' AND created_at >= datetime('now', '-1 day')"
         ).fetchone()[0]
         pii_recommendation = None
         if pii_24h > 0:
@@ -1005,26 +1023,37 @@ async def _mnelo_health_endpoint(request):
                 "tool": "memory_audit_list",
                 "safe": True,
                 "reason": (
-                    f"{pii_24h} chunks in the last 24h matched advisory PII patterns "
-                    "(credit card / email / cn mobile / id card / secret token); "
-                    "mnelo does NOT redact or refuse — caller decides."
+                    f"{pii_24h} chunks in the last 24h matched advisory PII patterns (credit card / email / cn mobile / id card / secret token); mnelo does NOT redact or refuse — caller decides."
                 ),
                 "args": {"pass_name": "pii_audit", "limit": 50},
             }
 
-        return JSONResponse({"status": status, "hygiene": {
-            "purge_backlog": backlog,
-            "importance_below_floor": floor_count,
-            "freshness": hygiene.get("freshness"),
-        }, "pii_warnings_last_24h": pii_24h, "recommendations": recommendations
-            + ([pii_recommendation] if pii_recommendation else [])})
+        return JSONResponse(
+            {
+                "status": status,
+                "hygiene": {
+                    "purge_backlog": backlog,
+                    "importance_below_floor": floor_count,
+                    "freshness": hygiene.get("freshness"),
+                },
+                "pii_warnings_last_24h": pii_24h,
+                "recommendations": recommendations + ([pii_recommendation] if pii_recommendation else []),
+            }
+        )
     except Exception:
         logger.exception("health check failed")
-        return JSONResponse({"status": "degraded", "hygiene": {
-            "purge_backlog": None,
-            "importance_below_floor": None,
-            "freshness": None,
-        }, "recommendations": []}, status_code=503)
+        return JSONResponse(
+            {
+                "status": "degraded",
+                "hygiene": {
+                    "purge_backlog": None,
+                    "importance_below_floor": None,
+                    "freshness": None,
+                },
+                "recommendations": [],
+            },
+            status_code=503,
+        )
 
 
 async def _mnelo_metrics_endpoint(request):
@@ -1166,10 +1195,7 @@ def _build_sse_app(auth_token: str) -> "Starlette":
         # /sse 与 /messages/ 的 Bearer 鉴权各自独立实现, 这里自己校验.
         auth_header = request.headers.get("authorization", "")
         if not verify_bearer(auth_header, auth_token):
-            logger.warning(
-                f"rejected GET /sse from "
-                f"{request.client.host if request.client else '?'} - invalid/missing token"
-            )
+            logger.warning(f"rejected GET /sse from {request.client.host if request.client else '?'} - invalid/missing token")
             return JSONResponse(
                 {"error": "unauthorized", "detail": "Bearer token required"},
                 status_code=401,
@@ -1203,10 +1229,7 @@ def _build_sse_app(auth_token: str) -> "Starlette":
                 break
         if not verify_bearer(auth_header, auth_token):
             client = scope.get("client")
-            logger.warning(
-                f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from "
-                f"{client[0] if client else '?'} - invalid/missing token"
-            )
+            logger.warning(f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from {client[0] if client else '?'} - invalid/missing token")
             response = JSONResponse(
                 {"error": "unauthorized", "detail": "Bearer token required"},
                 status_code=401,
@@ -1249,13 +1272,12 @@ def _build_streamable_app(auth_token: str) -> "Starlette":
 
     [Bearer auth] endpoint 内部读 request.headers (跟 SSE /messages/ 同样的写法).
     """
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse, Response
+    from starlette.responses import JSONResponse
 
     manager = StreamableHTTPSessionManager(
         app=server,
-        json_response=False,        # SSE-style streaming (客户端可监听 server push)
-        stateless=True,             # 多客户端无 session 冲突
+        json_response=False,  # SSE-style streaming (客户端可监听 server push)
+        stateless=True,  # 多客户端无 session 冲突
     )
 
     class _MCPASGI:
@@ -1280,10 +1302,7 @@ def _build_streamable_app(auth_token: str) -> "Starlette":
                     break
             if not verify_bearer(auth_header, self.auth_token):
                 client = scope.get("client")
-                logger.warning(
-                    f"rejected {scope.get('method', '?')} /mcp from "
-                    f"{client[0] if client else '?'} - invalid/missing token"
-                )
+                logger.warning(f"rejected {scope.get('method', '?')} /mcp from {client[0] if client else '?'} - invalid/missing token")
                 response = JSONResponse(
                     {"error": "unauthorized", "detail": "Bearer token required"},
                     status_code=401,
@@ -1376,9 +1395,7 @@ def _build_dual_app(auth_token: str) -> "Starlette":
         auth_header = request.headers.get("authorization", "")
         if not verify_bearer(auth_header, auth_token):
             client = request.client
-            logger.warning(
-                f"rejected GET /sse from {client.host if client else '?'} - invalid/missing token"
-            )
+            logger.warning(f"rejected GET /sse from {client.host if client else '?'} - invalid/missing token")
             return JSONResponse(
                 {"error": "unauthorized", "detail": "Bearer token required"},
                 status_code=401,
@@ -1390,6 +1407,7 @@ def _build_dual_app(auth_token: str) -> "Starlette":
 
     class _MessagesASGI:
         """/messages/ ASGI handler (Bearer auth + sse.handle_post_message)."""
+
         def __init__(self):
             self.sse = sse
             self.auth_token = auth_token
@@ -1402,10 +1420,7 @@ def _build_dual_app(auth_token: str) -> "Starlette":
                     break
             if not verify_bearer(auth_header, self.auth_token):
                 client = scope.get("client")
-                logger.warning(
-                    f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from "
-                    f"{client[0] if client else '?'} - invalid/missing token"
-                )
+                logger.warning(f"rejected {scope.get('method', '?')} {scope.get('path', '?')} from {client[0] if client else '?'} - invalid/missing token")
                 response = JSONResponse(
                     {"error": "unauthorized", "detail": "Bearer token required"},
                     status_code=401,
@@ -1417,6 +1432,7 @@ def _build_dual_app(auth_token: str) -> "Starlette":
 
     class _MCPASGI:
         """/mcp ASGI handler (Bearer auth + streamable_mgr.handle_request)."""
+
         def __init__(self):
             self.manager = streamable_mgr
             self.auth_token = auth_token
@@ -1429,10 +1445,7 @@ def _build_dual_app(auth_token: str) -> "Starlette":
                     break
             if not verify_bearer(auth_header, self.auth_token):
                 client = scope.get("client")
-                logger.warning(
-                    f"rejected {scope.get('method', '?')} /mcp from "
-                    f"{client[0] if client else '?'} - invalid/missing token"
-                )
+                logger.warning(f"rejected {scope.get('method', '?')} /mcp from {client[0] if client else '?'} - invalid/missing token")
                 response = JSONResponse(
                     {"error": "unauthorized", "detail": "Bearer token required"},
                     status_code=401,
@@ -1492,10 +1505,7 @@ def run_dual(host: Optional[str] = None, port: Optional[int] = None, auth_token:
         return
 
     app = _build_dual_app(auth_token)
-    logger.info(
-        f"mnelo MCP DUAL listening on http://{host}:{port} "
-        f"(SSE=/sse+/messages/, streamable-http=/mcp, /health, /metrics; Bearer auth ON)"
-    )
+    logger.info(f"mnelo MCP DUAL listening on http://{host}:{port} (SSE=/sse+/messages/, streamable-http=/mcp, /health, /metrics; Bearer auth ON)")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
