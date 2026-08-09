@@ -6,6 +6,11 @@ soft-delete 后 undo 静默失效 (原行 valid_until 已非空, INSERT OR IGNOR
 PK 跳过 → 0 恢复). 修后用 UPDATE 风格 (valid_until = NULL WHERE id = ? AND
 valid_until = ts).
 
+[8/10 主人验证报告 fix v2] ROOT / src_db / forget_junk 脚本路径用 __file__
+相对路径, 不写死 /Users/apple/hermes/memory. Linux/CI collection 之前
+报 FileNotFoundError. ROOT = __file__.parent.parent (repo 父目录),
+src_db = ROOT/memory.db, fje = ROOT/scripts/forget_junk_entities.py.
+
 本测试隔离 DB 跑:
   1. 准备 1 个 active entity (anno: 前缀) + 1 个 relation 引用它
   2. forget_junk.forget_one (软删 + 写 audit_log + 排队 purged_queue)
@@ -21,13 +26,17 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
-ROOT = Path('/Users/apple/.hermes/memory')
+# [8/10 主人验证报告 fix v2] __file__ 相对路径, 跨平台
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 # 测试用隔离 DB
 tmpdir = tempfile.mkdtemp(prefix='forget_undo_test_')
 test_db = Path(tmpdir) / 'memory.db'
-src_db = Path('/Users/apple/.hermes/memory/memory.db')
+src_db = ROOT / 'memory.db'
+
+if not src_db.exists():
+    raise SystemExit(f'[setup] 源 DB 不存在: {src_db} — 测试需 live 库 schema 模板')
 
 # 复制 source schema (sqlite 文件 cp)
 shutil.copy(src_db, test_db)
@@ -49,7 +58,7 @@ print(f'[setup] memory.Memory instance db_path: {m.db_path}')
 
 # 加载 forget_junk 脚本
 import importlib.util as _ilu
-fje_spec = _ilu.spec_from_file_location('forget_junk_entities', '/Users/apple/.hermes/memory/scripts/forget_junk_entities.py')
+fje_spec = _ilu.spec_from_file_location('forget_junk_entities', str(ROOT / 'scripts' / 'forget_junk_entities.py'))
 fje = _ilu.module_from_spec(fje_spec)
 fje_spec.loader.exec_module(fje)
 
@@ -146,3 +155,4 @@ print(f'   - revert_sql 是 UPDATE 风格 (UPDATE entities/relations SET valid_u
 print(f'   - audit_undo 走 executescript 恢复 entity + 会 cascade 恢复 relation')
 print(f'   - audit_log 写 1 条 reverted 记录')
 print(f'   - 0 INSERT OR IGNORE 残留')
+print(f'   - 路径用 __file__ 相对路径, 跨平台')
