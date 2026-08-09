@@ -130,3 +130,17 @@
   - **[中] e0ac9c1 新测试 test_forget_junk_undo_e2e.py 三处 macOS 硬编码**: ROOT=`/Users/apple/.hermes/memory`、src_db 路径、脚本 import 路径。Linux/CI collection 直接 FileNotFoundError，本机无法跑。逻辑本身正确（端到端验 undo），应改 repo 相对路径
   - **[中] 7be2f00 mcp_task_transition 回查断言查错表**: `_count_state_transitions_for_task` 用 `SELECT ... FROM state_transitions WHERE task_id=?`，但 state_transitions 是**转移规则表**（列 id/scope/from_state/to_state，无 task_id），task 状态窗在 **task_states** 表（有 task_id）。2 个测试 `OperationalError: no such column: task_id`。应改查 task_states
   - **[低] a7 repair 对 tmp 小库（0 向量）抛 RuntimeError**: 路径修复后暴露 `[usearch] 自动重建 0/1 向量` RuntimeError。脚本健壮性问题，非回归（原失败原因是路径）
+
+
+---
+
+## 2026-08-09 10:55 第三轮修复验证 2635ca0
+
+- 范围: 5c8a9f5..2635ca0（3 个提交，针对上轮 3 个新 bug）
+- 结论: **1 项完整生效，2 项修复不完整**
+- 生效:
+  - **aab4dbe m36 guard** ✅ 改为「验证必要表存在（task_states/entities/chunks）+ n_total>50/n_live>5 阈值拒 live」，`n_total==0` 放行。隔离 init_db 空库不再误杀（m36 全过）
+- 不完整:
+  - **[中] 0748cc5 e2e 测试 schema 模板来源错误**: macOS 硬编码消除了（`ROOT=__file__.parent.parent`），但 `src_db = ROOT/memory.db` 依赖 repo 根存在完整 schema 的 memory.db——本机该文件是 4096 字节空残留（gitignore，无 schema 表），复制后 `no such table: entities` 仍失败。模板应从 `config.resolve_db_path()` 拿（如 mcp 测试 `_isolated_db`），而非猜 repo 根文件。另: 该测试模块级 `os.environ['MNELO_MEMORY_DIR']=tmpdir` 污染后续收集的文件（m36 读到 e2e 的 tmpdir → 报缺 schema）
+  - **[中] 2635ca0 mcp 回查仍失败（got 0）**: 表名修对了（OperationalError 消失），但 `_isolated_db` 创建的回查 `mem` 用 `tmp_path/memory.db`，而 `mcp._call_tool` 走 `_get_mem()` 单例连 **config/env 库**——task_create/transition 实际写 env 库，回查查 tmp_path 空库 → 断言 0 行。7be2f00 的「tmp_path 隔离」未真正实现: mcp 单例未切到 tmp_path，测试仍写 config 库（若 config 是 live 则污染 live）。修复: `_isolated_db` 内 `mcp._mem_instance = mem`（monkeypatch 单例），或统一 env 后重载
+- 附注: 本机 repo 根 `/root/work/mnelo/memory.db` 是 4096 空残留文件（被 .gitignore），非代码
