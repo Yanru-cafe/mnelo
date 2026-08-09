@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
-[![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-i18n-国际化)
+[![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-文档)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-设计原则)
 [![Latest release](https://img.shields.io/github/v/release/chinesewebman/mnelo)](https://github.com/chinesewebman/mnelo/releases/latest)
 
@@ -28,17 +28,20 @@
   **CAS 保护**转移 + 完整审计链
 - **可选自主维护层**——TTL、importance 衰减、事实晋升，含完整
   audit_log + undo。出厂默认关闭。
-- **标准 MCP，零锁定**——22 个工具，SSE 协议；兼容 Hermes、Claude
+- **标准 MCP，零锁定**——22 个工具，streamable-http（推荐）/ SSE /
+  stdio / dual（同端口 SSE + streamable-http）；兼容 Hermes、Claude
   Code、Cursor 或任意 MCP 客户端
-- **适合 \$10/年美国 VPS**——usearch f16 让内存 + 磁盘足够小，可跑
-  KVM1 1 GB / 25 GB SSD；一个盒子 = 完整记忆系统 + agent 中转
+- **适合 \$10/年美国 VPS**——向量后端（usearch f16 / zvec INT8）让
+  内存 + 磁盘足够小，可跑 KVM1 1 GB / 25 GB SSD；一个盒子 = 完整记
+  忆系统 + agent 中转
 
 ## 安装
 
 ```bash
 git clone https://github.com/chinesewebman/mnelo.git
 cd mnelo
-bash scripts/install.sh        # 一键：venv + pip + init_db + plist + 鉴权 token
+bash scripts/install.sh        # 一键：venv + pip + init_db + 服务守护
+                               # (macOS launchd / Linux systemd) + 鉴权 token
 ```
 
 或手动：
@@ -47,7 +50,9 @@ bash scripts/install.sh        # 一键：venv + pip + init_db + plist + 鉴权 
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python3 scripts/init_db.py
-launchctl load ~/Library/LaunchAgents/ai.mnelo.mcp.plist
+# 启动 server — streamable-http 是推荐 transport
+.venv/bin/python mcp_server.py --transport streamable-http \
+  --host 127.0.0.1 --port 8086
 ```
 
 验证：
@@ -65,10 +70,10 @@ Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 其余全部内容在 `docs/`：
 
 - [docs/AGENTS.md](docs/AGENTS.md) — 接入 mnelo 作为你的记忆层
-- [docs/RUNBOOK.md](docs/RUNBOOK.md) — 安装、launchd、客户端接入、
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — 安装、服务守护、客户端接入、
   恢复
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — 备份 / 恢复、repo ↔ live
-  同步、launchd 命令、**美国低价 VPS 部署**、已知限制
+  同步、**美国低价 VPS 部署**、已知限制
 - [docs/VECTOR_BACKENDS.md](docs/VECTOR_BACKENDS.md) — usearch (f16) vs
   zvec (INT8 + 原生 FTS) + AVX2 检测 + 崩溃诊断
 - [docs/L2_MAINTENANCE.md](docs/L2_MAINTENANCE.md) — 自主维护层细节
@@ -79,14 +84,14 @@ Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 模块布局
 - [docs/DESIGN.md](docs/DESIGN.md) — 设计蓝图
   （[docs/DESIGN_TASK_LOOP.md](docs/DESIGN_TASK_LOOP.md) 是任务/循环子系统）
-- [docs/SCHEMA.md](docs/SCHEMA.md) — 12 张表的 schema
-- [docs/REVIEW_LOG.md](docs/REVIEW_LOG.md) — review-pass 审计历史
+- [docs/SCHEMA.md](docs/SCHEMA.md) — SQLite schema（14 张表）
 
 ## 设计原则
 
 1. **本地优先。** 永不调用云 API。Embedder 预下载后离线运行。
 2. **单文件。** SQLite。`cp memory.db` 即完整备份。
-3. **标准 MCP，零锁定。** 22 个工具，SSE 协议；任意 MCP 客户端可用。
+3. **标准 MCP，零锁定。** 22 个工具，streamable-http / SSE / stdio；
+   任意 MCP 客户端可用。
 4. **通用优先。** 默认按协议通用（任意 MCP 客户端），客户端特定粘
    合是薄层、有文档的适配器。
 5. **内容中立。** mnelo 不评判内容——忠实存储和检索调用方传入的任
@@ -102,7 +107,8 @@ Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 
 ```bash
 python3 -m pytest tests/ -q
-# 738 passed, 1 skipped (~210s)  [2026-08]
+# 收集 1,075 个测试；覆盖与延迟数字见
+# docs/BENCHMARKS.md → Test coverage
 ```
 
 ## 许可证
@@ -112,10 +118,11 @@ MIT。详见 [LICENSE](LICENSE)。
 ## 致谢
 
 - [usearch](https://github.com/unum-cloud/usearch) /
-  [zvec](https://github.com/alibaba/zvec) — 向量后端（默认 `auto`
-  链）
-- [sqlite-vec](https://github.com/asg017/sqlite-vec) — 工具用
-  `vec0` 虚表
+  [zvec](https://github.com/alibaba/zvec) — 向量后端；默认 `auto`
+  链优先 zvec（INT8，需 AVX2+），不可用回落 usearch（f16）
+- [sqlite-vec](https://github.com/asg017/sqlite-vec) — legacy：`vec0`
+  表保留给 migrate / repair / init_db 工具用；运行时检索后端不再
+  写它
 - [fastembed](https://qdrant.github.io/fastembed) — 嵌入模型封装
 - [BAAI/bge-small-zh-v1.5](https://huggingface.co/BAAI/bge-small-zh-v1.5)
   — 中文嵌入模型
