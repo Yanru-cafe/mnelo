@@ -38,7 +38,7 @@ def main() -> int:
         # (real stock codes like sh600089 already exist in LIVE DB).
         chunk_id = m.remember(
             content="example_02_graph_demo example_02_graph_unique_xyz456 — "
-            "mnelo_project_demo 项目为 example_stock_002 提供 AI 记忆支持 demo。",
+            "mnelo_project_demo 项目为 host:example_stock_002 提供 AI 记忆支持 demo。",
             source="example_02:graph",
             importance=0.7,
             entities=[
@@ -49,7 +49,7 @@ def main() -> int:
                     "summary": "An example concept entity for demonstration",
                 },
                 {
-                    "id": "host:example_stock_002",
+                    "id": "host:host:example_stock_002",
                     "kind": "stock",
                     "name": "Example Stock 002",
                     "summary": "A demo stock entity (not a real ticker)",
@@ -61,18 +61,18 @@ def main() -> int:
         # [2] Manually create a relation between entities.
         rel_id = m.relate(
             source_id="mnelo_project_demo",
-            target_id="example_stock_002",
+            target_id="host:host:example_stock_002",
             relation="implemented_for",
             weight=0.9,
             properties={"use_case": "stock decision memory"},
         )
-        print(f"[relate] mnelo_project_demo --implemented_for--> example_stock_002 (rel_id={rel_id})\n")
+        print(f"[relate] mnelo_project_demo --implemented_for--> host:example_stock_002 (rel_id={rel_id})\n")
 
         # [3] Inspect the entities + relations.
         print("[db] entities created by this example:")
         rows = m._conn.execute(
             "SELECT id, kind, name FROM entities "
-            "WHERE id IN ('mnelo_project_demo', 'example_stock_002') AND valid_until IS NULL"
+            "WHERE id IN ('mnelo_project_demo', 'host:example_stock_002') AND valid_until IS NULL"
         ).fetchall()
         for r in rows:
             print(f"  {r[0]:30s} kind={r[1]:10s} name={r[2]}")
@@ -87,11 +87,11 @@ def main() -> int:
         print()
 
         # [4] Query that hits the graph lane via entity name.
-        #     "example_stock_002" matches the entity id → entity lane returns it as a
+        #     "host:host:example_stock_002" matches the entity id → entity lane returns it as a
         #     seed → graph lane 1-hops to mnelo_project_demo → 2-hops to the
         #     chunk that mentions both.
-        print("[recall] query = 'example_stock_002' (graph 1-hop):")
-        results = m.recall("example_stock_002", top_k=5)
+        print("[recall] query = 'host:example_stock_002' (graph 1-hop):")
+        results = m.recall("host:host:example_stock_002", top_k=5)
         my_hits = [r for r in results if "example_02_graph_unique_xyz456" in r["content"]]
         print(f"  Your chunk: {len(my_hits)}/{len(results)} top-5 hits")
         for i, r in enumerate(results, 1):
@@ -130,18 +130,18 @@ def _cleanup(m: Memory) -> None:
         except Exception:
             pass
     m._conn.execute("DELETE FROM chunks WHERE source LIKE 'example_02:%'")
-    # Entities created by this example (note: example_stock_002 may collide
+    # Entities created by this example (note: host:example_stock_002 may collide
     # with real data if reused, but we use unique ids here)
     m._conn.execute("DELETE FROM entities WHERE source LIKE 'example_02:%'")
     # For our example-specific entities: hard-delete (they're ours, not real).
-    for example_eid in ("mnelo_project_demo", "example_stock_002"):
+    for example_eid in ("mnelo_project_demo", "host:host:example_stock_002"):
         m._conn.execute(
             "UPDATE entities SET valid_until = datetime('now') WHERE id = ?",
             (example_eid,),
         )
         m._conn.execute("DELETE FROM entities WHERE id = ?", (example_eid,))
     # Relations
-    for example_eid in ("mnelo_project_demo", "example_stock_002"):
+    for example_eid in ("mnelo_project_demo", "host:host:example_stock_002"):
         m._conn.execute(
             "UPDATE relations SET valid_until = datetime('now') WHERE source_id = ? OR target_id = ?",
             (example_eid, example_eid),
