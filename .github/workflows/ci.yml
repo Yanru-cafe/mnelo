@@ -50,8 +50,10 @@ jobs:
       # Don't cancel the whole matrix if one version fails — let all run so
       # the summary shows the full picture.
       fail-fast: false
+      # [8/10 v1.0.0] Drop Python 3.9 — usearch>=2.26 (vector search backend) only ships
+      # wheels for Python 3.10+. See pyproject.toml target-version = "py310".
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12']
 
     steps:
       - uses: actions/checkout@v4

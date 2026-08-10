@@ -6,7 +6,7 @@
 | [English](README.md) | 简体中文 |
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
 [![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-文档)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-设计原则)
@@ -34,6 +34,15 @@
 - **适合 \$10/年美国 VPS**——向量后端（usearch f16 / zvec INT8）让
   内存 + 磁盘足够小，可跑 KVM1 1 GB / 25 GB SSD；一个盒子 = 完整记
   忆系统 + agent 中转
+
+## 环境要求
+
+- **Python 3.10+** — `usearch>=2.26`（向量搜索后端）只发布 Python 3.10+
+  的 wheel。Python 3.9 及更低版本**不受支持**。macOS（arm64/x86_64）、Linux、
+  Windows WSL2 均可。
+- ~200 MB 磁盘（embedder 模型缓存 `BAAI/bge-small-zh-v1.5`，首次运行下载）
+- 可选：`sqlite-vec` 提供 vec0 快速路径——运行时自动检测，不可用时自动
+  回落到 `usearch`
 
 ## 安装
 
