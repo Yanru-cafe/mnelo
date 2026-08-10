@@ -258,7 +258,7 @@ a new entity kind" above).
 
 Hand this to any AI coding agent (Claude Code, Hermes, Cursor, …):
 
-> **Install and adopt mnelo from https://github.com/chinesewebman/mnelo
+> **Install and adopt mnelo from https://github.com/cure4u/mnelo
 > as my memory system:**
 > 1. Clone, set up the venv, `pip install -r requirements.txt`, run
 >    `scripts/init_db.py`, launch the MCP server on port 8086, and verify
