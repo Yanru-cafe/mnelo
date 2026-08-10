@@ -22,6 +22,10 @@ def main() -> int:
         print(f"no test files found under {root}", file=sys.stderr)
         return 2
     base_db = Path(os.environ.get("MNELO_CI_DB_ROOT", tempfile.mkdtemp(prefix="mnelo-ci-db-")))
+    python_exe = os.environ.get("MNELO_CI_PYTHON") or sys.executable
+    if subprocess.run([python_exe, "-c", "import pytest"], capture_output=True).returncode != 0:
+        print(f"CI python interpreter missing pytest: {python_exe}", file=sys.stderr)
+        return 2
     totals = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "crashed": 0}
     failures: list[str] = []
     crashes: list[str] = []
@@ -37,7 +41,7 @@ def main() -> int:
         env.setdefault("MNELO_TEST_FRESH", "1")
         print(f"===== {test_file} =====", flush=True)
         proc = subprocess.run(
-            [sys.executable, "-m", "pytest", str(test_file), *args],
+            [python_exe, "-m", "pytest", str(test_file), *args],
             env=env,
             text=True,
         )
