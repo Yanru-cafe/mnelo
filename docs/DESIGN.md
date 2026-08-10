@@ -187,7 +187,29 @@ entity 上有**两个正交维度**，不是层级关系：
 **正交性澄清（关键）**：
 - 一个 entity 同时有 `kind` 和 `memory_type`，二者独立。例：`sh600089` = kind `stock` × memory_type `fact`
 - **`memory_type` 的权威载体是 chunk**（记忆的类型）。entity 上的 `memory_type` 是**便捷冗余/派生**：当 remember 不指定 entity 类型时继承 chunk 的类型；当同一 entity 被多条不同类型的记忆共享时，反映最近/主要关联，**不保证严格**
-- **`identity_fact` 的不可变规则来自 kind，不来自 memory_type**——一个 `kind=identity_fact, memory_type=fact` 的实体不可变；一个 `kind=concept, memory_type=fact` 的实体可正常作废
+| **`identity_fact` 的不可变规则来自 kind，不来自 memory_type**——一个 `kind=identity_fact, memory_type=fact` 的实体不可变；一个 `kind=concept, memory_type=fact` 的实体可正常作废
+
+#### 3.0.3.5 entity id namespace guard（[8/8 P1]，A1 2026-08-10 修订）
+
+Kind 词汇表本身**开放**（无注册、用户可任意引入新 `kind`，如 `product` /
+`lesson` / `recipe`），但 entity `id` 受 guard 检查——`memory._enforce_entity_namespace_guard`
+在 `_upsert_entity` 入口拒三种东西：
+
+| 拒 | 例 | 原因 |
+|---|---|---|
+| 黑名单前缀 `anno:` | `anno:foo` | HonchoImporter NER 历史残留 (8/8 前导入器写入) |
+| 黑名单前缀 `TOKEN_` | `TOKEN_C_xxx` | 随机 session token，sentinel-like |
+| `concept` kind + `name > 50` chars | `kind=concept, name="imported sleep runs at midnight"` | 整段话当 entity，污染图 |
+
+**其余 id 不限**（A1 修复 2026-08-10）：之前版本还要求 id 必须配
+`master_` 前缀 / 显式 namespace / 10 个 `_NAMELESS_KINDS` 白名单之一。
+该限制违反 §3.0.3 双谱系正交 + AGENTS.md "open taxonomy" 承诺；A1 移除。
+详见 commit (`feat(memory): drop _NAMELESS_KINDS, align with §3.0.3 open taxonomy`)
++ `tests/test_namespace_guard_p1_2026_08_08.py` 新增 2 test（any kind pass + kind length limit）。
+
+写入路径 (`memory.remember`) 先 dry-run validate 所有 entities 再
+INSERT chunk（[8/8 P1 fix]），避免 ValidationError 上抛时 chunk 留
+SQLite WAL 变孤儿。
 
 #### 3.0.4 关系语义（正式）
 

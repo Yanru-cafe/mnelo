@@ -135,21 +135,28 @@ class TestRememberRollback:
             )
         assert _count_chunks(mem, source) == 0
 
-    def test_unknown_kind_does_not_create_chunk(self, mem):
-        """未知 kind → ValidationError → chunk 不入库."""
-        source = "test_rollback_unknown_kind"
-        with pytest.raises(ValidationError):
-            mem.remember(
-                content="unknown kind test content",
-                source=source,
-                importance=0.7,
-                entities=[{
-                    "id": "test_rollback_foo",
-                    "kind": "garbage_kind",  # 不在 _NAMELESS_KINDS 也不在 whitelist
-                    "name": "x",
-                }],
-            )
-        assert _count_chunks(mem, source) == 0
+    def test_unknown_kind_now_allowed_open_taxonomy(self, mem):
+        """[A1 2026-08-10] 未知 kind (e.g. 'garbage_kind') 现在通过 (open taxonomy).
+
+        旧版本用 _NAMELESS_KINDS 白名单强制要求 kind ∈ {person, provider,
+        event, task, setup, system, host, position_snapshot, concept,
+        canonical_fact}. A1 修复移除该限制, 跟 DESIGN §3.0.3 双谱系正交
+        一致. 这个 test 之前叫 `test_unknown_kind_does_not_create_chunk`
+        测的是反行为, 现在反向验证.
+        """
+        source = "test_rollback_unknown_kind_a1"
+        cid = mem.remember(
+            content="unknown kind test content (A1 open taxonomy)",
+            source=source,
+            importance=0.7,
+            entities=[{
+                "id": "test_rollback_unknown_kind_a1",
+                "kind": "garbage_kind",  # A1 后任何 kind 都接受
+                "name": "x",
+            }],
+        )
+        assert isinstance(cid, str) and cid.startswith("chunk_")
+        assert _count_chunks(mem, source) == 1
 
     def test_second_bad_entity_does_not_create_chunk(self, mem):
         """多 entity, 第 2 个坏 → chunk 不入库 (不是只回滚第 2 个)."""

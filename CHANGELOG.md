@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.1.1 — 2026-08-10
+
+fix(memory): drop `_NAMELESS_KINDS` from namespace guard, align with §3.0.3 open taxonomy
+
+**Why**: The 8/8 P1 namespace guard (`_enforce_entity_namespace_guard`,
+commit `c8abae2`) added a `_NAMELESS_KINDS` whitelist requiring nameless
+ids (no `:` prefix, no `master_` prefix) to pair with one of {person,
+provider, event, task, setup, system, host, position_snapshot, concept,
+canonical_fact}. This violated DESIGN §3.0.3 (kind × memory_type 双谱系
+正交) and AGENTS.md "open taxonomy — no registration needed" — users
+could not introduce new kinds (e.g. `lesson`, `product`, `recipe`)
+without modifying core code.
+
+**What changes**:
+- `memory._enforce_entity_namespace_guard` no longer checks `kind` against
+  a whitelist. Any `kind` is accepted on any id that passes the namespace
+  blacklist + `_MAX_CONCEPT_NAME_LEN=50` check.
+- Blacklist (`anno:*`, `TOKEN_*`) and concept-name-length limits stay in
+  place — the original 8/8 P1 defense against HonchoImporter residue and
+  sentence-as-name is preserved.
+- `validation.py:147-152` still enforces `kind` ≤ 64 chars + non-empty +
+  safe characters — that L1 layer is unrelated to this change.
+
+**Docs**:
+- `DESIGN.md` §3.0.3.5 (new): formal spec of the namespace guard, its
+  blacklist, and the open-taxonomy rationale.
+- `AGENTS.md` "Adding a new entity kind" + new sub-section "Kind is open,
+  but entity `id` is namespace-gated (8/8 P1)": working guidance for
+  choosing id shapes (`stock:`, `master_`, `anno:` blacklist, anything
+  else with any kind).
+
+**Tests** (`tests/test_namespace_guard_p1_2026_08_08.py`,
+`tests/test_remember_rollback_p1_2026_08_08.py`):
+- `test_nameless_id_with_any_kind_allowed` — replaces the old
+  `test_nameless_id_with_unknown_kind_rejected` (the rejected behavior
+  was the bug).
+- `test_kind_length_limit_enforced` — regression guard that L1 length
+  limit still applies.
+- `test_kind_short_value_allowed_post_a1` — covers the original report
+  path (`kind=lesson` + nameless id).
+- `test_unknown_kind_now_allowed_open_taxonomy` — replaces
+  `test_unknown_kind_does_not_create_chunk` (was asserting the buggy
+  behavior).
+
+End-to-end live check (post-restart mcp_server pid 6757, curl direct):
+5/5 — `kind=lesson` passes; `anno:`, `TOKEN_*`, 65-char kind, 60-char
+concept name all still rejected as expected.
+
 ## v1.1.0 — 2026-08-10
 
 **Multi-Agent 共用版** — v1.0.0 (单机版 Task/Loop subsystem feature-complete) 之后, mnelo 跨过 single-agent → multi-agent 共用边界. 同一 DB 上多 agent 写不撞 (host namespace), 跨网络接入 (Tailscale CGNAT + streamable-http), 远程 client 封装, Linux systemd / Tailscale listen-mode 部署, 验证 / task / client / rate-limit 配置化. PR #6 + #7 跟进 fresh-DB CI stability + drop Python 3.9 (usearch>=2.26 wheels 限制).
