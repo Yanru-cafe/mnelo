@@ -45,6 +45,13 @@ def main() -> int:
             totals["crashed"] += 1
             crashes.append(f"{test_file}: native crash (exit {proc.returncode})")
             continue
+        # [8/10 fix] exit 5 = "no tests collected" — manual e2e scripts (e.g.
+        # test_forget_junk_undo_e2e.py) are run via `python tests/X.py`, not pytest.
+        # Don't treat as failure. (exit 3 = internal error, exit 4 = usage error, exit 1/2 = real fail.)
+        if proc.returncode == 5:
+            totals["skipped"] += 1
+            print(f"[ci_per_file_runner] {test_file}: exit 5 (no tests collected, likely manual e2e script) — skipped")
+            continue
         if proc.returncode:
             failures.append(f"{test_file}: pytest exit {proc.returncode}")
         # pytest summary is intentionally parsed from the child output only when
