@@ -10,7 +10,7 @@
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
 [![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-文档)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-设计原则)
-[![Latest release](https://img.shields.io/github/v/release/chinesewebman/mnelo)](https://github.com/chinesewebman/mnelo/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/cure4u/mnelo)](https://github.com/cure4u/mnelo/releases/latest)
 
 **你的 AI Agent 记忆所栖息的运行时。**
 
@@ -47,7 +47,7 @@
 ## 安装
 
 ```bash
-git clone https://github.com/chinesewebman/mnelo.git
+git clone https://github.com/cure4u/mnelo.git
 cd mnelo
 bash scripts/install.sh        # 一键：venv + pip + init_db + 服务守护
                                # (macOS launchd / Linux systemd) + 鉴权 token

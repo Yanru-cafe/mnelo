@@ -131,7 +131,7 @@ ssh root@your-vps
 # - Expose with TLS: use caddy / nginx + Let's Encrypt (free).
 
 # Install mnelo as usual
-git clone https://github.com/chinesewebman/mnelo.git /opt/mnelo
+git clone https://github.com/cure4u/mnelo.git /opt/mnelo
 cd /opt/mnelo
 bash scripts/install.sh
 # Choose:

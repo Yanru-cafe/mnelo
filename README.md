@@ -12,7 +12,7 @@
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
 [![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-docs)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-design-tenets)
-[![Latest release](https://img.shields.io/github/v/release/chinesewebman/mnelo)](https://github.com/chinesewebman/mnelo/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/cure4u/mnelo)](https://github.com/cure4u/mnelo/releases/latest)
 
 **the runtime your AI agent's memory lives on.**
 
@@ -52,7 +52,7 @@
 ## install
 
 ```bash
-git clone https://github.com/chinesewebman/mnelo.git
+git clone https://github.com/cure4u/mnelo.git
 cd mnelo
 bash scripts/install.sh        # one-shot: venv, pip, init_db, service
                                # daemon (macOS launchd / Linux systemd),
