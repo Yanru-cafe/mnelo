@@ -1,5 +1,59 @@
 # Changelog
 
+## v1.1.0 — 2026-08-10
+
+**Multi-Agent 共用版** — v1.0.0 (单机版 Task/Loop subsystem feature-complete) 之后, mnelo 跨过 single-agent → multi-agent 共用边界. 同一 DB 上多 agent 写不撞 (host namespace), 跨网络接入 (Tailscale CGNAT + streamable-http), 远程 client 封装, Linux systemd / Tailscale listen-mode 部署, 验证 / task / client / rate-limit 配置化. PR #6 + #7 跟进 fresh-DB CI stability + drop Python 3.9 (usearch>=2.26 wheels 限制).
+
+### Highlights
+
+- **Entity host namespace guard** — 多 agent 写同一 DB 用 `host:<agent>` 前缀隔离, 防跨 agent 撞 id. Stock / demo 实体强制走 host namespace.
+- **Tailscale CGNAT hosts accepted by mcp_server** — 跨网络多 agent 接入主路径. install.sh 增 listen-mode (loopback / 裸 IP / 公网三模式选择).
+- **`MneloRemoteClient` wrapper** — Hermes gateway 锁死 `source='hermes-gw'`, 默认 URL 走 Tailscale ts.net 域名.
+- **streamable-http transport (MCP 2025-03-26 spec)** — 取代 SSE 主路径, modern MCP client 兼容.
+- **Linux systemd 支持** — `install.sh` 自动 install, `mnelo` CLI wrapper + classify + L2 hygiene 脚本, `$10/年 VPS` 完整部署 story.
+- **Config 化** — rate-limit / validation / task / client 4 个 section 从硬编码提到 `config.toml`. Multi-agent 可调.
+
+### CI / Stability (PR #6 + #7)
+
+- **fresh-DB per-file CI runner** — usearch native crash 10 test file 归因清晰, 不再淹没真因. `MNELO_TEST_FRESH=1` 跳过 live-only tests (2 tests + 3 TestRecallScoreFieldAlias tests).
+- **manual e2e scripts** (`tests/test_forget_junk_undo_e2e.py`) — pytest exit 5 (no tests collected) 不再误报 fail.
+- **CI matrix** — Python 3.10 / 3.11 / 3.12 (drop 3.9, usearch>=2.26 wheels 限制).
+- **CI 全绿**: Lint ruff + Security bandit + Tests 3.10/3.11/3.12 + CI summary.
+
+### Schema
+
+- `task_states` / `state_transitions` 表 (M1 v0.2 schema bump) — Task/Loop state machine 持久化.
+- `audit_log` (H-1 审计 §3) — L2 autonomous 自主层审计.
+- `host:` namespace validation (memory._enforce_entity_namespace_guard) — multi-agent 写隔离.
+- `schema_version` → 1.1.
+
+### Tools (27 total)
+
+| Group | Tools |
+|---|---|
+| Memory core (19) | remember / recall / relate / update / forget / graph_query / list_entities / |
+|  | entity_resolve / search_relations / stats / get_digest / |
+|  | audit_list / audit_undo / maintenance (run_maintenance) |
+| Task/Loop (8) | task_create / task_transition / task_list / task_replay / |
+|  | loop_create / loop_update / loop_list / loop_tick |
+
+### Migration from v1.0.0
+
+- No data migration required. Existing single-agent v1.0.0 DBs work as-is in v1.1.0.
+- **New writes enforce `host:` namespace prefix** — v1.0.0 entities without prefix (e.g. `stock_001`) will trigger ValidationError on first remember() call in v1.1.0. Run the namespace migration script `scripts/migrate_stock_namespace_2026_08_09.py` to add `host:default` prefix in bulk before the first v1.1.0 remember().
+- `install.sh` now offers `listen mode` for multi-agent — re-run `bash scripts/install.sh` to enable (loopback / 裸 IP / Tailscale CGNAT 三模式).
+- Config additions: see `config.toml.example` for new `[rate_limit]`, `[validation]`, `[task]`, `[client]` sections.
+
+### Breaking changes
+
+- None. v1.1.0 is backwards-compatible with v1.0.0 single-agent deployments.
+
+### Contributors
+
+- chinesewebman (owner) — multi-agent architecture + review + releases
+- Hermes (agent) — CI stability (PR #6 + #7) + CHANGELOG
+- Yanru-cafe (PR #2) — PII audit_log UNIQUE collision + tool count docs consistency
+
 ## v0.5.12.1 — 2026-07-20
 
 fix: test_edge_cases.test_03_mcp_recall_full_path reads content[1] instead of [0]
