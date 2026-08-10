@@ -74,6 +74,65 @@ python3 scripts/health_check.py
 Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 [docs/AGENTS.md](docs/AGENTS.md#one-line-install-prompt)。
 
+## 多 agent 通过 Tailscale 共用
+
+一个 mnelo 实例可以服务**跨多机的多个 AI agent**——你的 MacBook、
+$10/年的 VPS、Raspberry Pi、或者朋友的笔记本，只要在同一个
+Tailscale mesh 里，所有 agent 共享同一个 `memory.db` 且 id 互不撞。
+
+### mnelo 提供什么
+
+- **`host:` namespace 隔离** — 每个 agent 写入自己前缀下（`host:macbook`、
+  `host:vps-agent-1`…），写入永不撞 ID。同一 DB 不同视角，无需全局锁。
+- **Tailscale CGNAT host 白名单** — `mcp_server.py` 接受 Tailscale
+  `100.x.x.x` IP 作为合法 bind target，mesh peer 可以直接连入，不用
+  把服务暴露到公网。
+- **`MneloRemoteClient`** — 客户端封装（`api/mnelo_client.py`），锁定
+  `source='hermes-gw'`，gateway agent 的写入可被标记 + 查询。
+- **`install.sh --listen-mode`** — 安装时三选一：
+  - `loopback`（默认，单机）— `127.0.0.1`，最安全
+  - `tailscale-service` — `127.0.0.1`，Tailscale daemon 转发 Service
+    流量到 loopback（推荐，多数 mesh 配置）
+  - `tailscale-ip` — `0.0.0.0`，接受 mesh peer 直接 IP 连接
+- **Per-agent 配置（`config.toml`）** — `[rate_limit]`、`[validation]`、
+  `[task]`、`[client]` 4 个 section 按部署可调，每台机器策略不同
+  不需要改代码。
+
+### 5 分钟最小部署
+
+**服务端**机器（拥有 `memory.db` 的那台）：
+
+```bash
+# 选 multi-agent listen 模式安装
+bash scripts/install.sh  # 选 "tailscale-service" 或 "tailscale-ip"
+# 暴露你的 Tailscale IP 和端口：
+tailscale ip -4          # → 100.x.x.x
+```
+
+每台**客户端**机器（MacBook、VPS、R Pi…）：
+
+```bash
+pip install -r requirements.txt
+export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"   # 服务端的 Tailscale IP
+export MNELO_AUTH_TOKEN="<服务端安装时给的 token>"
+# 验证连接
+python3 scripts/health_check.py
+```
+
+就这些——不需要防火墙规则、不需要端口转发、不需要公网证书。
+Tailscale mesh 负责传输加密 + ACL；mnelo 负责 auth token + namespace 隔离。
+
+### 参考
+
+- 完整 listen-mode 决策树（什么时候用 `127.0.0.1` vs `0.0.0.0`、
+  Tailscale Service vs 裸 IP、已知防火墙坑、R Pi / VPS 客户端
+  接入）：见
+  [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent-affects-mcp_server---host)
+- 多 agent 远程 client 封装代码：见
+  [`api/mnelo_client.py`](api/mnelo_client.py)
+- 廉价 VPS 部署完整 story + auth token：见
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#vps-deployment-cheap-us-vps--10year-tier)
+
 ## 文档
 
 其余全部内容在 `docs/`：

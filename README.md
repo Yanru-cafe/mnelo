@@ -80,6 +80,69 @@ For non-technical users: hand this single prompt to any AI coding agent
 (Claude Code, Hermes, Cursor, …) and it installs + adopts mnelo in one
 go — see [docs/AGENTS.md](docs/AGENTS.md#one-line-install-prompt).
 
+## multi-agent via Tailscale
+
+A single mnelo instance can serve **multiple AI agents across machines** —
+your MacBook, a $10/year VPS, a Raspberry Pi, or a friend's laptop on the
+same Tailscale mesh — all writing into one shared `memory.db` without id
+collisions.
+
+### What mnelo provides
+
+- **`host:` namespace guard** — every agent writes under its own prefix
+  (`host:macbook`, `host:vps-agent-1`, …) so writes never collide. Same
+  DB, different views, no global locks.
+- **Tailscale CGNAT host whitelist** — `mcp_server.py` accepts Tailscale
+  `100.x.x.x` IPs as legitimate bind targets, so mesh peers can dial in
+  without exposing the service to the public internet.
+- **`MneloRemoteClient`** — a drop-in client wrapper (`api/mnelo_client.py`)
+  that locks `source='hermes-gw'` so the gateway agent's writes are
+  tagged and queryable.
+- **`install.sh --listen-mode`** — three modes at install time:
+  - `loopback` (default, single-machine) — `127.0.0.1`, safest
+  - `tailscale-service` — `127.0.0.1`, Tailscale daemon forwards Service
+    traffic to loopback (recommended for most mesh setups)
+  - `tailscale-ip` — `0.0.0.0`, accept direct mesh-peer IP connections
+- **Per-agent config (`config.toml`)** — `[rate_limit]`, `[validation]`,
+  `[task]`, `[client]` sections are per-deployment tunable, so each
+  machine's policy can differ without code edits.
+
+### Minimal setup (5 minutes)
+
+On the **server** machine (the one that owns `memory.db`):
+
+```bash
+# install with multi-agent listen mode
+bash scripts/install.sh  # choose "tailscale-service" or "tailscale-ip"
+# expose your Tailscale IP and port:
+tailscale ip -4          # → 100.x.x.x
+```
+
+On each **client** machine (MacBook, VPS, R Pi, …):
+
+```bash
+pip install -r requirements.txt
+export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"   # server's Tailscale IP
+export MNELO_AUTH_TOKEN="<token-from-server-install>"
+# verify connection
+python3 scripts/health_check.py
+```
+
+That's it — no firewall rules, no port forwarding, no public certificates.
+Tailscale mesh handles transport encryption and ACLs; mnelo handles auth
+token + namespace isolation.
+
+### Reference
+
+- Full listen-mode decision tree (when to use `127.0.0.1` vs `0.0.0.0`,
+  Tailscale Service vs bare IP, known firewall gotchas, R Pi / VPS
+  client setup): see
+  [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent-affects-mcp_server---host)
+- Multi-agent remote client wrapper code: see
+  [`api/mnelo_client.py`](api/mnelo_client.py)
+- Cheap VPS deployment story + auth token: see
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#vps-deployment-cheap-us-vps--10year-tier)
+
 ## docs
 
 Everything else lives in `docs/`:
