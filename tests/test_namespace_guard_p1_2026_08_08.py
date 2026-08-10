@@ -198,16 +198,58 @@ class TestNamelessKindCheck:
         }
         mem._upsert_entity(ent)
 
-    def test_nameless_id_with_unknown_kind_rejected(self, mem):
-        """无 ':' 的 id + 未知 kind (e.g. 'foo') → 拒."""
+    def test_nameless_id_with_any_kind_allowed(self, mem):
+        """[A1 2026-08-10] 无 namespace + 任意 kind → 通过 (DESIGN §3.0.3 open taxonomy).
+
+        旧版本要求 kind ∈ _NAMELESS_KINDS 白名单. A1 修复移除该限制, 跟
+        DESIGN §3.0.3 双谱系正交 (kind × memory_type) + AGENTS.md "open
+        taxonomy — no registration needed" 一致. 用户可引入新 kind (e.g.
+        `product`, `lesson`, `recipe`) 而不需要先注册.
+        """
+        for kind in ("lesson", "product", "recipe", "weird_kind_xyz"):
+            ent = {
+                "id": f"test_nsguard_open_taxonomy_{kind}",
+                "kind": kind,
+                "name": f"open taxonomy {kind}",
+            }
+            mem._upsert_entity(ent)  # 旧版本会抛 ValidationError, A1 后通过
+
+    def test_kind_length_limit_enforced(self, mem):
+        """[A1 2026-08-10] Kind 词汇表开放, 但仍受 validation.py L1 长度限制.
+
+        validation.py:151-152 强制 `entity.kind` ≤ 64 chars (防整段话当 kind).
+        A1 修复不破坏这个限制 — 移除 _NAMELESS_KINDS 词汇表白名单, 但保留
+        validate_entity_payload 的字符/长度清洗. 这里钉住: 65 chars kind
+        (无 namespace id + 长 kind) 仍抛 ValidationError "entity.kind".
+        """
+        from validation import ValidationError as _VE
+        long_kind = "x" * 65  # 65 chars > 64 limit
         ent = {
-            "id": "test_nsguard_unknown_kind",
-            "kind": "foo",  # 不在 _NAMELESS_KINDS 白名单
-            "name": "bar",
+            "id": "test_nsguard_long_kind_a1",
+            "kind": long_kind,
+            "name": "x",
         }
-        with pytest.raises(ValidationError) as exc_info:
+        with pytest.raises(_VE) as exc_info:
             mem._upsert_entity(ent)
-        assert "non-namespaced" in str(exc_info.value)
+        assert exc_info.value.field == "entity.kind"
+        assert "64 chars" in str(exc_info.value)
+
+    def test_kind_short_value_allowed_post_a1(self, mem):
+        """[A1 2026-08-10] 短自定义 kind (e.g. 8/10 lesson) 通过 validate."""
+        # 主人 8/10 case report: kind="lesson" + id="hermes_update_preflight_20260810"
+        # A1 修复前: 拒 (lesson 不在 _NAMELESS_KINDS). A1 修复后: 通过.
+        ent = {
+            "id": "hermes_update_preflight_20260810",  # 主人 8/10 实际 id
+            "kind": "lesson",  # 主人 8/10 实际 kind
+            "name": "hermes update 外部依赖验证铁律 (v0.20+)",
+        }
+        mem._upsert_entity(ent)
+        row = mem._conn.execute(
+            "SELECT id, kind FROM entities WHERE id = ? AND valid_until IS NULL",
+            ("hermes_update_preflight_20260810",),
+        ).fetchone()
+        assert row is not None
+        assert row[1] == "lesson"
 
     def test_nameless_id_with_concept_short_name_allowed(self, mem):
         """无 namespace + concept + 短 name → 通过 (concept 已在 _NAMELESS_KINDS)."""
