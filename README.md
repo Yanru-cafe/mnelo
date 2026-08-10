@@ -98,11 +98,17 @@ collisions.
 - **`MneloRemoteClient`** — a drop-in client wrapper (`api/mnelo_client.py`)
   that locks `source='hermes-gw'` so the gateway agent's writes are
   tagged and queryable.
-- **`install.sh --listen-mode`** — three modes at install time:
-  - `loopback` (default, single-machine) — `127.0.0.1`, safest
-  - `tailscale-service` — `127.0.0.1`, Tailscale daemon forwards Service
-    traffic to loopback (recommended for most mesh setups)
-  - `tailscale-ip` — `0.0.0.0`, accept direct mesh-peer IP connections
+- **`install.sh --listen-mode`** — two modes at install time (interactive
+  install only; non-interactive defaults to loopback):
+  - `loopback` (default, single-machine) — `--host 127.0.0.1`, safest.
+    Tailscale daemon forwards Service traffic here too if you have a
+    `*.ts.net` Service registered in admin console.
+  - `Tailscale mesh` (multi-agent) — `--host 0.0.0.0`, accept direct
+    mesh-peer IP connections. The host whitelist still rejects LAN /
+    public / non-CGNAT IPs, so this is only as open as your Tailscale
+    ACL policy.
+  - For finer-grained Service-vs-bare-IP routing decisions, see
+    [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent--affects-mcp_server---host).
 - **Per-agent config (`config.toml`)** — `[rate_limit]`, `[validation]`,
   `[task]`, `[client]` sections are per-deployment tunable, so each
   machine's policy can differ without code edits.
@@ -112,25 +118,34 @@ collisions.
 On the **server** machine (the one that owns `memory.db`):
 
 ```bash
-# install with multi-agent listen mode
-bash scripts/install.sh  # choose "tailscale-service" or "tailscale-ip"
-# expose your Tailscale IP and port:
-tailscale ip -4          # → 100.x.x.x
+# 1. install (interactive; answer "2" for Tailscale mesh mode)
+bash scripts/install.sh
+
+# 2. find your Tailscale IP
+tailscale ip -4                  # → 100.x.x.x
+
+# 3. share auth token with client machines (it's at ~/.config/mnelo/auth_token)
+cat ~/.config/mnelo/auth_token
 ```
 
 On each **client** machine (MacBook, VPS, R Pi, …):
 
 ```bash
 pip install -r requirements.txt
-export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"   # server's Tailscale IP
-export MNELO_AUTH_TOKEN="<token-from-server-install>"
-# verify connection
+
+# 4. point at the server (its Tailscale IP)
+export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"
+
+# 5. set the auth token (from step 3)
+export MNELO_AUTH_TOKEN="<paste-from-server-step-3>"
+
+# 6. verify connection (also tailscale ip -4 curl test, see AGENTS §1.5)
 python3 scripts/health_check.py
 ```
 
-That's it — no firewall rules, no port forwarding, no public certificates.
-Tailscale mesh handles transport encryption and ACLs; mnelo handles auth
-token + namespace isolation.
+That's it — no port forwarding, no public certificates. Tailscale mesh
+handles transport encryption and ACLs; mnelo handles auth token +
+namespace isolation.
 
 ### Reference
 
