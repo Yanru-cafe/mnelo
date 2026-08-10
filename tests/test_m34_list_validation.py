@@ -14,7 +14,10 @@ sys.path.insert(0, str(REPO))
 
 import task_states
 import memory
+from datetime import datetime, timedelta
 
+# [8/9 P1 follow-up] hard-coded "2026-08-06T..." 边界 fail.
+NOW_REF = (datetime.now() + timedelta(seconds=1)).isoformat(timespec="milliseconds")
 
 def _setup():
     c = sqlite3.connect(str(memory.DB_PATH))
@@ -28,7 +31,6 @@ def _setup():
 
 
 def _create_active_task(name: str, age_days: int = 10) -> str:
-    from datetime import datetime, timedelta
     c = sqlite3.connect(str(memory.DB_PATH))
     back = (datetime.now() - timedelta(days=age_days)).isoformat(timespec="milliseconds")
     r = task_states.task_create(c, name=name, now=back)
@@ -70,7 +72,7 @@ def test_m34_status_all_includes_resolved():
     tid = _create_active_task("m34-status-all", age_days=10)
     c = sqlite3.connect(str(memory.DB_PATH))
     try:
-        task_states.propose_stale_tasks(c, now="2026-08-06T15:00")
+        task_states.propose_stale_tasks(c, now=NOW_REF)
         # Apply one proposal
         row = c.execute(
             """SELECT id FROM audit_log

@@ -35,10 +35,14 @@ Exit codes:
 
 import argparse
 import json
+import logging
+import sqlite3
 import statistics
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger("mnelo")
 
 # [7/19] Prevent backup files from polluting DB path resolution
 REPO = Path(__file__).resolve().parent.parent
@@ -235,7 +239,7 @@ def seed_chunks(memory, n: int, source_prefix: str) -> float:
             importance=0.3 + (i % 7) * 0.1,
             entities=[
                 {
-                    "id": ticker,
+                    "id": f"host:{ticker}",
                     "kind": "stock",
                     "name": name,
                     "aliases": [name, ticker],
@@ -245,7 +249,7 @@ def seed_chunks(memory, n: int, source_prefix: str) -> float:
             relations=[
                 {
                     "source_id": "benchmark_user",
-                    "target_id": ticker,
+                    "target_id": f"host:{ticker}",
                     "relation": f"_{action}_于",
                     "weight": 0.5 + (i % 5) * 0.1,
                     "properties": {"quantity": qty, "price": price},
@@ -262,12 +266,20 @@ def seed_chunks(memory, n: int, source_prefix: str) -> float:
 
 
 def cleanup_seed(memory, source_prefix: str) -> int:
-    """Delete benchmark seed data. Returns count deleted."""
+    """Delete benchmark seed data. Returns count deleted.
+
+    [8/10 fix] vectors (vec0 虚拟表) 在 sqlite-vec 不可用环境 (CI hostedtoolcache)
+    不存在 — DELETE 抛 OperationalError. try/except 跳过即可, 不影响 cleanup 主体.
+    """
     rows = memory._conn.execute("SELECT rowid FROM chunks WHERE source LIKE ?", (f"{source_prefix}%",)).fetchall()
     if rows:
         rowids = [r["rowid"] for r in rows]
         placeholders = ",".join("?" * len(rowids))
-        memory._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
+        try:
+            memory._conn.execute(f"DELETE FROM vectors WHERE rowid IN ({placeholders})", rowids)
+        except sqlite3.OperationalError as _e:
+            # vec0 虚拟表不存在 (sqlite-vec 不可用) — 跳过, 等 chunks 表删完自然 cascade.
+            logger.debug(f"[8/10 benchmark cleanup] vectors 表缺失 (vec0 不可用), 跳过: {_e}")
     memory._conn.execute("DELETE FROM chunks WHERE source LIKE ?", (f"{source_prefix}%",))
     memory._conn.execute("DELETE FROM entities WHERE id = 'benchmark_user'")
     memory._conn.commit()

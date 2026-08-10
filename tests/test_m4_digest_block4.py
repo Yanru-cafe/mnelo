@@ -8,8 +8,16 @@
   memory.py _build_digest — 走完路径, 校验 block4 出现在 content + line_refs.
 """
 import json
+import os
 import sys
+import tempfile
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# [8/9 P1 follow-up] 强制 m4 用 fresh DB 子目录, 隔离大盒 ~/.hermes/memory 8000+ chunk
+# 残留 (m5_2/m30/m34 跨 test 的 stale 任务). CI env MNELO_MEMORY_DIR 可能跟主人
+# ~/.hermes/memory 不一样但仍有 stale — 始终覆盖, 让 m4 隔离.
+os.environ["MNELO_MEMORY_DIR"] = tempfile.mkdtemp(prefix="m4_test_")
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent

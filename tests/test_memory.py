@@ -56,13 +56,15 @@ class TestMemoryCRUD(unittest.TestCase):
             source="test_crud",
             importance=0.9,
             entities=[
-                {"id": f"{self.test_id_prefix}_sh600089", "kind": "stock", "name": "特变电工-test"},
+                # [8/9 P1 follow-up] 加 host: namespace 防 _enforce_entity_namespace_guard
+                # 拒 non-namespaced id + kind='stock'. kind='person' 仍在 _NAMELESS_KINDS.
+                {"id": f"host:{self.test_id_prefix}_sh600089", "kind": "stock", "name": "特变电工-test"},
                 {"id": f"{self.test_id_prefix}_master", "kind": "person", "name": "主人口中-test"},
             ],
             relations=[
                 {
                     "source_id": f"{self.test_id_prefix}_master",
-                    "target_id": f"{self.test_id_prefix}_sh600089",
+                    "target_id": f"host:{self.test_id_prefix}_sh600089",
                     "relation": "_建仓_于",
                     "weight": 1.0,
                     "properties": {"quantity": 12000, "price": 18.96},
@@ -76,7 +78,7 @@ class TestMemoryCRUD(unittest.TestCase):
         """新建边."""
         rid = self.mem.relate(
             f"{self.test_id_prefix}_master",
-            f"{self.test_id_prefix}_sh600089",
+            f"host:{self.test_id_prefix}_sh600089",
             "_关注",
             weight=0.7,
         )
@@ -126,7 +128,7 @@ class TestMemoryCRUD(unittest.TestCase):
     def test_06_graph_query(self):
         """图遍历."""
         g = self.mem.graph_query(
-            f"{self.test_id_prefix}_sh600089",
+            f"host:{self.test_id_prefix}_sh600089",
             max_hops=2,
         )
         self.assertIn("nodes", g)
@@ -136,9 +138,7 @@ class TestMemoryCRUD(unittest.TestCase):
     def test_07_update(self):
         """update 创建新版本 + 老版本 superseded."""
         # 拿第一个测试 chunk
-        old = self.mem._conn.execute(
-            f"SELECT id FROM chunks WHERE source = 'test_crud' AND valid_until IS NULL ORDER BY rowid LIMIT 1"
-        ).fetchone()
+        old = self.mem._conn.execute(f"SELECT id FROM chunks WHERE source = 'test_crud' AND valid_until IS NULL ORDER BY rowid LIMIT 1").fetchone()
         self.assertIsNotNone(old)
         old_id = old["id"]
 
@@ -148,9 +148,7 @@ class TestMemoryCRUD(unittest.TestCase):
             new_content=f"{old_id} 修正",
         )
         # 老 chunk valid_until 应不为 NULL
-        old_after = self.mem._conn.execute(
-            "SELECT superseded_by, valid_until FROM chunks WHERE id = ?", (old_id,)
-        ).fetchone()
+        old_after = self.mem._conn.execute("SELECT superseded_by, valid_until FROM chunks WHERE id = ?", (old_id,)).fetchone()
         self.assertEqual(old_after["superseded_by"], new_id)
         self.assertIsNotNone(old_after["valid_until"])
         print(f"  ✅ update → old superseded_by={old_id[-12:]}={new_id[-12:]}, valid_until={old_after['valid_until']}")
@@ -192,8 +190,9 @@ class TestMemoryCRUD(unittest.TestCase):
     def tearDownClass(cls):
         # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
         from helpers import cleanup_chunks
+
         with cls.mem._conn:
-            cleanup_chunks(cls.mem, source='test_crud')
+            cleanup_chunks(cls.mem, source="test_crud")
             # entities + relations (按 prefix 清, 不在索引)
             cls.mem._conn.execute("DELETE FROM entities WHERE id LIKE ?", (f"{cls.test_id_prefix}%",))
             cls.mem._conn.execute(
@@ -306,9 +305,7 @@ class TestEntityResolve(unittest.TestCase):
         self.assertTrue(ok)
 
         # a 应被 soft delete
-        a_after = self.mem._conn.execute(
-            "SELECT valid_until, superseded_by FROM entities WHERE id = ?", (a_id,)
-        ).fetchone()
+        a_after = self.mem._conn.execute("SELECT valid_until, superseded_by FROM entities WHERE id = ?", (a_id,)).fetchone()
         self.assertIsNotNone(a_after["valid_until"])
         self.assertEqual(a_after["superseded_by"], b_id)
         print(f"  ✅ merge → a={a_id} superseded by b={b_id}")
@@ -384,7 +381,8 @@ class TestP0BoundsCheck(unittest.TestCase):
         # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
         try:
             from helpers import cleanup_chunks
-            cleanup_chunks(cls.mem, source='test')
+
+            cleanup_chunks(cls.mem, source="test")
             cls.mem._conn.execute("DELETE FROM entities WHERE id LIKE 'test_%' AND source = 'test'")
             cls.mem._conn.execute("DELETE FROM relations WHERE relation = 'clamp_test'")
         finally:
@@ -485,10 +483,12 @@ class TestP0BoundsCheck(unittest.TestCase):
         # 先 query existing id, 用不存在的 id
         ent_id = generate_id("test_ent")
         # 直接调 _upsert_entity, 它会走 INSERT 分支 (id 不存在)
+        # [8/9 P1 follow-up] kind='stock' + non-namespaced id 被 _enforce_entity_namespace_guard
+        # 拒. 改 kind='concept' (在 _NAMELESS_KINDS 白名单).
         self.mem._upsert_entity(
             {
                 "id": ent_id,
-                "kind": "stock",
+                "kind": "concept",
                 "name": "test",
                 "importance": 10.0,  # 应被 clamp 到 1.0
             }
@@ -511,26 +511,38 @@ class TestRecallScoreFieldAlias(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # [8/10 fix] CI fresh env 没起 MCP server, MneloClient() 默认连 127.0.0.1:8086/mcp
+        # 立即 ConnectError. 跟 67ac61d skip pattern 一致 — live-only test 在 fresh CI skip.
+        # MCP server 真实集成测试由独立的 MCP server live test 覆盖 (不是 unit test 范围).
+        import os
+
+        if os.environ.get("MNELO_TEST_FRESH"):
+            import unittest
+
+            # setUpClass 不能直接 skipTest — 用 class-level marker 让 pytest skip 所有 method
+            cls.__unittest_skip__ = True
+            cls.__unittest_skip_why__ = "requires running MCP server (live-only); fresh CI DB has no server"
+            return
         from mnelo_client import MneloClient
+
         cls.client = MneloClient()
 
     def test_recall_exposes_rrf_score_field(self):
         """recall() returns hits where rrf_score is present and > 0."""
-        hits = self.client.recall('mnelo 召回测试', top_k=3)
+        hits = self.client.recall("mnelo 召回测试", top_k=3)
         self.assertIsInstance(hits, list)
         if hits:
             h = hits[0]
-            self.assertIn('rrf_score', h, 'hit dict missing rrf_score field')
-            self.assertGreater(h['rrf_score'], 0, f"rrf_score should be > 0, got {h['rrf_score']}")
+            self.assertIn("rrf_score", h, "hit dict missing rrf_score field")
+            self.assertGreater(h["rrf_score"], 0, f"rrf_score should be > 0, got {h['rrf_score']}")
 
     def test_recall_alias_score_to_rrf_score(self):
         """hit.get('score') must equal hit.get('rrf_score') (back-compat alias)."""
-        hits = self.client.recall('mnelo 召回测试', top_k=3)
+        hits = self.client.recall("mnelo 召回测试", top_k=3)
         if hits:
             for h in hits[:3]:
-                if 'rrf_score' in h:
-                    self.assertEqual(h.get('score'), h['rrf_score'],
-                                     f"score={h.get('score')} != rrf_score={h['rrf_score']}")
+                if "rrf_score" in h:
+                    self.assertEqual(h.get("score"), h["rrf_score"], f"score={h.get('score')} != rrf_score={h['rrf_score']}")
 
     def test_recall_score_in_realistic_range(self):
         """rrf_score is a genuine RRF sum — data-independent invariants.
@@ -547,18 +559,18 @@ class TestRecallScoreFieldAlias(unittest.TestCase):
         match returns single-lane vector neighbors at 1/61..1/70 (rank ≥ 7
         already falls below any fixed floor like 0.015).
         """
-        hits = self.client.recall('翁氏 D∩W 共振', top_k=10)
-        scores = [h['rrf_score'] for h in hits if 'rrf_score' in h]
+        hits = self.client.recall("翁氏 D∩W 共振", top_k=10)
+        scores = [h["rrf_score"] for h in hits if "rrf_score" in h]
         if not scores:
             return
         for s in scores:
-            self.assertGreater(s, 0.0, f'rrf_score must be > 0, got {s}')
-            self.assertLess(s, 1.0, f'rrf_score must be < 1, got {s}')
+            self.assertGreater(s, 0.0, f"rrf_score must be > 0, got {s}")
+            self.assertLess(s, 1.0, f"rrf_score must be < 1, got {s}")
         for a, b in zip(scores, scores[1:]):
-            self.assertGreaterEqual(a, b, 'hits must be sorted descending by rrf_score')
+            self.assertGreaterEqual(a, b, "hits must be sorted descending by rrf_score")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # 自定义测试顺序 + 输出
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()

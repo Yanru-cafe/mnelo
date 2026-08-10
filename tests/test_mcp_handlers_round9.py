@@ -285,8 +285,8 @@ class TestRateLimitBreach:
 
     def test_rate_limit_constants_are_positive(self):
         """Constants should be sane."""
-        assert _mcp_repo._RATE_LIMIT_MAX_REQS > 0
-        assert _mcp_repo._RATE_LIMIT_WINDOW_SEC > 0
+        assert _mcp_repo.config.rate_limit_max_per_window > 0
+        assert _mcp_repo.config.rate_limit_window_sec > 0
 
 
 class TestMCPConstants:

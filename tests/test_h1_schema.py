@@ -9,6 +9,7 @@
 
 跟 test_memory_type.py 风格一致: setUp 触发 _migrate_schema, 源 = "test_h1_schema" 便于清理。
 """
+
 import os
 import re
 import shutil
@@ -61,27 +62,20 @@ class TestH1SchemaAndMigration(unittest.TestCase):
     def test_03_audit_log_table_exists(self):
         """[H-1 §3] audit_log 表 + 字段 + UNIQUE 约束"""
         # 表存在
-        tables = {r[0] for r in self.mem._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
+        tables = {r[0] for r in self.mem._conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         self.assertIn("audit_log", tables)
 
         # 字段全
         cols = {c[1] for c in self.mem._conn.execute("PRAGMA table_info(audit_log)").fetchall()}
-        for required in [
-            "id", "run_id", "pass_name", "action_type", "ref_type", "ref_id",
-            "before_json", "after_json", "confidence", "llm_used", "status",
-            "created_at", "revert_sql"
-        ]:
+        for required in ["id", "run_id", "pass_name", "action_type", "ref_type", "ref_id", "before_json", "after_json", "confidence", "llm_used", "status", "created_at", "revert_sql"]:
             self.assertIn(required, cols, f"audit_log 缺 {required} 列")
 
         # UNIQUE 约束
         indexes = self.mem._conn.execute("PRAGMA index_list(audit_log)").fetchall()
         unique_idx_names = [
-            r[1] for r in indexes
-            if self.mem._conn.execute(
-                f"PRAGMA index_info({r[1]})"
-            ).fetchall()  # 简化: 实际用 sql 查 unique
+            r[1]
+            for r in indexes
+            if self.mem._conn.execute(f"PRAGMA index_info({r[1]})").fetchall()  # 简化: 实际用 sql 查 unique
         ]
         # 用更可靠的方式查 UNIQUE
         unique_check = self.mem._conn.execute("""
@@ -101,9 +95,7 @@ class TestH1SchemaAndMigration(unittest.TestCase):
             "idx_audit_log_ref",
             "idx_audit_log_created",
         ]:
-            row = self.mem._conn.execute(
-                f"SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (idx,)
-            ).fetchone()
+            row = self.mem._conn.execute(f"SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (idx,)).fetchone()
             self.assertIsNotNone(row, f"缺索引 {idx}")
 
     def test_05_partial_index_user_confirmed(self):
@@ -125,38 +117,22 @@ class TestH1SchemaAndMigration(unittest.TestCase):
     def test_07_existing_data_compatible(self):
         """[H-1 §5.1.2] 存量 user_confirmed=0, processed_at=NULL, audit_log=0 行 (state-agnostic)"""
         # [fix] 不假设 4498/4344 (其他 test 可能改了), 验证 *all* rows 满足
-        n_user_confirmed_zero = self.mem._conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE user_confirmed=0"
-        ).fetchone()[0]
-        n_user_confirmed_one = self.mem._conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE user_confirmed=1"
-        ).fetchone()[0]
-        n_user_confirmed_null = self.mem._conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE user_confirmed IS NULL"
-        ).fetchone()[0]
+        n_user_confirmed_zero = self.mem._conn.execute("SELECT COUNT(*) FROM entities WHERE user_confirmed=0").fetchone()[0]
+        n_user_confirmed_one = self.mem._conn.execute("SELECT COUNT(*) FROM entities WHERE user_confirmed=1").fetchone()[0]
+        n_user_confirmed_null = self.mem._conn.execute("SELECT COUNT(*) FROM entities WHERE user_confirmed IS NULL").fetchone()[0]
         n_total_entities = self.mem._conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         # 全部 entities: 0=未确认, 1=确认, NULL=不应该 (NOT NULL DEFAULT 0)
-        self.assertEqual(n_user_confirmed_null, 0,
-            f"user_confirmed 有 NULL 出现 (NOT NULL 约束失败): {n_user_confirmed_null}")
-        self.assertEqual(
-            n_user_confirmed_zero + n_user_confirmed_one, n_total_entities,
-            "user_confirmed 列跟 entities 总数不匹配"
-        )
+        self.assertEqual(n_user_confirmed_null, 0, f"user_confirmed 有 NULL 出现 (NOT NULL 约束失败): {n_user_confirmed_null}")
+        self.assertEqual(n_user_confirmed_zero + n_user_confirmed_one, n_total_entities, "user_confirmed 列跟 entities 总数不匹配")
         # H-1 落地后没任何 user_confirmed=1 实体 (实际 0 个)
         # 实际可能其他 test 设过, 所以不强制 == 0
 
         # processed_at 验证 (同款 state-agnostic)
-        n_processed_chunks_null = self.mem._conn.execute(
-            "SELECT COUNT(*) FROM chunks WHERE processed_at IS NULL"
-        ).fetchone()[0]
+        n_processed_chunks_null = self.mem._conn.execute("SELECT COUNT(*) FROM chunks WHERE processed_at IS NULL").fetchone()[0]
         n_total_chunks = self.mem._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        self.assertEqual(n_processed_chunks_null, n_total_chunks,
-            f"chunks processed_at 不全 NULL: {n_total_chunks - n_processed_chunks_null} 非空")
-        n_processed_entities_null = self.mem._conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE processed_at IS NULL"
-        ).fetchone()[0]
-        self.assertEqual(n_processed_entities_null, n_total_entities,
-            f"entities processed_at 不全 NULL: {n_total_entities - n_processed_entities_null} 非空")
+        self.assertEqual(n_processed_chunks_null, n_total_chunks, f"chunks processed_at 不全 NULL: {n_total_chunks - n_processed_chunks_null} 非空")
+        n_processed_entities_null = self.mem._conn.execute("SELECT COUNT(*) FROM entities WHERE processed_at IS NULL").fetchone()[0]
+        self.assertEqual(n_processed_entities_null, n_total_entities, f"entities processed_at 不全 NULL: {n_total_entities - n_processed_entities_null} 非空")
 
 
 # ============================================================
@@ -172,26 +148,25 @@ class TestAuditLogUniqueConstraints(unittest.TestCase):
         cls.run_id_2 = "test-run-2-uuid"
         cls.pass_name = "test_h1"
         # 清理可能残留
-        cls.mem._conn.execute(
-            "DELETE FROM audit_log WHERE pass_name = ?", (cls.pass_name,)
-        )
+        cls.mem._conn.execute("DELETE FROM audit_log WHERE pass_name = ?", (cls.pass_name,))
         cls.mem._conn.commit()
 
     @classmethod
     def tearDownClass(cls):
-        cls.mem._conn.execute(
-            "DELETE FROM audit_log WHERE pass_name = ?", (cls.pass_name,)
-        )
+        cls.mem._conn.execute("DELETE FROM audit_log WHERE pass_name = ?", (cls.pass_name,))
         cls.mem._conn.commit()
         cls.mem.close()
 
     def _insert(self, run_id, status):
         """辅助: 插一条 audit_log"""
-        self.mem._conn.execute("""
+        self.mem._conn.execute(
+            """
             INSERT INTO audit_log
                 (run_id, pass_name, action_type, ref_type, ref_id, status, created_at)
             VALUES (?, ?, 'test_action', 'chunk', 'h1_test_chunk', ?, ?)
-        """, (run_id, self.pass_name, status, now()))
+        """,
+            (run_id, self.pass_name, status, now()),
+        )
         self.mem._conn.commit()
 
     def test_q3_1_same_run_re_apply_blocked(self):
@@ -214,22 +189,28 @@ class TestAuditLogUniqueConstraints(unittest.TestCase):
         self._insert(self.run_id_2, "reverted")
         # 2) 新 run_id + **不同 ref_id** (ref_id 在 UNIQUE 列表, 区分)
         # 用 ref_id="h1_test_chunk_q32" (跟之前的 h1_test_chunk 不同)
-        self.mem._conn.execute("""
+        self.mem._conn.execute(
+            """
             INSERT INTO audit_log
                 (run_id, pass_name, action_type, ref_type, ref_id, status, created_at)
             VALUES (?, ?, 'test_action', 'chunk', 'h1_test_chunk_q32', 'applied', ?)
-        """, (self.run_id_2, self.pass_name, now()))
+        """,
+            (self.run_id_2, self.pass_name, now()),
+        )
         self.mem._conn.commit()
         # 不抛 = 通过
 
     def test_q3_2b_same_run_diff_ref_allowed(self):
         """[Q3-2 扩展] 同 run_id + 同 status + 不同 ref_id → 成功 (ref_id 也区分)"""
         # run_id_2 (已存在) + applied (已存在) + 新 ref_id
-        self.mem._conn.execute("""
+        self.mem._conn.execute(
+            """
             INSERT INTO audit_log
                 (run_id, pass_name, action_type, ref_type, ref_id, status, created_at)
             VALUES (?, ?, 'test_action', 'chunk', 'h1_test_chunk_q32b', 'applied', ?)
-        """, (self.run_id_2, self.pass_name, now()))
+        """,
+            (self.run_id_2, self.pass_name, now()),
+        )
         self.mem._conn.commit()
         # 不抛 = 通过
 
@@ -256,17 +237,18 @@ class TestAuditLogCreatedAtFormat(unittest.TestCase):
     def test_b1_created_at_uses_t_separator(self):
         """[B-1] audit_log 写入的 created_at 格式 = T 分隔 (跟 memory.now() 一致)"""
         ts_before = now()
-        self.mem._conn.execute("""
+        self.mem._conn.execute(
+            """
             INSERT INTO audit_log
                 (run_id, pass_name, action_type, ref_type, ref_id, status, created_at)
             VALUES (?, 'test_h1_format', 'test', 'chunk', 'h1_fmt', 'proposed', ?)
-        """, ("test-b1-uuid", ts_before))
+        """,
+            ("test-b1-uuid", ts_before),
+        )
         self.mem._conn.commit()
 
         # 读回
-        stored = self.mem._conn.execute(
-            "SELECT created_at FROM audit_log WHERE pass_name = 'test_h1_format'"
-        ).fetchone()[0]
+        stored = self.mem._conn.execute("SELECT created_at FROM audit_log WHERE pass_name = 'test_h1_format'").fetchone()[0]
 
         # 验证 T 分隔 (ISO 8601)
         self.assertIn("T", stored, f"created_at 应含 'T': {stored}")
@@ -289,9 +271,7 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
         schema = {}
         # 1) 关心的 4 表: entities / chunks / relations / audit_log
         for table in ("entities", "chunks", "relations", "audit_log"):
-            if table not in {r[0] for r in con.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()}:
+            if table not in {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}:
                 schema[table] = None
                 continue
             cols = con.execute(f"PRAGMA table_info({table})").fetchall()
@@ -299,14 +279,8 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
                 "cols": [(c[1], c[2], c[3], c[4]) for c in cols],  # name, type, notnull, default
             }
         # 2) H-1 加的 5 索引
-        for idx in [
-            "idx_entities_user_confirmed", "idx_entities_processed_at",
-            "idx_chunks_processed_at", "idx_audit_log_run",
-            "idx_audit_log_pass", "idx_audit_log_ref", "idx_audit_log_created"
-        ]:
-            row = con.execute(
-                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (idx,)
-            ).fetchone()
+        for idx in ["idx_entities_user_confirmed", "idx_entities_processed_at", "idx_chunks_processed_at", "idx_audit_log_run", "idx_audit_log_pass", "idx_audit_log_ref", "idx_audit_log_created"]:
+            row = con.execute("SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (idx,)).fetchone()
             schema[idx] = row[0] if row else None
         con.close()
         return schema
@@ -317,24 +291,57 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
         # [A-1 fix] vec0 虚拟表需要 sqlite_vec 模块 + enable_load_extension
         # [8/5 fix] schema.sql 路径不再硬编码 — 走 repo 相对路径 (本机早期 setup 留陈旧副本)
         from pathlib import Path as _P
+
         repo_root = _P(__file__).resolve().parent.parent
         repo_schema = repo_root / "schema.sql"
         with tempfile.TemporaryDirectory() as tmpdir:
             fresh_db = os.path.join(tmpdir, "fresh.db")
-            shutil.copy(str(repo_schema),
-                        os.path.join(tmpdir, "schema.sql"))
+            shutil.copy(str(repo_schema), os.path.join(tmpdir, "schema.sql"))
 
             import sqlite_vec
+
             con = sqlite3.connect(fresh_db)
             # [init_db.py 模式] 跟 init_db.py 第 51-53 行一致
-            con.enable_load_extension(True)
-            sqlite_vec.load(con)
-            con.enable_load_extension(False)
+            # [8/10 fix] CI sandbox 没有 enable_load_extension (hostedtoolcache Python stripped).
+            # 走 memory._load_vec0_module() 三层 fallback (本地 venv: enable_load_extension; CI: ctypes vec0 dylib).
+            from memory import _load_vec0_module
+
+            _load_vec0_module(con, context="test-init-db-fresh-sim")
             with open(os.path.join(tmpdir, "schema.sql")) as f:
                 sql_script = f.read()
             # 替换占位符 (init_db 跑时会换)
             sql_script = sql_script.replace("{EMBED_DIM}", "512").replace("{EMBED_MODEL}", "BAAI/bge-small-zh-v1.5")
-            con.executescript(sql_script)
+            # [8/10 fix] schema.sql 含 vec0 CREATE VIRTUAL TABLE, CI hostedtoolcache vec0 不可用时
+            # executescript 中断后续 DDL. 跟 memory.py init 一样: 拆 vec0 段单独 exec, 失败 warn 跳过.
+            # 这样 test 模拟 init_db.py fresh install 出来的 schema 跟 _migrate_schema 存量迁移一致.
+            import re as _re_fresh
+
+            _vec0_stmt = _re_fresh.search(
+                r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                sql_script,
+                flags=_re_fresh.IGNORECASE | _re_fresh.DOTALL,
+            )
+            _vec0_sql = _vec0_stmt.group(0) if _vec0_stmt else None
+            _sql_no_vec0 = (
+                _re_fresh.sub(
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                    "",
+                    sql_script,
+                    flags=_re_fresh.IGNORECASE | _re_fresh.DOTALL,
+                )
+                if _vec0_sql
+                else sql_script
+            )
+            con.executescript(_sql_no_vec0)
+            if _vec0_sql:
+                try:
+                    con.executescript(_vec0_sql)
+                except sqlite3.OperationalError as _e_fresh:
+                    # CI hostedtoolcache vec0 不可用 — 跳过, schema 其余部分已建.
+                    if "no such module: vec0" in str(_e_fresh) or "vec0" in str(_e_fresh).lower():
+                        pass
+                    else:
+                        raise
             con.close()
 
             fresh_schema = self._extract_schema(fresh_db)
@@ -342,6 +349,7 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
         # === Phase 2: 存量迁移后 schema (复用 setUpClass 跑过的 _migrate_schema) ===
         # [8/5 fix] DB 路径不再硬编码 — 从 config 解析
         from config import config as _cfg
+
         live_db = str(_cfg.db_path)
         migrated_schema = self._extract_schema(live_db)
 
@@ -353,17 +361,10 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
                 # 列名比对
                 fresh_cols = [c[0] for c in fresh_schema[table]["cols"]]
                 migrated_cols = [c[0] for c in migrated_schema[table]["cols"]]
-                self.assertEqual(
-                    set(fresh_cols), set(migrated_cols),
-                    f"{table} 列名不一致: fresh={fresh_cols} migrated={migrated_cols}"
-                )
+                self.assertEqual(set(fresh_cols), set(migrated_cols), f"{table} 列名不一致: fresh={fresh_cols} migrated={migrated_cols}")
 
         # === Phase 4: 比对 H-1 加的 5 索引 ===
-        for idx in [
-            "idx_entities_user_confirmed", "idx_entities_processed_at",
-            "idx_chunks_processed_at", "idx_audit_log_run",
-            "idx_audit_log_pass", "idx_audit_log_ref", "idx_audit_log_created"
-        ]:
+        for idx in ["idx_entities_user_confirmed", "idx_entities_processed_at", "idx_chunks_processed_at", "idx_audit_log_run", "idx_audit_log_pass", "idx_audit_log_ref", "idx_audit_log_created"]:
             with self.subTest(idx=idx):
                 self.assertIsNotNone(fresh_schema.get(idx), f"fresh 缺 {idx}")
                 self.assertIsNotNone(migrated_schema.get(idx), f"migrated 缺 {idx}")
