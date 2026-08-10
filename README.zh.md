@@ -89,11 +89,16 @@ Tailscale mesh 里，所有 agent 共享同一个 `memory.db` 且 id 互不撞�
   把服务暴露到公网。
 - **`MneloRemoteClient`** — 客户端封装（`api/mnelo_client.py`），锁定
   `source='hermes-gw'`，gateway agent 的写入可被标记 + 查询。
-- **`install.sh --listen-mode`** — 安装时三选一：
-  - `loopback`（默认，单机）— `127.0.0.1`，最安全
-  - `tailscale-service` — `127.0.0.1`，Tailscale daemon 转发 Service
-    流量到 loopback（推荐，多数 mesh 配置）
-  - `tailscale-ip` — `0.0.0.0`，接受 mesh peer 直接 IP 连接
+- **`install.sh --listen-mode`** — 安装时两个模式（仅交互式安装；
+  非交互式默认 loopback）：
+  - `loopback`（默认，单机）— `--host 127.0.0.1`，最安全。如果你在 admin
+    console 注册了 `*.ts.net` Service，Tailscale daemon 也会把 Service
+    流量 forward 到这里。
+  - `Tailscale mesh`（多 agent）— `--host 0.0.0.0`，接受 mesh peer 直接
+    IP 连接。host 白名单仍拒绝 LAN / 公网 / 非 CGNAT IP，所以开放度
+    等同于你的 Tailscale ACL 策略。
+  - 想要 Service vs 裸 IP 路由的精细决策，见
+    [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent-affects-mcp_server---host)。
 - **Per-agent 配置（`config.toml`）** — `[rate_limit]`、`[validation]`、
   `[task]`、`[client]` 4 个 section 按部署可调，每台机器策略不同
   不需要改代码。
@@ -103,24 +108,33 @@ Tailscale mesh 里，所有 agent 共享同一个 `memory.db` 且 id 互不撞�
 **服务端**机器（拥有 `memory.db` 的那台）：
 
 ```bash
-# 选 multi-agent listen 模式安装
-bash scripts/install.sh  # 选 "tailscale-service" 或 "tailscale-ip"
-# 暴露你的 Tailscale IP 和端口：
-tailscale ip -4          # → 100.x.x.x
+# 1. 安装（交互式；Tailscale mesh 模式答 "2"）
+bash scripts/install.sh
+
+# 2. 查你的 Tailscale IP
+tailscale ip -4                  # → 100.x.x.x
+
+# 3. 把 auth token 分享给客户端（在 ~/.config/mnelo/auth_token）
+cat ~/.config/mnelo/auth_token
 ```
 
 每台**客户端**机器（MacBook、VPS、R Pi…）：
 
 ```bash
 pip install -r requirements.txt
-export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"   # 服务端的 Tailscale IP
-export MNELO_AUTH_TOKEN="<服务端安装时给的 token>"
-# 验证连接
+
+# 4. 指向服务端（它的 Tailscale IP）
+export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"
+
+# 5. 设 auth token（从服务端 step 3 复制）
+export MNELO_AUTH_TOKEN="<paste-from-server-step-3>"
+
+# 6. 验证连接（AGENTS §1.5 还有 tailscale ip -4 curl 测试）
 python3 scripts/health_check.py
 ```
 
-就这些——不需要防火墙规则、不需要端口转发、不需要公网证书。
-Tailscale mesh 负责传输加密 + ACL；mnelo 负责 auth token + namespace 隔离。
+就这些——不需要端口转发、不需要公网证书。Tailscale mesh 负责
+传输加密 + ACL；mnelo 负责 auth token + namespace 隔离。
 
 ### 参考
 

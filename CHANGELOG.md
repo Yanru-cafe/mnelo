@@ -20,6 +20,14 @@
 - **CI matrix** — Python 3.10 / 3.11 / 3.12 (drop 3.9, usearch>=2.26 wheels 限制).
 - **CI 全绿**: Lint ruff + Security bandit + Tests 3.10/3.11/3.12 + CI summary.
 
+### Docs
+
+- **README + README.zh.md**: new `## multi-agent via Tailscale` section — what
+  mnelo provides (host: namespace guard, CGNAT whitelist, MneloRemoteClient,
+  per-agent config) + minimal 5-min setup (server `bash scripts/install.sh`,
+  `tailscale ip -4`, share `~/.config/mnelo/auth_token`; client
+  `MNELO_MEMORY_URL` + `MNELO_AUTH_TOKEN` + `health_check.py`).
+
 ### Schema
 
 - `task_states` / `state_transitions` 表 (M1 v0.2 schema bump) — Task/Loop state machine 持久化.
