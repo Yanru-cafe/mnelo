@@ -8,7 +8,7 @@
 | English | [简体中文](README.zh.md) |
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
 [![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-docs)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-design-tenets)
@@ -38,6 +38,16 @@
 - **fits a $10/year US VPS** — vector backends (usearch f16 / zvec
   INT8) keep RAM + disk small enough for KVM1 1 GB / 25 GB SSD; full
   memory system + agent relay in one box
+
+## requirements
+
+- **Python 3.10+** — `usearch>=2.26` (vector search backend) only ships
+  wheels for Python 3.10 and newer. Python 3.9 and earlier are not
+  supported. macOS (arm64/x86_64), Linux, Windows WSL2 all OK.
+- ~200 MB disk for the embedder model cache (`BAAI/bge-small-zh-v1.5`,
+  fetched on first run)
+- Optional: `sqlite-vec` for vec0 fast path — auto-detected at runtime,
+  falls back to `usearch` when unavailable
 
 ## install
 
