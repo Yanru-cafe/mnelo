@@ -9,6 +9,7 @@
   M5.1.5 threshold 过滤 interval_hours
   M5.1.6 digest 输出到 ~/.hermes/cron/output/loop_tick/<date>.json
 """
+
 import json
 import os
 import subprocess
@@ -55,29 +56,55 @@ def _run(args, env_extra=None, timeout=60):
         env.update(env_extra)
     p = subprocess.run(
         [sys.executable, str(_REPO / "scripts/mnelo_loop_tick_cron.py")] + args,
-        capture_output=True, text=True, env=env, timeout=timeout,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
         cwd=str(_REPO),
     )
     return p.stdout, p.stderr, p.returncode
 
 
 def _setup():
-    """Clean fixtures: clear m5 test loops + recent loop_tick_cron audit_log."""
+    """Clean fixtures: clear m5 test loops + recent loop_tick_cron audit_log.
+
+    [8/10 fix] _REPO/memory.db 在 CI 默认未被 Memory() init (CI 用 $RUNNER_TEMP/mnelo-test-db).
+    fixture 直接 sqlite3.connect 时 _REPO/memory.db 是空 DB, DELETE FROM task_states 必然
+    抛 no such table. 先 import memory + Memory(db_path=...) 走一次 init 让 schema 建好.
+    """
     import sqlite3
-    c = sqlite3.connect(str(_REPO / "memory.db"))
+
+    db_path = _REPO / "memory.db"
+    # [8/10 fix] ensure DB schema exists. Memory() auto-loads schema.sql on fresh DB.
+    if not db_path.exists():
+        # [8/10 follow-up] memory.py 的 DB_PATH 是模块级常量, 在 memory.py import 时 (conftest.py
+        # line 51 跑 _load_from_repo('memory')) 就锁死了 env MNELO_MEMORY_DIR 解析.
+        # 后面改 os.environ['MNELO_MEMORY_DIR'] = str(_REPO) 没用 — DB_PATH 已经是 pytest 启动时
+        # 的 CI 默认值 ($RUNNER_TEMP/mnelo-test-db/memory.db). 必须显式传 db_path=...
+        try:
+            from memory import Memory as _Mem
+
+            _m = _Mem(db_path=db_path)  # 关键: 显式 db_path, 不依赖模块级 DB_PATH 默认值
+            _verify = sqlite3.connect(str(db_path))
+            _tables = sorted(r[0] for r in _verify.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
+            _verify.close()
+            print(f"[8/10 fixture-debug] Memory(db_path={db_path}) init OK, tables ({len(_tables)}): {_tables}")
+            _m.close()
+        except Exception as _e:
+            print(f"[8/10 fixture-debug] Memory() init RAISED: {type(_e).__name__}: {_e}")
+            try:
+                _v2 = sqlite3.connect(str(db_path))
+                _t2 = sorted(r[0] for r in _v2.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
+                print(f"[8/10 fixture-debug] partial tables after raise ({len(_t2)}): {_t2}")
+                _v2.close()
+            except Exception as _e2:
+                print(f"[8/10 fixture-debug] post-raise dump failed: {_e2}")
+            raise
+    c = sqlite3.connect(str(db_path))
     c.execute("PRAGMA foreign_keys = OFF")
-    c.execute(
-        "DELETE FROM task_states WHERE task_id LIKE 'loop:m5-%' "
-        "OR task_id LIKE 'loop:20260806-m5-%'"
-    )
-    c.execute(
-        "DELETE FROM entities WHERE id LIKE 'loop:m5-%' "
-        "OR id LIKE 'loop:20260806-m5-%'"
-    )
-    c.execute(
-        "DELETE FROM audit_log WHERE pass_name='loop_tick_cron' "
-        "AND (ref_id LIKE 'loop:m5-%' OR after_json LIKE '%m5-%')"
-    )
+    c.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:m5-%' OR task_id LIKE 'loop:20260806-m5-%'")
+    c.execute("DELETE FROM entities WHERE id LIKE 'loop:m5-%' OR id LIKE 'loop:20260806-m5-%'")
+    c.execute("DELETE FROM audit_log WHERE pass_name='loop_tick_cron' AND (ref_id LIKE 'loop:m5-%' OR after_json LIKE '%m5-%')")
     c.execute("PRAGMA foreign_keys = ON")
     c.commit()
     c.close()
@@ -99,14 +126,16 @@ def _latest_digest_path() -> Path:
 def _create_loop(name: str, enabled: bool = True, interval: int = 24) -> str:
     """建一个 test loop via subprocess."""
     src = _CREATE_LOOP_SRC.format(
-        repo=str(_REPO), name=name, enabled=str(enabled), interval=str(interval),
+        repo=str(_REPO),
+        name=name,
+        enabled=str(enabled),
+        interval=str(interval),
     )
     p = subprocess.run(
         [sys.executable, "-c", src],
-        capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-             "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
-             "MNELO_MEMORY_DIR": str(_REPO)},  # [M22]
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "MNELO_MEMORY_SEARCH_BACKEND": "usearch", "MNELO_MEMORY_DIR": str(_REPO)},  # [M22]
         cwd=str(_REPO),
     )
     assert p.returncode == 0, f"loop_create failed: {p.stderr}"
@@ -125,11 +154,9 @@ def test_m5_1_dry_run_no_audit_log_no_digest():
     assert rc == 0, f"rc={rc}: {err}"
 
     import sqlite3
+
     c = sqlite3.connect(str(_REPO / "memory.db"))
-    n = c.execute(
-        "SELECT COUNT(*) FROM audit_log WHERE pass_name='loop_tick_cron' "
-        "AND ref_id LIKE 'loop:m5-%'"
-    ).fetchone()[0]
+    n = c.execute("SELECT COUNT(*) FROM audit_log WHERE pass_name='loop_tick_cron' AND ref_id LIKE 'loop:m5-%'").fetchone()[0]
     c.close()
     assert n == 0, f"dry-run should not write audit_log, got {n} rows"
 
@@ -144,10 +171,10 @@ def test_m5_1_real_run_writes_audit_log_proposed():
     assert rc == 0, f"rc={rc}: {err}"
 
     import sqlite3
+
     c = sqlite3.connect(str(_REPO / "memory.db"))
     row = c.execute(
-        "SELECT pass_name, action_type, ref_type, ref_id, status, after_json "
-        "FROM audit_log WHERE pass_name='loop_tick_cron' AND ref_id=?",
+        "SELECT pass_name, action_type, ref_type, ref_id, status, after_json FROM audit_log WHERE pass_name='loop_tick_cron' AND ref_id=?",
         (lid,),
     ).fetchone()
     c.close()
@@ -191,8 +218,7 @@ def test_m5_1_lock_prevents_overlap():
 
     out, err, rc = _run(["--threshold", "0"])
     assert rc == 0, f"rc={rc}: {err}"
-    assert "stale lock" in out or "replacing" in out, \
-        f"expected stale lock replacement msg: {out[:300]}"
+    assert "stale lock" in out or "replacing" in out, f"expected stale lock replacement msg: {out[:300]}"
 
 
 def test_m5_1_threshold_filter():
@@ -206,6 +232,7 @@ def test_m5_1_threshold_filter():
     assert rc == 0, f"rc={rc}: {err}"
 
     import sqlite3
+
     c = sqlite3.connect(str(_REPO / "memory.db"))
     short_n = c.execute(
         "SELECT COUNT(*) FROM audit_log WHERE pass_name='loop_tick_cron' AND ref_id=?",
@@ -234,8 +261,7 @@ def test_m5_1_digest_path_well_formed():
     entries = data if isinstance(data, list) else [data]
 
     last = entries[-1]
-    for key in ("ts", "total_loops", "due_count", "due_loops", "not_due_count",
-                "error_count", "error_loops", "dry_run"):
+    for key in ("ts", "total_loops", "due_count", "due_loops", "not_due_count", "error_count", "error_loops", "dry_run"):
         assert key in last, f"missing key {key} in {last.keys()}"
     assert isinstance(last["due_loops"], list)
     assert last["dry_run"] is False
@@ -298,10 +324,9 @@ print('NO_TYPE_ERROR')
     src = src.replace("{repo}", str(_REPO))
     p = subprocess.run(
         [sys.executable, "-c", src],
-        capture_output=True, text=True,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()),
-             "MNELO_MEMORY_SEARCH_BACKEND": "usearch",
-             "MNELO_MEMORY_DIR": str(_REPO)},
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "MNELO_MEMORY_SEARCH_BACKEND": "usearch", "MNELO_MEMORY_DIR": str(_REPO)},
         cwd=str(_REPO),
     )
     assert p.returncode == 0, f"M20 reproduce shell failed: rc={p.returncode} stderr={p.stderr[-300:]}"
@@ -320,14 +345,13 @@ def test_m5_1_naive_now_no_timezone_offset():
     静态源码契约校验 — 跟 RF15 同一模式, 避开 _ilu module instance 麻烦.
     """
     import re
+
     src_path = _REPO / "scripts/mnelo_loop_tick_cron.py"
     text = src_path.read_text()
     # 不应再含 timezone.utc (修订后已删除)
-    assert "datetime.now(timezone.utc)" not in text, \
-        "M20: cron 仍用 timezone.utc (aware), 会触发 naive-aware subtract TypeError"
+    assert "datetime.now(timezone.utc)" not in text, "M20: cron 仍用 timezone.utc (aware), 会触发 naive-aware subtract TypeError"
     # 应含 naive datetime.now()
-    assert "datetime.now().isoformat(timespec=" in text, \
-        "M20: cron 应改用 naive datetime.now()"
+    assert "datetime.now().isoformat(timespec=" in text, "M20: cron 应改用 naive datetime.now()"
 
 
 def test_m5_1_m21_plist_has_memory_dir():
@@ -341,6 +365,7 @@ def test_m5_1_m21_plist_has_memory_dir():
 def test_m5_1_m22_subprocess_env_propagates():
     """[M22 8/6 review-pass fix] _run 子进程 env 传 MNELO_MEMORY_DIR."""
     import re
+
     test_src = (_REPO / "tests/test_m5_1_cron_tick.py").read_text()
     # _run 函数应设 MNELO_MEMORY_DIR=str(_REPO)
     assert "MNELO_MEMORY_DIR" in test_src, "M22: 测试 env 没传 MNELO_MEMORY_DIR"

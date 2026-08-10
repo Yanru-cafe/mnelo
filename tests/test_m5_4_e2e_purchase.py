@@ -18,7 +18,11 @@ import sqlite3
 import sys
 from pathlib import Path
 from datetime import datetime as _dt
-from datetime import timedelta as _tdelta
+from datetime import timedelta as _td
+
+# [8/9 P1 follow-up] hard-coded "2026-08-06T..." 边界 fail (8/9 跑 age=7d < threshold 7d).
+# 改 NOW_REF = now+1s (未来), 跟 _create_*_task(days_ago=10) 配对 → age=10d+1s > threshold 7d.
+NOW_REF = (_dt.now() + _td(seconds=1)).isoformat(timespec="milliseconds")
 
 REPO = Path(__file__).resolve().parent.parent  # [M29 fix] 不再硬编码作者本机路径
 sys.path.insert(0, str(REPO))
@@ -74,7 +78,7 @@ def test_e2e_purchase_consumables_full_cycle():
         loop_result = task_states.loop_create(
             m._conn, name="e2e-consumables",
             trigger="low_stock", interval_hours=24,
-            now="2026-08-06T09:00",
+            now=NOW_REF,
         )
         lid = loop_result["loop_id"]
         m._conn.commit()
@@ -85,7 +89,7 @@ def test_e2e_purchase_consumables_full_cycle():
 
         # Step 3: loop tick → due
         tick = task_states.loop_tick(
-            m._conn, loop_id=lid, now="2026-08-06T10:00",
+            m._conn, loop_id=lid, now=NOW_REF,
         )
         assert tick["verdict"] == "due", f"first tick should be due, got {tick}"
 
@@ -93,7 +97,7 @@ def test_e2e_purchase_consumables_full_cycle():
         task_result = task_states.task_create(
             m._conn, name="e2e-restock-1", loop_id=lid,
             evidence_chunk_id=chunk_low_stock,
-            now="2026-08-06T10:01",
+            now=NOW_REF,
         )
         tid = task_result["task_id"]
         m._conn.commit()
@@ -105,7 +109,7 @@ def test_e2e_purchase_consumables_full_cycle():
             m._conn, task_id=tid, to_state="in_progress",
             reason="已下单 order #12345",
             evidence_chunk_id=chunk_order,
-            now="2026-08-06T10:05",
+            now=NOW_REF,
         )
         assert trans1["to_state"] == "in_progress"
         m._conn.commit()
@@ -116,7 +120,7 @@ def test_e2e_purchase_consumables_full_cycle():
             m._conn, task_id=tid, to_state="waiting",
             reason="等发货 SF#67890",
             evidence_chunk_id=chunk_logistics,
-            now="2026-08-06T11:00",
+            now=NOW_REF,
         )
         assert trans2["to_state"] == "waiting"
         m._conn.commit()
@@ -127,14 +131,14 @@ def test_e2e_purchase_consumables_full_cycle():
             m._conn, task_id=tid, to_state="done",
             reason="已收货 验收通过",
             evidence_chunk_id=chunk_received,
-            now="2026-08-06T15:00",
+            now=NOW_REF,
         )
         assert trans3["to_state"] == "done"
         m._conn.commit()
 
         # Step 8: list_active_tasks_and_loops → 该 task 已 done, 不在 active
         listing = task_states.list_active_tasks_and_loops(
-            m._conn, now="2026-08-06T15:01",
+            m._conn, now=NOW_REF,
         )
         active_ids = {t["task_id"] for t in listing["active_tasks"]}
         assert tid not in active_ids, f"done task 不应在 active, got {active_ids}"
@@ -142,11 +146,14 @@ def test_e2e_purchase_consumables_full_cycle():
         # Step 9: replay task → 完整生命周期 4 行状态窗 (open / in_progress / waiting / done)
         # 用直接 SQL: list_tasks 在 asof 下虽然过滤宽松, 但仍有逻辑边界. 直接查
         # task_states 表按 valid_from 排序, 拿到完整生命周期更稳.
+        # [8/9 P1 follow-up] task_states.transition (task_states.py:272 RF17) 把 valid_from
+        # 推进 1ms 防 0-长窗. NOW_REF 同值 4 transition → 状态窗 valid_from 递增
+        # NOW_REF, NOW_REF+1ms, NOW_REF+2ms, NOW_REF+3ms. NOW_REF + 5s buffer 抓到所有.
         rows = m._conn.execute(
             """SELECT state FROM task_states
                WHERE task_id=? AND valid_from <= ?
                ORDER BY valid_from ASC""",
-            (tid, "2026-08-06T15:00"),
+            (tid, (_dt.fromisoformat(NOW_REF) + _td(seconds=5)).isoformat(timespec="milliseconds")),
         ).fetchall()
         states_seen = [r[0] for r in rows]
         # 期望状态序列 (replay 返回的窗口按时间顺序):
@@ -171,11 +178,11 @@ def test_e2e_d11_forget_task_after_done():
     m = memory.Memory()
     try:
         # 建 + done task
-        r = task_states.task_create(m._conn, name="e2e-d11-restock", now="2026-08-06T09:00")
+        r = task_states.task_create(m._conn, name="e2e-d11-restock", now=NOW_REF)
         tid = r["task_id"]
         task_states.transition(
             m._conn, task_id=tid, to_state="done",
-            reason="manual_done", now="2026-08-06T10:00",
+            reason="manual_done", now=NOW_REF,
         )
         m._conn.commit()
 
@@ -212,13 +219,13 @@ def test_e2e_proposal_then_apply_resolves():
     m = memory.Memory()
     try:
         # 建 open task (8 天前) — 应被 propose
-        back = (_dt.now() - _tdelta(days=8)).isoformat(timespec="milliseconds")
+        back = (_dt.now() - _td(days=8)).isoformat(timespec="milliseconds")
         r = task_states.task_create(m._conn, name="e2e-stale", now=back)
         tid = r["task_id"]
         m._conn.commit()
 
         # propose
-        scan = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        scan = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         proposed_ids = [p["task_id"] for p in scan["proposals"]]
         assert tid in proposed_ids
 

@@ -315,9 +315,9 @@ class TestRateLimitExceptionCleared:
 
     def test_rate_limit_response_structure(self, mem, clean_prefix):
         """Rate limit JSON has error + tool + type fields."""
-        original_max = _mcp_repo._RATE_LIMIT_MAX_REQS
+        original_max = _mcp_repo.config.rate_limit_max_per_window
         tool_name = f'_rate_struct_{clean_prefix}'
-        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), _mcp_repo._RATE_LIMIT_MAX_REQS + 1]
+        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), _mcp_repo.config.rate_limit_max_per_window + 1]
         try:
             result = _mcp_repo._call_tool(tool_name, {})
             data = json.loads(result)
@@ -326,4 +326,4 @@ class TestRateLimitExceptionCleared:
             assert 'error' in data
         finally:
             _mcp_repo._RATE_BUCKETS.pop(tool_name, None)
-            _mcp_repo._RATE_LIMIT_MAX_REQS = original_max
+            _mcp_repo.config.rate_limit_max_per_window = original_max

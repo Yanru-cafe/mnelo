@@ -113,12 +113,13 @@ def _print_vector_state(m: Memory, label: str) -> None:
         "WHERE (source = 'example_04:versioned' OR source LIKE 'update:example_04_update%') "
         "  AND valid_until IS NULL"
     ).fetchone()[0]
-    # Vectors: join on rowid with chunks (since vec0 is keyed on chunks.rowid)
-    vectors_for_my_chunks = m._conn.execute(
-        "SELECT count(*) FROM vectors v "
-        "JOIN chunks c ON c.rowid = v.rowid "
-        "WHERE c.source = 'example_04:versioned' OR c.source LIKE 'update:example_04_update%'"
-    ).fetchone()[0]
+    # [8/9 P1 follow-up] 8/5 起 vectors 走 usearch index (memory.py:1646-1651), sqlite_vec
+    # vec0 表恒 0. 直接用 m._index.size() 拿 usearch 向量数.
+    try:
+        vectors_for_my_chunks = m._index.size()
+    except AttributeError:
+        # pre-8/5 数据库可能没 _index 字段
+        vectors_for_my_chunks = 0
     drift = vectors_for_my_chunks - active_chunks
     print(f"  chunks (total/active): {chunks}/{active_chunks}")
     print(f"  vectors matching:      {vectors_for_my_chunks}")

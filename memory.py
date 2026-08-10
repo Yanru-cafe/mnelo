@@ -271,6 +271,73 @@ def _enforce_entity_namespace_guard(ent: Dict) -> None:
         )
 
 
+def _load_vec0_module(conn: sqlite3.Connection, context: str = "init") -> None:
+    """[8/10 refactor] 在任意 sqlite3.Connection 上加载 sqlite-vec vec0 扩展.
+
+    init 阶段和 recall 阶段并发 conn 都走这个 helper. 三层 fallback:
+      1) conn.enable_load_extension(True) + sqlite_vec.load(conn) — 本地 venv Python 默认路径.
+      2) ctypes 加载 vec0.{dylib,so,dll} 调 sqlite3_vec_init + sqlite3_auto_extension —
+         CI hostedtoolcache macOS arm64 sandbox (enable_load_extension 被 strip).
+      3) 都不行则 warn 跳过 — vector 走 usearch 后端 (search_index.py).
+
+    Args:
+        conn: 目标 SQLite 连接 (init 阶段是 self._conn; recall 阶段是 4 个并发 worker conn).
+        context: 调用上下文 ("init" / "recall-worker"), 仅用于日志.
+    """
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return
+    except AttributeError:
+        # CI / restricted Python: enable_load_extension 被 strip. 走 ctypes fallback:
+        # 1) ctypes 加载 vec0.{so,dylib,dll}, 拿到 sqlite3_vec_init entry.
+        # 2) 调 vec0 的 init 函数直接对当前 conn 注入, 不依赖 auto_extension.
+        pass
+
+    # --- ctypes fallback ---
+    import ctypes as _ct
+    import platform as _platform
+
+    _pkg_dir = os.path.dirname(sqlite_vec.__file__)
+    if _platform.system() == "Darwin":
+        _lib_name = "vec0.dylib"
+    elif _platform.system() == "Windows":
+        _lib_name = "vec0.dll"
+    else:
+        _lib_name = "vec0.so"
+    _lib_path = os.path.join(_pkg_dir, _lib_name)
+    _vec = _ct.CDLL(_lib_path)
+    # sqlite3_vec_init 签名: int sqlite3_vec_init(sqlite3*, char**, const sqlite3_api_routines*)
+    _init_fn = _vec.sqlite3_vec_init
+    _init_fn.restype = _ct.c_int
+    _init_fn.argtypes = [
+        _ct.c_void_p,  # sqlite3*
+        _ct.POINTER(_ct.c_char_p),  # char** errmsg
+        _ct.c_void_p,  # const sqlite3_api_routines*
+    ]
+    # 拿 conn 的底层 sqlite3* handle (Py sqlite3 暴露 via _db_handle / _Connection__db_handle).
+    # 找不到时直接 pass (后续 conn 走 auto_extension 即可).
+    try:
+        _db_handle = getattr(conn, "_db_handle", None)
+        if _db_handle is None:
+            _db_handle = getattr(conn, "_Connection__db_handle", None)
+        if _db_handle is not None:
+            _err = _ct.c_char_p()
+            _rc = _init_fn(_db_handle(), _ct.byref(_err), None)
+            if _rc != 0:
+                raise RuntimeError(f"vec0 init failed rc={_rc}: {_err.value}")
+        # 顺手注册 auto-extension 让未来 conn 自动 init (init 阶段一次性即可).
+        if context == "init":
+            _libsqlite3 = _ct.CDLL("sqlite3.dll" if _platform.system() == "Windows" else ("libsqlite3.dylib" if _platform.system() == "Darwin" else "libsqlite3.so.0"))
+            _libsqlite3.sqlite3_auto_extension.argtypes = [_ct.c_void_p]
+            _libsqlite3.sqlite3_auto_extension(_init_fn)
+    except (OSError, AttributeError) as _e:
+        # 极受限 Python: 找不到 libsqlite3, 或 _db_handle 私有属性已变.
+        # 跳过 vec0 — 用 usearch index 做向量搜索 (8/5 已走这条路).
+        logger.warning(f"[8/10] sqlite-vec auto-ext 不可用 ({context}, {type(_e).__name__}: {_e}); vector 走 usearch (search_index.py)")
+
+
 class Memory:
     """核心 CRUD 接口."""
 
@@ -300,34 +367,11 @@ class Memory:
         # cache_size 单位是 page (default 4 KB); -64000 = -64*1024 KB
         self._conn.execute("PRAGMA cache_size = -64000")
         self._conn.execute("PRAGMA foreign_keys = ON")
-        # [8/9 P1 follow-up] enable_load_extension 在某些 Python build 里被禁用
-        # (CI hostedtoolcache macOS arm64 sandbox; 7/19 实测 fail AttributeError).
-        # sqlite_vec 提供 SQLite extension 二进制 vec0.dylib/.so, 直接 ctypes 加载
-        # 后用 conn.load_extension() 注入即可 — 不依赖 enable_load_extension.
-        # 本地 venv Python (3.11.15 + sqlite 3.53) 走原路径; CI hostedtoolcache
-        # Python 走 ctypes fallback 路径. 不改应用行为, 修应用代码兼容更多 Python build.
-        try:
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
-        except AttributeError:
-            # CI / restricted Python: enable_load_extension 被 strip. 用 ctypes 直接 load.
-            import ctypes as _ct
-            import platform as _platform
-
-            _pkg_dir = os.path.dirname(sqlite_vec.__file__)
-            if _platform.system() == "Darwin":
-                _lib_name = "vec0.dylib"
-            elif _platform.system() == "Windows":
-                _lib_name = "vec0.dll"
-            else:
-                _lib_name = "vec0.so"
-            _lib_path = os.path.join(_pkg_dir, _lib_name)
-            _ct.CDLL(_lib_path)
-            # 现在 enable_load_extension 在 ctypes-loaded lib 后可能能用 (sqlite-vec 注册了它)
-            self._conn.enable_load_extension(True)
-            sqlite_vec.load(self._conn)
-            self._conn.enable_load_extension(False)
+        # [8/10 refactor] init 阶段 + recall 阶段并发 conn 都走 _load_vec0_module().
+        # 本地 venv Python (3.11.15 + sqlite 3.53) 走原 enable_load_extension 路径;
+        # CI hostedtoolcache Python 走 ctypes fallback 路径 (vec0 dylib + sqlite3_vec_init).
+        # 不改应用行为, 修应用代码兼容更多 Python build.
+        _load_vec0_module(self._conn, context="init")
         self._conn.row_factory = sqlite3.Row
 
         # [P2-1 优化] warm-up Embedder 避免首次 recall 1s 冷启动
@@ -357,7 +401,42 @@ class Memory:
                 _sql = _schema_path.read_text(encoding="utf-8")
                 _sql = _sql.replace("{EMBED_DIM}", str(_cfg.embedder_dim))
                 _sql = _sql.replace("{EMBED_MODEL}", _cfg.embedder_model)
-                self._conn.executescript(_sql)
+                # [8/10 fix] vec0 CREATE VIRTUAL TABLE 单独 exec, 失败 (CI hostedtoolcache
+                # 没 sqlite-vec wheel / module 不可用) 不阻塞核心表 (meta/chunks/...).
+                # 走 usearch backend 时 vec0 表本来就没用, 这段失败应该 warn 而不是 fail.
+                # schema.sql:85 的 vec0 段直接从 SQL 切掉, 避免 executescript 中断后续 DDL.
+                import re as _re
+
+                _vec0_stmt = _re.search(
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                    _sql,
+                    flags=_re.IGNORECASE | _re.DOTALL,
+                )
+                _vec0_sql = _vec0_stmt.group(0) if _vec0_stmt else None
+                _sql_no_vec0 = (
+                    _re.sub(
+                        r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                        "",
+                        _sql,
+                        flags=_re.IGNORECASE | _re.DOTALL,
+                    )
+                    if _vec0_sql
+                    else _sql
+                )
+                # 先 exec 其他 DDL (entities/chunks/relations/meta/recall_log/...
+                # task_states/state_transitions + 索引), vec0 单独 exec.
+                try:
+                    self._conn.executescript(_sql_no_vec0)
+                except Exception:
+                    raise
+                if _vec0_sql:
+                    try:
+                        self._conn.executescript(_vec0_sql)
+                    except sqlite3.OperationalError as _e:
+                        if "no such module: vec0" in str(_e) or "vec0" in str(_e).lower():
+                            logger.warning(f"[8/10] sqlite-vec 不可用 ({type(_e).__name__}: {_e}); 跳过 vec0 虚拟表创建, vector 走 usearch (search_index.py)")
+                        else:
+                            raise
         self._migrate_schema()
 
         # [zvec 集成] SearchIndex 适配器 (DESIGN §3.6) — 默认 sqlite_vec,
@@ -932,9 +1011,9 @@ class Memory:
                 c.execute("PRAGMA busy_timeout = 30000")
                 # [7/18 patch G] 每个 worker conn 也设 64 MB cache
                 c.execute("PRAGMA cache_size = -64000")
-                c.enable_load_extension(True)
-                sqlite_vec.load(c)
-                c.enable_load_extension(False)
+                # [8/10 fix] 每个 worker conn 走 _load_vec0_module(), CI 上 enable_load_extension
+                # 被 strip 时自动 fallback 到 ctypes (init 阶段已注册 auto-extension, 通常走它).
+                _load_vec0_module(c, context="recall-worker")
                 c.row_factory = sqlite3.Row
 
             # [7/19 v0.5.3] Per-lane timing for metrics (vector first, parallel meta/entity/graph)
@@ -2823,7 +2902,7 @@ class Memory:
                 # 6-char hash suffix (16M 空间足够) — 防 slug collision
                 import hashlib as _hl_slug
 
-                _hash_suffix = _hl_slug.md5(chunk_id.encode()).hexdigest()[:6]
+                _hash_suffix = _hl_slug.md5(chunk_id.encode(), usedforsecurity=False).hexdigest()[:6]
                 entity_id = f"canonical:{slug}_{_hash_suffix}"
 
             # 3. upsert canonical_fact entity (重要性沿用 chunk)
@@ -2844,7 +2923,11 @@ class Memory:
             # [Part 2 review LOW fix] 防 silent drop: hash collision 时改用 max+1, 且事后 verify INSERT 生效
             import hashlib as _hl
 
-            rel_id_hash = int.from_bytes(_hl.md5(f"{chunk_id}|{entity_id}".encode()).digest()[:4], "big", signed=False)
+            rel_id_hash = int.from_bytes(
+                _hl.md5(f"{chunk_id}|{entity_id}".encode(), usedforsecurity=False).digest()[:4],
+                "big",
+                signed=False,
+            )
             max_row = self._conn.execute("SELECT COALESCE(MAX(id), 0) FROM relations").fetchone()
             base_id = rel_id_hash % (2**31) or (max_row[0] + 1)
             # 试探 INSERT; 如因 id collision 失败, 退到 MAX+1
@@ -3349,8 +3432,11 @@ if __name__ == "__main__":
         # with real data in LIVE DB. The 'main_block_demo_<ts>:' suffix
         # ensures each run starts fresh.
         ts = int(time.time())
-        demo_stock = f"main_block_demo_stock_{ts}"
-        demo_person = f"main_block_demo_person_{ts}"
+        # [8/9 P1 follow-up] demo_stock 用 host: namespace 防 validation reject.
+        # 旧 non-namespaced id + kind='stock' 触发 ValidationError (require namespace
+        # 或 kind IN whitelist). 改 host: namespace — 8/9 决定 host prefix 表外部 data.
+        demo_stock = f"host:stock_demo_{ts}"
+        demo_person = f"host:person_demo_{ts}"
         demo_source = f"main_block_demo_{ts}"
 
         # 1. remember

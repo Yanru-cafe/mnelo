@@ -652,7 +652,10 @@ class UsearchIndex(SearchIndex):
         import hashlib
 
         ids = self._active_chunks()
-        return hashlib.md5(("|".join(ids) + f"|{len(ids)}").encode("utf-8")).hexdigest()
+        return hashlib.md5(
+            ("|".join(ids) + f"|{len(ids)}").encode("utf-8"),
+            usedforsecurity=False,
+        ).hexdigest()
 
     def _read_sidecar(self) -> Optional[str]:
         try:

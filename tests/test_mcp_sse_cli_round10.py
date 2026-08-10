@@ -61,11 +61,14 @@ class TestCallToolRateLimitError:
 
     def test_rate_limit_returns_error_json(self, mem, clean_prefix):
         """Force rate limit breach → JSON error response."""
-        # Manually populate bucket to trigger limit
-        original_max = _mcp_repo._RATE_LIMIT_MAX_REQS
-        # Set bucket to [now, MAX+1] so next call definitely exceeds
+        # [8/9 P1 follow-up] mcp_server.py:562 现读 config.rate_limit_max_per_window,
+        # _RATE_LIMIT_MAX_REQS attr 已删. 直接 mock config.rate_limit_max_per_window = 1
+        # 让 bucket[1]=2 > max 触发 ValidationError.
+        original_max = _mcp_repo.config.rate_limit_max_per_window
+        _mcp_repo.config.rate_limit_max_per_window = 1
+        # Set bucket to [now, 2] so next call definitely exceeds
         tool_name = f'_rate_limit_test_{clean_prefix}'
-        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), _mcp_repo._RATE_LIMIT_MAX_REQS + 1]
+        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), 2]
         try:
             result = _mcp_repo._call_tool(tool_name, {})
             data = json.loads(result)
@@ -73,13 +76,14 @@ class TestCallToolRateLimitError:
             assert 'rate_limit' in data or 'rate limit' in str(data).lower()
         finally:
             _mcp_repo._RATE_BUCKETS.pop(tool_name, None)
-            _mcp_repo._RATE_LIMIT_MAX_REQS = original_max
+            _mcp_repo.config.rate_limit_max_per_window = original_max
 
     def test_rate_limit_error_includes_tool_name(self, mem, clean_prefix):
         """Error JSON includes tool name for debugging."""
-        original_max = _mcp_repo._RATE_LIMIT_MAX_REQS
+        original_max = _mcp_repo.config.rate_limit_max_per_window
+        _mcp_repo.config.rate_limit_max_per_window = 1
         tool_name = f'_rate_tool_test_{clean_prefix}'
-        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), _mcp_repo._RATE_LIMIT_MAX_REQS + 1]
+        _mcp_repo._RATE_BUCKETS[tool_name] = [time.time(), 2]
         try:
             result = _mcp_repo._call_tool(tool_name, {})
             data = json.loads(result)
@@ -87,7 +91,7 @@ class TestCallToolRateLimitError:
                 assert data['tool'] == tool_name
         finally:
             _mcp_repo._RATE_BUCKETS.pop(tool_name, None)
-            _mcp_repo._RATE_LIMIT_MAX_REQS = original_max
+            _mcp_repo.config.rate_limit_max_per_window = original_max
 
 
 class TestRunSSEConfigFallback:
@@ -129,9 +133,17 @@ class TestValidateLoopbackHost:
         _mcp_repo._validate_loopback_host('127.0.0.42')  # No raise
 
     def test_0_0_0_0_rejected(self):
-        """0.0.0.0 is NOT loopback → reject."""
-        with pytest.raises(ValueError, match='loopback'):
-            _mcp_repo._validate_loopback_host('0.0.0.0')
+        """0.0.0.0 is NOT loopback → [8/9 B6] 走 WARN path 不 raise.
+
+        主人 8/9 review 拍板: 0.0.0.0 走任意 bind 路径, 用 ipfilter_cidrs 限来源 IP.
+        _validate_loopback_host 仍接受 0.0.0.0 / ::, 但 print 风险提醒. test 改测:
+        (1) 不 raise; (2) public IP (1.2.3.4) 仍 reject.
+        """
+        # 0.0.0.0 走 WARN 路径, 不 raise
+        _mcp_repo._validate_loopback_host('0.0.0.0')  # No raise
+        # public IP 仍 reject
+        with pytest.raises(ValueError, match='not allowed'):
+            _mcp_repo._validate_loopback_host('1.2.3.4')
 
     def test_lan_ip_rejected(self):
         """LAN IP rejected."""
@@ -154,14 +166,16 @@ class TestCheckPortAvailable:
 
     def test_occupied_port_returns_false(self):
         """Port already bound → False."""
-        # Bind a port first
+        # [8/9 P1 follow-up] mcp_server._check_port_available (mcp_server.py:1171) 自己
+        # 也设 SO_REUSEADDR=1 — test 之前也设, 两边都 reuse 让 _check_port_available
+        # 仍 bind 成功 (True) → assert False fail. 修: test bind 不用 SO_REUSEADDR,
+        # 模拟真实竞争场景, _check_port_available 必返回 False.
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # 不设 SO_REUSEADDR — 模拟 mnelo 启动时的真实 bind 失败
         sock.bind(('127.0.0.1', 0))  # Random free port
         port = sock.getsockname()[1]
         try:
-            # Without SO_REUSEADDR trickery, this should be detected as in-use
             result = _mcp_repo._check_port_available('127.0.0.1', port)
             assert result is False
         finally:

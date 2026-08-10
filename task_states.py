@@ -103,7 +103,7 @@ def _slugify(name: str) -> str:
     if ascii_slug and any(c.isalpha() for c in ascii_slug):
         return ascii_slug
     # 2. 含中文 / 全非 ASCII → hash
-    return hashlib.md5(name.encode("utf-8")).hexdigest()[:8]
+    return hashlib.md5(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]
 
 
 def transition(
