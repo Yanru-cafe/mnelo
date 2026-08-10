@@ -311,7 +311,37 @@ class TestInitDBMigrationConsistency(unittest.TestCase):
                 sql_script = f.read()
             # 替换占位符 (init_db 跑时会换)
             sql_script = sql_script.replace("{EMBED_DIM}", "512").replace("{EMBED_MODEL}", "BAAI/bge-small-zh-v1.5")
-            con.executescript(sql_script)
+            # [8/10 fix] schema.sql 含 vec0 CREATE VIRTUAL TABLE, CI hostedtoolcache vec0 不可用时
+            # executescript 中断后续 DDL. 跟 memory.py init 一样: 拆 vec0 段单独 exec, 失败 warn 跳过.
+            # 这样 test 模拟 init_db.py fresh install 出来的 schema 跟 _migrate_schema 存量迁移一致.
+            import re as _re_fresh
+
+            _vec0_stmt = _re_fresh.search(
+                r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                sql_script,
+                flags=_re_fresh.IGNORECASE | _re_fresh.DOTALL,
+            )
+            _vec0_sql = _vec0_stmt.group(0) if _vec0_stmt else None
+            _sql_no_vec0 = (
+                _re_fresh.sub(
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+vectors\s+USING\s+vec0\([^;]*\);",
+                    "",
+                    sql_script,
+                    flags=_re_fresh.IGNORECASE | _re_fresh.DOTALL,
+                )
+                if _vec0_sql
+                else sql_script
+            )
+            con.executescript(_sql_no_vec0)
+            if _vec0_sql:
+                try:
+                    con.executescript(_vec0_sql)
+                except sqlite3.OperationalError as _e_fresh:
+                    # CI hostedtoolcache vec0 不可用 — 跳过, schema 其余部分已建.
+                    if "no such module: vec0" in str(_e_fresh) or "vec0" in str(_e_fresh).lower():
+                        pass
+                    else:
+                        raise
             con.close()
 
             fresh_schema = self._extract_schema(fresh_db)

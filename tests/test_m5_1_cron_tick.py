@@ -77,27 +77,21 @@ def _setup():
     db_path = _REPO / "memory.db"
     # [8/10 fix] ensure DB schema exists. Memory() auto-loads schema.sql on fresh DB.
     if not db_path.exists():
-        # [8/10 fix] 在 _REPO/memory.db 上 init schema — 走 Memory() 默认 auto-load path.
-        # 设 MNELO_MEMORY_DIR=str(_REPO) 让 config.resolve_db_path() 解析到这个 DB, 然后 Memory() 创建 + init.
-        import os as _os
-
-        _saved = _os.environ.get("MNELO_MEMORY_DIR")
-        _os.environ["MNELO_MEMORY_DIR"] = str(_REPO)
-        # [8/10 follow-up] wrap Memory() init in try/except so _migrate_schema 任何 silent raise
-        # (e.g. M1 段 FK 不存在 raise) 都能被 surface 而不是被 finally 吞掉. 加 debug log 列出实际表.
+        # [8/10 follow-up] memory.py 的 DB_PATH 是模块级常量, 在 memory.py import 时 (conftest.py
+        # line 51 跑 _load_from_repo('memory')) 就锁死了 env MNELO_MEMORY_DIR 解析.
+        # 后面改 os.environ['MNELO_MEMORY_DIR'] = str(_REPO) 没用 — DB_PATH 已经是 pytest 启动时
+        # 的 CI 默认值 ($RUNNER_TEMP/mnelo-test-db/memory.db). 必须显式传 db_path=...
         try:
             from memory import Memory as _Mem
 
-            _m = _Mem()
-            # [8/10 follow-up] 验证 task_states + state_transitions 真的建了
+            _m = _Mem(db_path=db_path)  # 关键: 显式 db_path, 不依赖模块级 DB_PATH 默认值
             _verify = sqlite3.connect(str(db_path))
             _tables = sorted(r[0] for r in _verify.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
             _verify.close()
-            print(f"[8/10 fixture-debug] Memory() init OK, _REPO/memory.db tables ({len(_tables)}): {_tables}")
+            print(f"[8/10 fixture-debug] Memory(db_path={db_path}) init OK, tables ({len(_tables)}): {_tables}")
             _m.close()
         except Exception as _e:
             print(f"[8/10 fixture-debug] Memory() init RAISED: {type(_e).__name__}: {_e}")
-            # Try to dump whatever was created before raise
             try:
                 _v2 = sqlite3.connect(str(db_path))
                 _t2 = sorted(r[0] for r in _v2.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall())
@@ -106,12 +100,6 @@ def _setup():
             except Exception as _e2:
                 print(f"[8/10 fixture-debug] post-raise dump failed: {_e2}")
             raise
-        finally:
-            if _saved is None:
-                _os.environ.pop("MNELO_MEMORY_DIR", None)
-            else:
-                _os.environ["MNELO_MEMORY_DIR"] = _saved
-        _Mem = None  # 释放
     c = sqlite3.connect(str(db_path))
     c.execute("PRAGMA foreign_keys = OFF")
     c.execute("DELETE FROM task_states WHERE task_id LIKE 'loop:m5-%' OR task_id LIKE 'loop:20260806-m5-%'")
