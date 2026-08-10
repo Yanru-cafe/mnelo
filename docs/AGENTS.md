@@ -189,6 +189,32 @@ Optionally: add the kind to `[recall] boost_kinds` to give it the same
 recall boost as `stock`; backfill existing entities via `correct()` or a
 script.
 
+### ⚠️ Kind is open, but entity `id` is namespace-gated (8/8 P1)
+
+Although `kind` is free-form, **the entity `id` is checked by the
+namespace guard** (`memory._enforce_entity_namespace_guard`, [8/8 P1]).
+Pick an id in one of these shapes:
+
+| Shape | Example | Notes |
+|---|---|---|
+| Explicit namespace prefix | `stock:sh600021`, `identity:yanru`, `holding:2026-08-10`, `loop:daily_research`, `task:build_x` | Five namespaces are allowlisted (`identity:`, `stock:`, `holding:`, `loop:`, `task:`) |
+| `master_` prefix | `master_hermes_update_preflight`, `master_skill_aesthetic` | SOUL §mnelo ops #4 convention — use this when introducing a brand-new top-level subject |
+| Blacklist (always rejected) | `anno:*`, `TOKEN_*` | `anno:*` = legacy HonchoImporter NER residue; `TOKEN_*` = random session tokens. **Never** use these as ids — drop the entity and write the info into chunk metadata instead |
+| Anything else | `sonnet`, `foo_bar` | Allowed since A1 (2026-08-10), any `kind` is accepted for these ids |
+
+Validation rules enforced regardless of `kind` choice:
+
+- `kind` is a non-empty string, ≤ 64 chars (`validation.py:147-152`).
+- `id` matches `^[a-zA-Z0-9_:.\-]{1,256}$` (`validation.py:58`).
+- `concept` kind's `name` ≤ 50 chars (prevents "imported sleep runs at
+  midnight" being smuggled in as an entity name; use chunk content for
+  sentences).
+- Blacklist (`anno:*`, `TOKEN_*`) is rejected on every entity regardless
+  of kind.
+
+When unsure, default to `master_<short_descriptive_id>` with a `kind`
+that names the domain (e.g. `kind: 'lesson'`, `kind: 'product'`).
+
 ## 🎯 Suggesting new kinds from the user's profile
 
 The seed kinds (`stock`, `person`, `concept`, …) are a starting point,

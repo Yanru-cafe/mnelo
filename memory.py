@@ -215,8 +215,15 @@ def _enforce_entity_namespace_guard(ent: Dict) -> None:
 
     Raises ValidationError when entity id / name 命中以下任一:
       - id namespace 在黑名单 (anno:, TOKEN_C_, ...)
-      - id 不在白名单 namespace 前缀且不含 ':' (无 namespace 必须配 person/provider/event/task/setup/system/host/position_snapshot/concept 等结构化 kind)
+      - id 不在白名单 namespace 前缀 (`identity:`, `stock:`, `holding:`,
+        `loop:`, `task:`) 也不在 `master_*` 前缀, 且不含 `:` (无 namespace)
       - concept kind + name > 50 chars (整句当 name)
+
+    [A1 2026-08-10] Kind 词汇表本身**不**受限 (DESIGN §3.0.3 双谱系正交:
+    kind × memory_type; AGENTS.md "open taxonomy — no registration needed").
+    本 guard 只拒历史 importer 残留 (anno:* / TOKEN_*) + 整句当 name 的
+    低质量 entity. 用户可任意引入新 kind (e.g. `product`, `lesson`,
+    `recipe`), 不需要先注册白名单.
     """
     from validation import ValidationError  # 局部 import 避免循环
 
@@ -237,33 +244,23 @@ def _enforce_entity_namespace_guard(ent: Dict) -> None:
             "namespace 'TOKEN_*' (random session tokens) is not a valid entity id; use a stable, human-readable id",
         )
 
-    # 3) 白名单: 显式 namespace 前缀
+    # 3) 白名单: 显式 namespace 前缀 (identity:/stock:/holding:/loop:/task:
+    # 或 master_*) — 通过即代表 id 已被命名空间隔离, 任何 kind 都接受.
     has_allowed_ns = any(eid.startswith(ns) for ns in _ALLOWED_ENTITY_NAMESPACES) or eid.startswith(_ALLOWED_ENTITY_PREFIXES)
     if has_allowed_ns:
-        return  # 显式 namespace 必走结构化 kind, 跳过 name length check
+        return  # 显式 namespace 必走结构化 id, 跳过下面无 namespace 的检查
 
-    # 4) 无 namespace id 必须配结构化 kind
-    _NAMELESS_KINDS = frozenset(
-        {
-            "person",
-            "provider",
-            "event",
-            "task",
-            "setup",
-            "system",
-            "host",
-            "position_snapshot",
-            "concept",
-            "canonical_fact",
-        }
-    )
-    if ":" not in eid and kind not in _NAMELESS_KINDS:
-        raise ValidationError(
-            "entity.id",
-            f"non-namespaced id {eid!r} requires kind in {sorted(_NAMELESS_KINDS)}; got kind={kind!r}",
-        )
+    # 4) 无 namespace id (不含 `:` 也没 master_ 前缀): 仅检查 name, 不查 kind.
+    #    [A1 2026-08-10] 旧版本用 _NAMELESS_KINDS 白名单强制要求 kind ∈
+    #    {person, provider, event, task, setup, system, host,
+    #    position_snapshot, concept, canonical_fact}. 这跟 DESIGN §3.0.3
+    #    "kind 词汇表开放" 设计冲突, 文档也没说 (AGENTS.md 写
+    #    "open taxonomy — no registration needed"). 移除 kind 限制后,
+    #    用户可给任何无 namespace id 配任意 kind (e.g. master_<subject>
+    #    不算, 那走 prefix 白名单; 这里指纯短 id 如 `sonnet` 配 `lesson`).
 
-    # 5) concept kind 禁长句子 name
+    # 5) concept kind 禁长句子 name (整句当 entity 的防御 — 任何 kind 都该限,
+    #    但 DESIGN §3.0.3 说 concept 是 "收纳概念" 角色, 长名最常见, 故只查它).
     if kind == "concept" and len(name) > _MAX_CONCEPT_NAME_LEN:
         raise ValidationError(
             "entity.name",
