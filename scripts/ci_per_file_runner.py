@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run each pytest file in a fresh DB so native index crashes stay attributable."""
+
 from __future__ import annotations
 
 import os

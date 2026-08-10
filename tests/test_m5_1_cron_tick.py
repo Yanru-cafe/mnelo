@@ -62,9 +62,31 @@ def _run(args, env_extra=None, timeout=60):
 
 
 def _setup():
-    """Clean fixtures: clear m5 test loops + recent loop_tick_cron audit_log."""
+    """Clean fixtures: clear m5 test loops + recent loop_tick_cron audit_log.
+
+    [8/10 fix] _REPO/memory.db 在 CI 默认未被 Memory() init (CI 用 $RUNNER_TEMP/mnelo-test-db).
+    fixture 直接 sqlite3.connect 时 _REPO/memory.db 是空 DB, DELETE FROM task_states 必然
+    抛 no such table. 先 import memory + Memory(db_path=...) 走一次 init 让 schema 建好.
+    """
     import sqlite3
-    c = sqlite3.connect(str(_REPO / "memory.db"))
+    db_path = _REPO / "memory.db"
+    # [8/10 fix] ensure DB schema exists. Memory() auto-loads schema.sql on fresh DB.
+    if not db_path.exists():
+        # [8/10 fix] 在 _REPO/memory.db 上 init schema — 走 Memory() 默认 auto-load path.
+        # 设 MNELO_MEMORY_DIR=str(_REPO) 让 config.resolve_db_path() 解析到这个 DB, 然后 Memory() 创建 + init.
+        import os as _os
+        _saved = _os.environ.get("MNELO_MEMORY_DIR")
+        _os.environ["MNELO_MEMORY_DIR"] = str(_REPO)
+        try:
+            from memory import Memory as _Mem
+            _Mem()  # 触发 schema 加载 + _migrate_schema 建 task_states/state_transitions
+        finally:
+            if _saved is None:
+                _os.environ.pop("MNELO_MEMORY_DIR", None)
+            else:
+                _os.environ["MNELO_MEMORY_DIR"] = _saved
+        _Mem = None  # 释放
+    c = sqlite3.connect(str(db_path))
     c.execute("PRAGMA foreign_keys = OFF")
     c.execute(
         "DELETE FROM task_states WHERE task_id LIKE 'loop:m5-%' "
