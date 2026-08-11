@@ -3,7 +3,7 @@
 # 跟 README hero 三行同源 (README hero = tagline + contrast vs Mem0 + 价格锚点).
 [project]
 name = "mnelo"
-version = "1.0.0"  # 跟 README badge "Latest release" + CHANGELOG 顶版本同步; bump 时三处一致
+version = "1.2.0"  # [P0 2026-08-11] v1.1.1 → v1.2.0 (MINOR bump): new feature — scoping IDs (agent_id/user_id/run_id). 跟 README badge "Latest release" + CHANGELOG 顶版本同步; bump 时三处一致
 description = "Local-first knowledge-graph memory layer for AI agents — 4-way RRF recall, optional L2 maintenance, bilingual zero-LLM classifier, all in one SQLite file. Runs on a $10/year VPS with usearch f16."
 readme = "README.md"
 requires-python = ">=3.10"
