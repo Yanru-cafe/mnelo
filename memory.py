@@ -22,6 +22,12 @@ import sqlite_vec
 
 import config  # [G2 8/4] _build_digest 用 config.config
 
+# [P0 2026-08-11] scoping IDs — sentinel 用于 'agent_id filter 未传' 状态.
+# 区别于 None: None = 调用方显式传 None (= 过滤 agent_id=None 的 chunk,
+# 即召回无 agent_id 的旧数据). sentinel = filters 完全没 agent_id key
+# (= 不应用 agent_id filter, backward compat).
+_MISSING = object()
+
 logger = logging.getLogger("mnelo")
 if not logger.handlers:
     handler = logging.StreamHandler()
@@ -617,6 +623,13 @@ class Memory:
         session_id: str = "default",
         timestamp: str = None,
         memory_type: Optional[str] = None,
+        # [P0 2026-08-11] scoping IDs — 借鉴 Mem0 scoping IDs.
+        # 写入侧: 这 3 字段 merge 进 chunks.metadata_json (JSON K-V),
+        # 不覆盖现有 'tags' 键. None = 未指定, 不写入 (旧数据兼容).
+        # 空串是显式选择 ('no scoping'), 保留.
+        agent_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> str:
         """写入一条 chunk + 实体 + 关系.
 
@@ -625,6 +638,8 @@ class Memory:
                       valid_from?, valid_until?, evidence_chunk_id?}]
         memory_type: [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral.
                       [P1a E4 8/4] 默认 None 触发 P1a 规则分类; 调用方显式传值 (>None) 永远优先.
+        [P0 2026-08-11] scoping IDs (agent_id / user_id / run_id) — 写入
+            metadata_json (与现有 'tags' 键 merge). 召回时按这些字段过滤.
         """
         ts = timestamp or now()
         chunk_id = generate_id("chunk")
@@ -648,6 +663,13 @@ class Memory:
         # [7/19 P0-3] chunk content 大小 + 控制字符 + bidi override 验证
         content = validate_chunk_content(content)
         # [7/19 P1-1] id 来源 = generate_id (服务端生成), 无需 validate_id
+
+        # [P0 2026-08-11] 构造 metadata_json: 跟现有 'tags' 键 merge,
+        # 再把非 None 的 scoping 字段加进去. 空串也算显式选择 (保留).
+        meta_dict: Dict[str, object] = {"tags": tags or []}
+        for k, v in (("agent_id", agent_id), ("user_id", user_id), ("run_id", run_id)):
+            if v is not None:
+                meta_dict[k] = v
 
         # 0.5 [8/8 P1 fix] 预校验 entities — 必须在 INSERT chunk 之前
         # 否则 namespace guard 抛 ValidationError 时 chunk INSERT 已进 SQLite WAL,
@@ -673,7 +695,7 @@ class Memory:
                 session_id,
                 ts,
                 clamp01(importance, "importance"),
-                json.dumps({"tags": tags or []}, ensure_ascii=False),
+                json.dumps(meta_dict, ensure_ascii=False),
             ),
         )
 
@@ -1099,6 +1121,10 @@ class Memory:
     def _vector_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
         """[P2+ #2] vector recall — 索引 KNN 走 SearchIndex 适配器.
 
+        [P0 2026-08-11] scoping IDs: 当 filters 含 agent_id, KNN 召回的
+        chunk 必须在 metadata_json 里有相同 agent_id (json_extract NULL
+        不匹配 → 旧数据无 agent_id 的 chunk 自动保留, 不误过滤).
+
         Args:
             conn: 独立 sqlite3 connection (每路独立; 用于 chunk 侧查询)
         """
@@ -1109,11 +1135,17 @@ class Memory:
         if not knn_hits:
             return []
 
+        # [P0 2026-08-11] scoping IDs: 一次 SQL 把 chunk 元数据 + agent_id 拿回来.
+        # 在 Python 侧过滤 agent_id (避免每行一次 json_extract SQL).
+        agent_id_filter = (filters or {}).get("agent_id")
+        agent_id_filter_norm = agent_id_filter if agent_id_filter is not None else _MISSING
+
         results = []
         for hit in knn_hits:
             # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
+            # [P0 2026-08-11] 同时拿 metadata_json, Python 侧 json 解析 agent_id
             chunk = conn.execute(
-                "SELECT id, content, memory_type, source, timestamp, importance FROM chunks WHERE id = ? AND (valid_until IS NULL OR valid_until > ?)",
+                "SELECT id, content, memory_type, source, timestamp, importance, metadata_json FROM chunks WHERE id = ? AND (valid_until IS NULL OR valid_until > ?)",
                 (hit.chunk_id, asof),
             ).fetchone()
             if not chunk:
@@ -1123,12 +1155,31 @@ class Memory:
                     continue
                 if "type" in filters and chunk["memory_type"] != norm_memory_type(filters["type"]):
                     continue
+                # [P0 2026-08-11] agent_id filter — 旧数据 metadata_json=NULL
+                # 或不含 agent_id → JSON 解出 None → 不等于 filter, 保留.
+                if agent_id_filter_norm is not _MISSING:
+                    raw = chunk["metadata_json"]
+                    if raw is None or raw == "":
+                        continue
+                    try:
+                        meta_obj = json.loads(raw)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if meta_obj.get("agent_id") != agent_id_filter_norm:
+                        continue
             results.append(self._hit_dict(chunk, method="vector", distance=float(hit.distance)))
         return results[:top_k]  # type: ignore
 
     def _meta_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
-        """[P2+ #2] 独立 conn 版 meta recall."""
+        """[P2+ #2] 独立 conn 版 meta recall.
+
+        [P0 2026-08-11] scoping IDs: 当 filters 含 agent_id, SQL 走
+        json_extract(metadata_json, '$.agent_id') = ? 过滤. NULL metadata_json
+        或缺 agent_id → json_extract 返回 NULL → != filter → 自动保留
+        (旧数据不误过滤).
+        """
         # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
+        # [P0 2026-08-11] scoping: agent_id 走 json_extract SQL 过滤 (NULL 不误过滤)
         sql = """
             SELECT id, content, memory_type, source, timestamp, importance FROM chunks
             WHERE (valid_until IS NULL OR valid_until > ?)
@@ -1141,13 +1192,27 @@ class Memory:
         if filters and "type" in filters:
             sql += " AND memory_type = ?"
             params.append(norm_memory_type(filters["type"]))
+        if filters and "agent_id" in filters:
+            # [P0 2026-08-11] json_extract 路径: '$.agent_id'
+            # NULL metadata_json 或缺键 → json_extract 返回 NULL → 不 = filter.
+            # 这天然保证旧数据兼容.
+            sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
+            params.append(filters["agent_id"])
         sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
         params.append(top_k)
         rows = conn.execute(sql, params).fetchall()
         return [self._hit_dict(r, method="meta") for r in rows]
 
     def _entity_recall_with_conn(self, conn, query, top_k, filters, asof) -> List[Dict]:
-        """[P2+ #2] 独立 conn 版 entity recall."""
+        """[P2+ #2] 独立 conn 版 entity recall.
+
+        [P0 2026-08-11] scoping IDs: entity_recall 默认走 entities 表 token
+        LIKE (强身份事实); 加 agent_id filter 后, 关联 chunk 必须
+        metadata_json.agent_id = filter (json_extract). entity → chunk 关联
+        在 relations 表 (自引用 evidence relation: src=entity_id, tgt=entity_id,
+        evidence_chunk_id=chunk_id, 见 3027 行). LEFT JOIN 让老 entity (无
+        evidence relation) 保留 — c_meta NULL → 旧数据兼容.
+        """
         if " " in query.strip():
             tokens = query.strip().split()
         else:
@@ -1160,20 +1225,45 @@ class Memory:
                 continue
             like = f"%{tok}%"
             # [7/21 fix] asof: entity 在 asof 时点有效 = valid_from <= asof AND (valid_until IS NULL OR > asof)
+            # [P0 2026-08-11] LEFT JOIN relations (self-ref) → chunks 拿 metadata_json.
             sql = """
-                SELECT id, name, kind, summary, importance, aliases_json
-                FROM entities
-                WHERE (valid_from IS NULL OR valid_from <= ?)
-                  AND (valid_until IS NULL OR valid_until > ?)
-                  AND (name LIKE ? OR aliases_json LIKE ?)
+                SELECT e.id, e.name, e.kind, e.summary, e.importance, e.aliases_json, c.metadata_json AS c_meta
+                FROM entities e
+                LEFT JOIN relations r ON r.source_id = e.id AND r.target_id = e.id
+                LEFT JOIN chunks c ON c.id = r.evidence_chunk_id
+                WHERE (e.valid_from IS NULL OR e.valid_from <= ?)
+                  AND (e.valid_until IS NULL OR e.valid_until > ?)
+                  AND (e.name LIKE ? OR e.aliases_json LIKE ?)
             """
             params = [asof, asof, like, like]
             if filters and "type" in filters:
-                sql += " AND memory_type = ?"
+                sql += " AND e.memory_type = ?"
                 params.append(norm_memory_type(filters["type"]))
-            sql += " ORDER BY importance DESC LIMIT ?"
+            if filters and "agent_id" in filters:
+                # [P0 2026-08-11] SQL 没法直接 json_extract (chunk 可能不存在);
+                # Python 侧 post-filter, NULL metadata_json 保留 (旧数据兼容).
+                pass  # 见下面 post-filter 循环
+            sql += " ORDER BY e.importance DESC LIMIT ?"
             params.append(top_k)
             rows = conn.execute(sql, params).fetchall()
+            # [P0 2026-08-11] agent_id post-filter (SQL LEFT JOIN 后 Python 侧 filter)
+            if filters and "agent_id" in filters:
+                target_agent = filters["agent_id"]
+                kept = []
+                for r in rows:
+                    c_meta = r["c_meta"]
+                    if c_meta is None or c_meta == "":
+                        # 无关联 chunk / 空 metadata_json → 保留 (旧数据兼容)
+                        kept.append(r)
+                        continue
+                    try:
+                        parsed = json.loads(c_meta)
+                    except (json.JSONDecodeError, TypeError):
+                        kept.append(r)  # 解析失败保留 (defensive)
+                        continue
+                    if parsed.get("agent_id") == target_agent:
+                        kept.append(r)
+                rows = kept
             for r in rows:
                 # [7/19 v0.5.5] Robust aliases parsing:
                 # aliases_json may be NULL (SQL), 'null' (JSON literal),
@@ -1298,8 +1388,15 @@ class Memory:
         return entity_hits + chunk_hits
 
     def _meta_recall(self, query: str, top_k: int, filters: Dict, asof: str) -> List[Dict]:
-        """路 3: 元数据 (精确 LIKE + 时间近)."""
+        """路 3: 元数据 (精确 LIKE + 时间近).
+
+        [P0 2026-08-11] scoping IDs: 与 _meta_recall_with_conn 同语义.
+        agent_id 走 json_extract SQL 过滤; NULL metadata_json / 缺 agent_id
+        保留 (旧数据兼容). 这是 meta_only 策略走的 sequential fallback,
+        必须跟并行 _with_conn 行为一致 — 漏一路即失败 (P0 验收).
+        """
         # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
+        # [P0 2026-08-11] scoping: agent_id 走 json_extract SQL 过滤
         sql = """
             SELECT id, content, memory_type, source, timestamp, importance FROM chunks
             WHERE (valid_until IS NULL OR valid_until > ?)
@@ -1312,6 +1409,9 @@ class Memory:
         if filters and "type" in filters:
             sql += " AND memory_type = ?"
             params.append(norm_memory_type(filters["type"]))
+        if filters and "agent_id" in filters:
+            sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
+            params.append(filters["agent_id"])
         sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
         params.append(top_k)
 
@@ -1345,18 +1445,44 @@ class Memory:
         is_identity_query = any(k in query for k in identity_query_keys)
         if is_identity_query:
             # [7/21 fix] asof: 只取 asof 时点仍有效的 entity/relation
+            # [P0 2026-08-11] scoping: LEFT JOIN chunks 拿 metadata_json.
+            # entity → chunk 关联在 relations.evidence_chunk_id (3027 行
+            # 创建, evidence 关系: src=entity_id, tgt=entity_id, evidence_chunk_id=chunk_id).
+            # LEFT JOIN 让老 entity (无 evidence relation) 保留 — c.id NULL
+            # → c.metadata_json NULL → json_extract NULL → 不匹配 filter → 保留.
             rows = self._conn.execute(
                 """
-                SELECT e.id, e.kind, e.name, e.summary, e.importance
+                SELECT e.id, e.kind, e.name, e.summary, e.importance, c.metadata_json AS c_meta
                 FROM relations r
                 JOIN entities e ON e.id = r.target_id
                   AND (e.valid_until IS NULL OR e.valid_until > ?)
+                LEFT JOIN chunks c ON c.id = r.evidence_chunk_id
                 WHERE r.source_id = 'user'
                   AND (r.valid_until IS NULL OR r.valid_until > ?)
                   AND e.kind IN ('identity_fact', 'canonical_fact')
             """,
                 (asof, asof),
             ).fetchall()
+            # [P0 2026-08-11] agent_id filter — SQL 已经 LEFT JOIN chunks,
+            # 但 chunk 可能不存在 (老 entity); 改为 Python 侧 post-filter.
+            # NULL metadata_json / 缺 agent_id 的 chunk 保留 (旧数据兼容).
+            if filters and "agent_id" in filters:
+                target_agent = filters["agent_id"]
+                kept_rows = []
+                for r in rows:
+                    c_meta = r["c_meta"]
+                    if c_meta is None or c_meta == "":
+                        # 无关联 chunk 或空 metadata_json → 保留 (旧数据兼容)
+                        kept_rows.append(r)
+                        continue
+                    try:
+                        parsed = json.loads(c_meta)
+                    except (json.JSONDecodeError, TypeError):
+                        kept_rows.append(r)  # 解析失败也保留 (defensive)
+                        continue
+                    if parsed.get("agent_id") == target_agent:
+                        kept_rows.append(r)
+                rows = kept_rows
             for r in rows:
                 seen_ids.add(r["id"])
                 hits.append(
@@ -1391,7 +1517,8 @@ class Memory:
         like_clauses = []
         params = []
         for t in tokens:
-            like_clauses.append("(name LIKE ? OR id LIKE ? OR summary LIKE ?)")
+            # [P0 2026-08-11] 限定 e.id / e.name / e.summary — JOIN 后 'id' 歧义.
+            like_clauses.append("(e.name LIKE ? OR e.id LIKE ? OR e.summary LIKE ?)")
             params.extend([f"%{t}%"] * 3)
 
         # 两轮: 高优先级 (强 fact), 后补 concept
@@ -1402,20 +1529,44 @@ class Memory:
             (("concept",), top_k),  # 补足
         ):
             # [7/21 fix] asof: (valid_from IS NULL OR valid_from <= ?) 兼容无 valid_from 的旧数据
+            # [P0 2026-08-11] scoping: LEFT JOIN chunks via relations.evidence_chunk_id
+            # (entity → chunk 关联在 relations 表). LEFT JOIN 让老 entity 保留 —
+            # c_meta NULL → post-filter 保留 (旧数据兼容).
             sql = f"""
-                SELECT id, kind, name, summary, importance, recall_count FROM entities
-                WHERE (valid_from IS NULL OR valid_from <= ?)
-                  AND (valid_until IS NULL OR valid_until > ?)
-                  AND kind IN ({",".join("?" * len(kind_filter))})
+                SELECT e.id, e.kind, e.name, e.summary, e.importance, e.recall_count, c.metadata_json AS c_meta
+                FROM entities e
+                LEFT JOIN relations r ON r.source_id = e.id AND r.target_id = e.id
+                LEFT JOIN chunks c ON c.id = r.evidence_chunk_id
+                WHERE (e.valid_from IS NULL OR e.valid_from <= ?)
+                  AND (e.valid_until IS NULL OR e.valid_until > ?)
+                  AND e.kind IN ({",".join("?" * len(kind_filter))})
                   AND ({" OR ".join(like_clauses)})
             """
             cur_params = [asof, asof] + list(kind_filter) + params
             if filters and "type" in filters:
-                sql += " AND memory_type = ?"
+                sql += " AND e.memory_type = ?"
                 cur_params.append(norm_memory_type(filters["type"]))
-            sql += " ORDER BY importance DESC, recall_count DESC LIMIT ?"
+            # [P0 2026-08-11] agent_id filter — SQL 不直接 json_extract (entity
+            # 可能没关联 chunk); 改 Python 侧 post-filter 同第一阶段.
+            sql += " ORDER BY e.importance DESC, e.recall_count DESC LIMIT ?"
             cur_params.append(take)
             rows = self._conn.execute(sql, cur_params).fetchall()
+            if filters and "agent_id" in filters:
+                target_agent = filters["agent_id"]
+                filtered_rows = []
+                for r in rows:
+                    c_meta = r["c_meta"]
+                    if c_meta is None or c_meta == "":
+                        filtered_rows.append(r)  # 旧数据/无关联 chunk 保留
+                        continue
+                    try:
+                        parsed = json.loads(c_meta)
+                    except (json.JSONDecodeError, TypeError):
+                        filtered_rows.append(r)
+                        continue
+                    if parsed.get("agent_id") == target_agent:
+                        filtered_rows.append(r)
+                rows = filtered_rows
             for r in rows:
                 if r["id"] in seen_ids:
                     continue
