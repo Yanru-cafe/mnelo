@@ -201,7 +201,7 @@ Everything else lives in `docs/`:
 7. **Boring & predictable.** No magic. Fail-fast over silent
    degradation. Explicit opt-in over defaults-that-surprise.
 8. **Measured.** All numbers in [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
-   are reproducible.
+   are reproducible — `python -m benchmarks latency` reruns them.
 
 ## run tests
 
