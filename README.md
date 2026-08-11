@@ -1,9 +1,9 @@
 # mnelo
 
 > **mnelo** = μνήμη + λόγος (Greek: *memory* + *reason*).
-> Local-first, single-file, knowledge-graph memory layer for AI agents —
-> with an optional **autonomous maintenance layer** and a
-> **session-state digest** injected into your agent at startup.
+> **Local-first knowledge-graph memory layer for AI agents** — what Mem0
+> charges for, in one SQLite file: 4-way RRF + L2 maintenance + bilingual
+> classifier. **usearch f16 runs it on a $10/year VPS.**
 
 | English | [简体中文](README.zh.md) |
 
