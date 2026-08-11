@@ -19,7 +19,7 @@
 - **永远本地**——一个 SQLite 文件，`cp memory.db` 即完整备份。无
   云、无账号、无订阅。
 - **4 路召回 + RRF**——vector / graph / meta / entity 四路融合，无需
-  分数归一化（5k 向量时 p50 = **18 ms**）
+  分数归一化（5k 向量时 p50 = **18 ms** —— [复现](BENCHMARKS.md#1-latency-benchmark)：`python -m benchmarks latency`）
 - **知识图谱原生**——实体 + 类型化关系，每条关系回指源 chunk
 - **memory_type 类型谱系 + 零 LLM 分类器**——自动打标每条写入为
   `fact` / `preference` / `episode` / `decision` / `procedure` /

@@ -19,7 +19,7 @@
 - **always local** — one SQLite file. `cp memory.db` is a full backup.
   Cloud-free, account-free, subscription-free.
 - **4-way recall with RRF** — vector / graph / meta / entity lanes fused
-  without score normalization (p50 = **18 ms** @ 5k vectors)
+  without score normalization (p50 = **18 ms** @ 5k vectors — [repro](BENCHMARKS.md#1-latency-benchmark): `python -m benchmarks latency`)
 - **knowledge graph native** — entities + typed relations, every
   relation points back to its source chunk
 - **memory_type taxonomy + zero-LLM classifier** — auto-tags every
