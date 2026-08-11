@@ -25,24 +25,24 @@ class TestPercentile:
     """Test the percentile() helper imported from benchmark."""
 
     def test_empty_list(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         assert percentile([], 50) == 0.0
         assert percentile([], 95) == 0.0
 
     def test_single_value(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         assert percentile([42.0], 50) == 42.0
         assert percentile([42.0], 99) == 42.0
 
     def test_exact_median(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         assert percentile([1, 2, 3, 4, 5], 50) == 3.0
 
     def test_p95(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         # 100 values 1-100, p95 should be ~95.05 (linear interp)
         values = list(range(1, 101))
@@ -50,14 +50,14 @@ class TestPercentile:
         assert 94 <= p95 <= 96
 
     def test_p99(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         values = list(range(1, 101))
         p99 = percentile(values, 99)
         assert 98 <= p99 <= 100
 
     def test_min_max_boundaries(self):
-        from scripts.benchmark import percentile
+        from benchmarks.latency import percentile
 
         values = [10, 20, 30, 40, 50]
         assert percentile(values, 0) == 10
@@ -77,6 +77,31 @@ class TestBenchmarkCLI:
         )
         assert result.returncode == 0
         assert "usage" in result.stdout.lower() or "--chunks" in result.stdout
+
+    def test_module_entry_usage(self):
+        """python -m benchmarks (no args) → usage + exit 2."""
+        result = subprocess.run(
+            [sys.executable, "-m", "benchmarks"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(REPO),
+        )
+        assert result.returncode == 2
+        assert "usage" in result.stderr.lower()
+        assert "latency" in result.stderr.lower()
+
+    def test_module_entry_latency_help(self):
+        """python -m benchmarks latency --help → exit 0 + flags."""
+        result = subprocess.run(
+            [sys.executable, "-m", "benchmarks", "latency", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(REPO),
+        )
+        assert result.returncode == 0
+        assert "--chunks" in result.stdout
 
     def test_invalid_chunks(self):
         """--chunks < 100 should fail with error."""
@@ -164,12 +189,12 @@ class TestBenchmarkQueries:
 
     def test_query_count_at_least_50(self):
         """Need >= 50 unique queries to support --queries up to 100 with cycling."""
-        from scripts.benchmark import BENCHMARK_QUERIES
+        from benchmarks.latency import BENCHMARK_QUERIES
 
         assert len(BENCHMARK_QUERIES) >= 50
 
     def test_queries_are_strings(self):
-        from scripts.benchmark import BENCHMARK_QUERIES
+        from benchmarks.latency import BENCHMARK_QUERIES
 
         for q in BENCHMARK_QUERIES:
             assert isinstance(q, str)
@@ -177,7 +202,7 @@ class TestBenchmarkQueries:
 
     def test_queries_diverse(self):
         """Mix of stock codes, names, English, Chinese — not all the same type."""
-        from scripts.benchmark import BENCHMARK_QUERIES
+        from benchmarks.latency import BENCHMARK_QUERIES
 
         # At least 5 Chinese characters (entity-style)
         chinese_count = sum(1 for q in BENCHMARK_QUERIES if any("\u4e00" <= c <= "\u9fff" for c in q))
