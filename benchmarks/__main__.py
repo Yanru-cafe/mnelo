@@ -16,12 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in _SUBCOMMANDS:
         print(
-            "mnelo evaluation harness\n"
-            "\n"
-            "usage: python -m benchmarks <command> [options]\n"
-            "\n"
-            "commands:\n"
-            "  latency   recall 延迟 benchmark (--chunks N --queries N --top-k K --json PATH)\n",
+            "mnelo evaluation harness\n\nusage: python -m benchmarks <command> [options]\n\ncommands:\n  latency   recall 延迟 benchmark (--chunks N --queries N --top-k K --json PATH)\n",
             file=sys.stderr,
         )
         return 2
