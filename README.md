@@ -175,6 +175,9 @@ Everything else lives in `docs/`:
   / multilingual / test coverage
 - [docs/COMPARISON.md](docs/COMPARISON.md) — vs Mem0 / Letta / Zep /
   Cognee
+- [docs/research/](docs/research/) — deep-dive research notes
+  (e.g. [mem0借鉴研究](docs/research/mem0-comparison.md) — 借鉴清单 +
+  ROI 排序 + 落地建议)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module layout
 - [docs/DESIGN.md](docs/DESIGN.md) — design blueprint
   ([docs/DESIGN_TASK_LOOP.md](docs/DESIGN_TASK_LOOP.md) for the task/loop subsystem)
