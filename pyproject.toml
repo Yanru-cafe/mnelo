@@ -1,3 +1,31 @@
+# [meta] project metadata — PEP 621. PyPI long_description 走 README.md (description-content-type="text/markdown").
+# 设计依据: 主人 8/11 拍板 "Knowledge-graph memory layer that Mem0 charges for" 风格重写 meta,
+# 跟 README hero 三行同源 (README hero = tagline + contrast vs Mem0 + 价格锚点).
+[project]
+name = "mnelo"
+version = "1.0.0"  # 跟 README badge "Latest release" + CHANGELOG 顶版本同步; bump 时三处一致
+description = "Local-first knowledge-graph memory layer for AI agents — 4-way RRF recall, optional L2 maintenance, bilingual zero-LLM classifier, all in one SQLite file. Runs on a $10/year VPS with usearch f16."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["memory", "ai-agent", "mcp", "knowledge-graph", "sqlite", "local-first", "rrf"]
+authors = [
+    { name = "cure4u" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+
 [tool.ruff]
 # [8/10 v1.0.0] Bump target to Python 3.10 — usearch>=2.26 (vector search backend) only ships
 # wheels for Python 3.10+. Python 3.9 and lower cannot install usearch and are no longer
