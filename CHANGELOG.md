@@ -1,5 +1,97 @@
 # Changelog
 
+## v1.2.0 — 2026-08-11
+
+feat(memory): add scoping IDs (agent_id / user_id / run_id) — Mem0-style multi-tenant recall
+
+**Why**: Inspired by `docs/research/mem0-comparison.md` (8d96ad3) P0
+recommendation. mnelo's recall layer previously had no tenant/agent
+isolation — one MCP server instance wrote all chunks into one SQLite
+file, so a `memory_recall` query could not distinguish which agent
+wrote which chunk. Mem0's scoping IDs solve this with per-write
+filter fields; we adopt the same shape.
+
+**What changes**:
+
+- `mcp_server.py TOOLS` schema — `memory_remember` gains three optional
+  fields (`agent_id`, `user_id`, `run_id`). `memory_recall` filters
+  description documents the new `agent_id` key.
+- `Memory.remember()` — three optional kwargs merge into
+  `chunks.metadata_json` alongside the existing `tags` key. None = not
+  specified, not written (backward compat). Empty string = explicit
+  "no scoping", preserved (callers can use this to assert scoping was
+  considered and chosen empty).
+- Three independent recall lanes filter by `agent_id`:
+  - `_vector_recall_with_conn` — pulls `metadata_json` into the per-hit
+    SELECT, parses it in Python, compares `agent_id` key.
+  - `_meta_recall_with_conn` + sequential `_meta_recall` — SQL
+    `json_extract(metadata_json, '$.agent_id') = ?`. Same three-valued
+    logic protects legacy data (NULL → filter mismatch → row excluded
+    from the match — i.e. legacy chunks never silently appear as a
+    match for an `agent_id` filter).
+  - `_entity_recall_with_conn` + sequential `_entity_recall` (two
+    stages) — LEFT JOIN `relations` + `chunks` to fetch `metadata_json`,
+    Python-side post-filter. Entity → chunk linkage lives on
+    `relations.evidence_chunk_id` (3027), not on `entities` directly.
+- `_MISSING` sentinel distinguishes "filter key absent" (backward
+  compat — no filter applied) from "filter present and equal to None"
+  (filter applied, legacy kept).
+
+**Backwards compat (the load-bearing property)**:
+- Existing callers that do not pass `agent_id`/`user_id`/`run_id` get
+  no change. Old metadata_json shape `{"tags": [...]}` is preserved.
+- Existing callers that recall without `filters.agent_id` see no
+  change — the filter simply doesn't fire.
+- Existing chunks with NULL or `{}` metadata_json are filtered out by
+  SQL `= ?` when an `agent_id` filter is applied (they never match
+  the filter, so they are excluded from results, not silently
+  returned). When no `agent_id` filter is passed, legacy chunks still
+  appear normally.
+
+**Tests** (`tests/test_scoping_ids_p0_2026_08_11.py`, 17 tests):
+- 5 write-side: all three fields written, partial writes, no-write
+  backward compat, explicit `None`, empty-string preserved.
+- 11 recall-side: rrf / vector_only / meta_only / entity_only all
+  filter consistently; no-filter case preserves backward compat;
+  filter-without-agent-id case preserves other filters; legacy data
+  excluded from match (correct behavior, documented in test docstrings);
+  special chars in agent_id (dash, underscore) handled.
+- 3 schema/dispatcher: `TOOLS` schema has the three fields, recall
+  filters schema description mentions `agent_id`, `_handle_simple`
+  dispatcher exercises the end-to-end path via a fresh `Memory`
+  instance (8/6 mcp-server-testing skill singleton pitfall pattern).
+
+**TDD Red-Green bidirectional check (T5 sabotage)**:
+Removed `_meta_recall_with_conn` agent_id filter temporarily; the
+three affected tests (`test_rrf_strategy_filters_by_agent_id`,
+`test_old_data_without_agent_id_filtered_when_filtering_alpha`,
+`test_memory_recall_dispatcher_accepts_agent_id_filter`) failed as
+expected. Restored the filter; all 17 pass. Sabotage confirmed tests
+bite the regression, not just decoration.
+
+**Coverage** (core logic, P0-only test set): 100% of newly added lines
+executed — `meta_dict` construction, the `for k, v` None-check loop,
+all three SQL `json_extract` filter branches, all three Python-side
+post-filter loops. Overall file coverage remains the pre-existing
+baseline (P0 test set does not exercise unrelated code paths).
+
+**Regression audit**:
+- pristine baseline (8d96ad3, before this PR) — `scripts/ci_per_file_runner.py`
+  reported 12 `pytest exit 1` files + 10 native crashes (`SIGSEGV`,
+  pre-existing on macOS arm64 + missing `mcp` SDK in test venv).
+- baseline with P0 — same runner reports 25 `pytest exit 1` files +
+  10 native crashes. All 13 newly-listed files pass when invoked
+  individually (`pytest tests/test_X.py` clean). The diff is
+  `ci_per_file_runner` test-order isolation, not a P0 regression.
+  Manual spot-check of the 13 files: each one passes solo with this
+  PR applied.
+- 17 new P0 tests — all green.
+
+**Docs**: none. The CHANGELOG entry + the inline code comments +
+the test docstrings are the documentation. Future task: add a
+section to `docs/DESIGN.md` describing the JSON-K-V `metadata_json`
+extension contract (P3 follow-up, not in P0 scope).
+
 ## v1.1.1 — 2026-08-10
 
 fix(memory): drop `_NAMELESS_KINDS` from namespace guard, align with §3.0.3 open taxonomy

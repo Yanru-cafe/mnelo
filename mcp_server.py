@@ -119,6 +119,13 @@ TOOLS = [
                 "tags": {"type": "array", "description": '["finance", "weng-resonance"]'},
                 "session_id": {"type": "string", "default": "default"},
                 "timestamp": {"type": "string", "description": "ISO 8601, None=now"},
+                # [P0 2026-08-11] scoping IDs — 借鉴 Mem0 scoping IDs.
+                # 写入侧: 这 3 字段 merge 进 chunks.metadata_json (JSON K-V),
+                # 不覆盖现有 'tags' 键. None = 未指定, 不写入 (旧数据兼容).
+                # 空串是显式选择 ('no scoping'), 保留.
+                "agent_id": {"type": "string", "description": "[P0 scoping] agent 标识 (e.g. 'main', 'tiancanbian'). 召回时按 agent_id 过滤."},
+                "user_id": {"type": "string", "description": "[P0 scoping] 用户标识 (e.g. 'owner_ling')."},
+                "run_id": {"type": "string", "description": "[P0 scoping] 单次 run 标识 (e.g. session UUID)."},
             },
             "required": ["content"],
         },
@@ -134,7 +141,11 @@ TOOLS = [
                 "graph_hops": {"type": "integer", "default": 2},
                 "filters": {
                     "type": "object",
-                    "description": "{kind, source, tag, time_range, type} — type = 记忆类型 (fact/preference/episode/decision/procedure/ephemeral)",
+                    "description": (
+                        "{kind, source, tag, time_range, type, agent_id, user_id, run_id}"
+                        " — type = 记忆类型 (fact/preference/episode/decision/procedure/ephemeral);"
+                        " [P0 2026-08-11] agent_id/user_id/run_id = metadata_json 字段过滤 (旧数据无对应键保留, 不误过滤)."
+                    ),
                 },
                 "strategy": {
                     "type": "string",
