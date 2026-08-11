@@ -17,10 +17,11 @@ chunks**.
 | **avg (24h warm)** | 10.4 ms | `recall_log` 8/6, 232 hits, incl. cold-start outliers |
 | **cold start** | ~1.1 s | MCP launch + embedder load |
 
-Reproduce:
+Reproduce (public harness — anyone can rerun):
 
 ```bash
-python scripts/benchmark.py --chunks 10000 --queries 100 --json bench.json
+python -m benchmarks latency --chunks 10000 --queries 100 --json bench.json
+# 旧入口兼容: python scripts/benchmark.py --chunks 10000 --queries 100 --json bench.json
 ```
 
 ## Memory footprint

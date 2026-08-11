@@ -92,6 +92,25 @@ the test docstrings are the documentation. Future task: add a
 section to `docs/DESIGN.md` describing the JSON-K-V `metadata_json`
 extension contract (P3 follow-up, not in P0 scope).
 
+## v1.1.2 — 2026-08-11
+
+feat(benchmarks): 迁移 latency benchmark 为可复跑 `python -m benchmarks` 子包
+
+**Why**: docs/research/mem0-comparison.md 借鉴 #6 (P3 落地) — mem0 有开源
+memory-benchmarks 框架, 任何人可复跑; mnelo 此前 BENCHMARKS.md 只有静态
+数字, 不是 harness. 建 `benchmarks/` 子包让 README 引用的延迟数字可一键复现.
+
+**What changes**:
+- 新增 `benchmarks/` 子包: `__init__.py` (harness 描述), `__main__.py`
+  (CLI 分发), `latency.py` (原 `scripts/benchmark.py` 核心迁移).
+- `scripts/benchmark.py` 降级为薄包装, 旧入口参数完全兼容.
+- CLI 入口: `python -m benchmarks latency --chunks N --queries N --top-k K --json PATH`.
+- `docs/BENCHMARKS.md` + README(EN/ZH) 复现命令更新为新入口.
+- tests: percentile/BENCHMARK_QUERIES 改从 `benchmarks.latency` 导入;
+  新增模块入口测试 (`python -m benchmarks` usage / `latency --help`).
+
+**Reproduce**: `python -m benchmarks latency --chunks 10000 --queries 100 --json bench.json`
+
 ## v1.1.1 — 2026-08-10
 
 fix(memory): drop `_NAMELESS_KINDS` from namespace guard, align with §3.0.3 open taxonomy

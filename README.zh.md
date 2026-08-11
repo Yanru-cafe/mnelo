@@ -185,7 +185,7 @@ python3 scripts/health_check.py
 7. **稳定可预期。** 无魔法。fail-fast 优于静默降级。显式 opt-in
    优于意外默认。
 8. **可复现。** [docs/BENCHMARKS.md](docs/BENCHMARKS.md) 所有数字
-   都可复现。
+   都可复现 — `python -m benchmarks latency` 一键重跑。
 
 ## 跑测试
 
