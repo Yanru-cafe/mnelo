@@ -19,6 +19,12 @@ os.environ.setdefault("MNELO_MEMORY_SEARCH_BACKEND", "usearch")
 import memory
 import task_states
 
+from datetime import datetime as _dt
+from datetime import timedelta as _td
+
+# [8/9 P1 follow-up] hard-coded "2026-08-06T..." 边界 fail (8/9 跑 age=7d < threshold 7d).
+# 改 NOW_REF = now+1s (未来), 跟 _create_*_task(days_ago=10) 配对 → age=10d+1s > threshold 7d.
+NOW_REF = (_dt.now() + _td(seconds=1)).isoformat(timespec="milliseconds")
 
 def _setup():
     c = sqlite3.connect(str(memory.DB_PATH))
@@ -31,7 +37,7 @@ def _setup():
     c.close()
 
 
-def _create_task(name: str, now: str = "2026-08-06T09:00") -> str:
+def _create_task(name: str, now: str = NOW_REF) -> str:
     m = memory.Memory()
     try:
         r = task_states.task_create(m._conn, name=name, now=now)
@@ -42,7 +48,7 @@ def _create_task(name: str, now: str = "2026-08-06T09:00") -> str:
         m.close()
 
 
-def _create_loop(name: str, now: str = "2026-08-06T09:00") -> str:
+def _create_loop(name: str, now: str = NOW_REF) -> str:
     m = memory.Memory()
     try:
         r = task_states.loop_create(m._conn, name=name, trigger="x", interval_hours=24, now=now)
@@ -106,9 +112,7 @@ def test_m28_2_propose_after_apply_re_proposes():
     修后: NOT EXISTS (stale_resolved/applied) 子查询, apply 后允许重新提议.
     """
     _setup()
-    # 建 11 天前 open task
-    from datetime import datetime as _dt
-    from datetime import timedelta as _td
+    # 建 11 天前 open task (用 NOW_REF 跟 _create_task 对齐)
     back = (_dt.now() - _td(days=11)).isoformat(timespec="milliseconds")
     m = memory.Memory()
     try:
@@ -117,7 +121,7 @@ def test_m28_2_propose_after_apply_re_proposes():
         m._conn.commit()
 
         # 第一次 propose
-        s1 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        s1 = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         assert any(p["task_id"] == tid for p in s1["proposals"])
 
         # 找 proposal_id + apply (用 'ignored_will_revisit' 模拟用户忽略但没转移)
@@ -132,7 +136,7 @@ def test_m28_2_propose_after_apply_re_proposes():
         )
 
         # 第二次 propose — 旧逻辑会跳, 新逻辑应再提议 (因为 apply 后 task 仍 stale)
-        s2 = task_states.propose_stale_tasks(m._conn, now="2026-08-06T15:00")
+        s2 = task_states.propose_stale_tasks(m._conn, now=NOW_REF)
         # 关键断言: 本 task 应在 s2['proposals'] 中 (不被旧 pending 永久跳过)
         proposed_ids = [p["task_id"] for p in s2["proposals"]]
         err_msg = f"M28.2 fix: apply 后第二次 propose 应再提议本 task, got {proposed_ids}"

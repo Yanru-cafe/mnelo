@@ -14,6 +14,7 @@
 
 不依赖外部数据 — 写完后清理本类写入的 audit_log + meta flags。
 """
+import os
 import unittest
 
 from memory import Memory
@@ -107,6 +108,12 @@ class TestHygienePass(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mem = Memory()
+        # [8/9 P1 follow-up] 主人 live DB 有 2259 candidates; fresh DB 0.
+        # decay assertion 在 fresh DB 失败, 用 MNELO_TEST_FRESH skip.
+        if os.environ.get("MNELO_TEST_FRESH"):
+            cls.skip_tests_in_fresh = True
+        else:
+            cls.skip_tests_in_fresh = False
         # 启用 L2 + dry_run
         cls.mem._l2_set("l2.enabled", "1")
         cls.mem._l2_set("l2.dry_run", "1")
@@ -123,6 +130,8 @@ class TestHygienePass(unittest.TestCase):
 
     def test_01_hygiene_runs_50_decay_proposals(self):
         """[§5.7 caps.purge=50] hygiene pass 写 ≤ 50 个 decay proposal"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("需要 owner live DB 2259 candidates; fresh DB 0")
         r = self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         self.assertIn("hygiene", r["passes_run"])
         self.assertLessEqual(r["applied"], 50,
@@ -154,6 +163,8 @@ class TestHygienePass(unittest.TestCase):
     def test_03_ttl_candidate_reports_5_types(self):
         """[H3 §3] TTL candidate report 覆盖 fact/preference/episode/decision/ephemeral
            (procedure 永久 = None = 不报告)"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("需要 owner live DB TTL variety; fresh DB 0")
         r = self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         ph = r["proposals"]["hygiene"]
         ttl = [p for p in ph if p["action"] == "ttl_candidate_report"]
@@ -163,6 +174,8 @@ class TestHygienePass(unittest.TestCase):
 
     def test_04_ttl_ephemeral_finds_chunks(self):
         """[实际 8/4] ephemeral 7d 实际有 52 chunk > 7 天 (P1a v0.2 升级后)"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("需要 owner live DB ephemeral chunks; fresh DB 0")
         r = self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         ph = r["proposals"]["hygiene"]
         ttl_eph = [p for p in ph if p["action"] == "ttl_candidate_report"
@@ -187,6 +200,8 @@ class TestHygienePass(unittest.TestCase):
 
     def test_06_proposals_written_as_proposed_status(self):
         """[§5.9.1] decay proposals 写 audit_log 是 'proposed' 状态"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("requires live DB decay candidates; fresh DB has none")
         # 跑一次 + 看最新 hygiene 行的 status
         self.mem.run_maintenance(passes=["hygiene"], dry_run=True)
         recent = self.mem.list_audit(pass_name="hygiene", status="proposed", limit=10)
@@ -236,6 +251,7 @@ class TestStatsHygieneSubkey(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.mem = Memory()
+        cls.skip_tests_in_fresh = bool(os.environ.get("MNELO_TEST_FRESH"))
 
     @classmethod
     def tearDownClass(cls):
@@ -256,6 +272,8 @@ class TestStatsHygieneSubkey(unittest.TestCase):
 
     def test_03_decay_candidates_count_positive(self):
         """[实际 8/4] decay_candidates 实际 2259 (0.1-0.3 区间) > 0"""
+        if getattr(self, "skip_tests_in_fresh", False):
+            self.skipTest("需要 owner live DB 2259 candidates; fresh DB 0")
         s = self.mem.stats()["hygiene"]
         self.assertGreater(s["decay_candidates"], 0,
             f"实际 8/4 ≈2259 候选, 实际 {s['decay_candidates']}")

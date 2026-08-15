@@ -1,6 +1,36 @@
+# [meta] project metadata — PEP 621. PyPI long_description 走 README.md (description-content-type="text/markdown").
+# 设计依据: 主人 8/11 拍板 "Knowledge-graph memory layer that Mem0 charges for" 风格重写 meta,
+# 跟 README hero 三行同源 (README hero = tagline + contrast vs Mem0 + 价格锚点).
+[project]
+name = "mnelo"
+version = "1.2.0"  # [P0 2026-08-11] v1.1.1 → v1.2.0 (MINOR bump): new feature — scoping IDs (agent_id/user_id/run_id). 跟 README badge "Latest release" + CHANGELOG 顶版本同步; bump 时三处一致
+description = "Local-first knowledge-graph memory layer for AI agents — 4-way RRF recall, optional L2 maintenance, bilingual zero-LLM classifier, all in one SQLite file. Runs on a $10/year VPS with usearch f16."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["memory", "ai-agent", "mcp", "knowledge-graph", "sqlite", "local-first", "rrf"]
+authors = [
+    { name = "cure4u" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+
 [tool.ruff]
-# Match minimum Python version we test (3.9 — oldest in matrix)
-target-version = "py39"
+# [8/10 v1.0.0] Bump target to Python 3.10 — usearch>=2.26 (vector search backend) only ships
+# wheels for Python 3.10+. Python 3.9 and lower cannot install usearch and are no longer
+# supported. See PR #6 / commit 6861a2d follow-up notes.
+target-version = "py310"
 line-length = 200  # [8/9] 中文 docstring 200 字内单行合理; 实测 mcp_server/memory/task_states 长行 121-201
 extend-exclude = [
     ".git",
@@ -27,12 +57,15 @@ select = [
 # Pragmas we explicitly tolerate:
 # E402: module-level imports not at top — mnelo uses lazy imports for
 #       optional deps (mcp, sqlite_vec); ruff can't see they're intentional.
-# UP006/UP035: typing.List/Dict → list/dict would require Python 3.9+
-#       minimum, but we still target 3.9 (oldest in matrix); keep typing imports.
+# UP006/UP035: typing.List/Dict → list/dict — safe at 3.10+ target.
+# B905: zip() without strict= — pre-existing code (metrics/search_index/tests)
+#       uses zip() in length-equal contexts (labelnames parallel, vec parallel);
+#       safe to add strict=True in a follow-up refactor, out of scope here.
 ignore = [
     "E402",  # module-level import not at top of file
     "B008",  # do not perform function call in argument defaults (fastembed API)
     "B904",  # raise without from inside except (we re-raise deliberately)
+    "B905",  # zip() without explicit strict= (pre-existing; refactor follow-up)
 ]
 
 [tool.ruff.lint.per-file-ignores]

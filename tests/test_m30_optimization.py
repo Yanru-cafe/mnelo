@@ -15,6 +15,10 @@ from pathlib import Path
 from datetime import datetime as _dt
 from datetime import timedelta as _td
 
+# [8/9 P1 follow-up] hard-coded "2026-08-06T15:00" 边界 fail (8/9 跑 age=7d < threshold 7d).
+# 改 NOW_REF = now+1s (未来), 跟 _create_stale_task(days_ago=10) 配对 → age=10d+1s > threshold 7d.
+NOW_REF = (_dt.now() + _td(seconds=1)).isoformat(timespec="milliseconds")
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 import os
@@ -74,7 +78,7 @@ def test_m30_1_apply_double_resolved_check_atomic():
     c = sqlite3.connect(str(memory.DB_PATH))
     try:
         # propose
-        result = task_states.propose_stale_tasks(c, now="2026-08-06T15:00")
+        result = task_states.propose_stale_tasks(c, now=NOW_REF)
         pid = None
         for p in result["proposals"]:
             if p["task_id"] == tid:
@@ -128,7 +132,7 @@ def test_m30_1b_apply_second_proposal_blocked_by_resolved():
     c = sqlite3.connect(str(memory.DB_PATH))
     try:
         # 第一次 propose + apply
-        r1 = task_states.propose_stale_tasks(c, now="2026-08-06T10:00")
+        r1 = task_states.propose_stale_tasks(c, now=NOW_REF)
         row1 = c.execute(
             "SELECT id FROM audit_log WHERE pass_name='stuck_task' AND ref_id=? AND status='proposed'",
             (tid,),
@@ -138,7 +142,7 @@ def test_m30_1b_apply_second_proposal_blocked_by_resolved():
         task_states.apply_stale_proposal(c, pid1, applied_action="ignored_first_time")
 
         # 第二次 propose (M28 fix: apply 后允许再提议)
-        r2 = task_states.propose_stale_tasks(c, now="2026-08-06T15:00")
+        r2 = task_states.propose_stale_tasks(c, now=NOW_REF)
         proposed_ids = [p["task_id"] for p in r2["proposals"]]
         assert tid in proposed_ids, f"M28: apply 后应再提议, got {proposed_ids}"
 
@@ -223,7 +227,7 @@ def test_m32_4_concurrent_apply_only_one_succeeds():
     c1 = sqlite3.connect(str(memory.DB_PATH), timeout=30)
     try:
         # propose (用 c1, 让 audit_log id 一致)
-        result = task_states.propose_stale_tasks(c1, now="2026-08-06T15:00")
+        result = task_states.propose_stale_tasks(c1, now=NOW_REF)
         # 找本 task 的 proposal_id
         row = c1.execute(
             """SELECT id FROM audit_log
@@ -303,17 +307,17 @@ def test_m30_3_render_digest_block4_truncates_to_2000_chars():
             tid = "task:m30-digest-" + str(i).zfill(4)
             c.execute(
                 "INSERT OR IGNORE INTO entities (id, kind, name, properties_json, valid_until, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)",
-                (tid, "task", long_name, "{}", "2026-08-06T09:00", "2026-08-06T09:00"),
+                (tid, "task", long_name, "{}", NOW_REF, NOW_REF),
             )
             # [M32 fix] task_states.created_at NOT NULL 必填 (schema.sql H-1).
             c.execute(
                 "INSERT OR IGNORE INTO task_states (task_id, state, valid_from, valid_until, reason, evidence_chunk_id, created_at) VALUES (?, ?, ?, NULL, ?, NULL, ?)",
-                (tid, "open", "2026-08-06T09:00", "task_create", "2026-08-06T09:00"),
+                (tid, "open", NOW_REF, "task_create", NOW_REF),
             )
         c.commit()
 
         # 跑 list_active_tasks_and_loops + render_digest_block4
-        active = task_states.list_active_tasks_and_loops(c, now="2026-08-06T15:00")
+        active = task_states.list_active_tasks_and_loops(c, now=NOW_REF)
         text_lines, refs = task_states.render_digest_block4(active)
         # render_digest_block4 返回 list[str] — 拼成 string 测长度
         text_block = "\n".join(text_lines)

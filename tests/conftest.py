@@ -183,6 +183,13 @@ def _clean_test_data_session():
         yield
         return
     try:
+        # [8/9 P1 follow-up] 先清 task_states 防 FK 约束 (task_states.evidence_chunk_id
+        # → chunks.id). 之前顺序 chunks → entities → relations 在 e2e test 留下
+        # task_states → chunk 时, DELETE chunks 抛 IntegrityError.
+        mem._conn.execute(
+            "DELETE FROM task_states WHERE task_id LIKE 'task:%' "
+            "OR task_id LIKE 'loop:%'"
+        )
         # 清 vectors (按 rowid, 避免漏 vec0 rowid)
         rows = mem._conn.execute(
             "SELECT rowid FROM chunks WHERE source LIKE '%test%' OR source LIKE '%audit%'"

@@ -1,5 +1,226 @@
 # Changelog
 
+## v1.2.0 — 2026-08-11
+
+feat(memory): add scoping IDs (agent_id / user_id / run_id) — Mem0-style multi-tenant recall
+
+**Why**: Inspired by `docs/research/mem0-comparison.md` (8d96ad3) P0
+recommendation. mnelo's recall layer previously had no tenant/agent
+isolation — one MCP server instance wrote all chunks into one SQLite
+file, so a `memory_recall` query could not distinguish which agent
+wrote which chunk. Mem0's scoping IDs solve this with per-write
+filter fields; we adopt the same shape.
+
+**What changes**:
+
+- `mcp_server.py TOOLS` schema — `memory_remember` gains three optional
+  fields (`agent_id`, `user_id`, `run_id`). `memory_recall` filters
+  description documents the new `agent_id` key.
+- `Memory.remember()` — three optional kwargs merge into
+  `chunks.metadata_json` alongside the existing `tags` key. None = not
+  specified, not written (backward compat). Empty string = explicit
+  "no scoping", preserved (callers can use this to assert scoping was
+  considered and chosen empty).
+- Three independent recall lanes filter by `agent_id`:
+  - `_vector_recall_with_conn` — pulls `metadata_json` into the per-hit
+    SELECT, parses it in Python, compares `agent_id` key.
+  - `_meta_recall_with_conn` + sequential `_meta_recall` — SQL
+    `json_extract(metadata_json, '$.agent_id') = ?`. Same three-valued
+    logic protects legacy data (NULL → filter mismatch → row excluded
+    from the match — i.e. legacy chunks never silently appear as a
+    match for an `agent_id` filter).
+  - `_entity_recall_with_conn` + sequential `_entity_recall` (two
+    stages) — LEFT JOIN `relations` + `chunks` to fetch `metadata_json`,
+    Python-side post-filter. Entity → chunk linkage lives on
+    `relations.evidence_chunk_id` (3027), not on `entities` directly.
+- `_MISSING` sentinel distinguishes "filter key absent" (backward
+  compat — no filter applied) from "filter present and equal to None"
+  (filter applied, legacy kept).
+
+**Backwards compat (the load-bearing property)**:
+- Existing callers that do not pass `agent_id`/`user_id`/`run_id` get
+  no change. Old metadata_json shape `{"tags": [...]}` is preserved.
+- Existing callers that recall without `filters.agent_id` see no
+  change — the filter simply doesn't fire.
+- Existing chunks with NULL or `{}` metadata_json are filtered out by
+  SQL `= ?` when an `agent_id` filter is applied (they never match
+  the filter, so they are excluded from results, not silently
+  returned). When no `agent_id` filter is passed, legacy chunks still
+  appear normally.
+
+**Tests** (`tests/test_scoping_ids_p0_2026_08_11.py`, 17 tests):
+- 5 write-side: all three fields written, partial writes, no-write
+  backward compat, explicit `None`, empty-string preserved.
+- 11 recall-side: rrf / vector_only / meta_only / entity_only all
+  filter consistently; no-filter case preserves backward compat;
+  filter-without-agent-id case preserves other filters; legacy data
+  excluded from match (correct behavior, documented in test docstrings);
+  special chars in agent_id (dash, underscore) handled.
+- 3 schema/dispatcher: `TOOLS` schema has the three fields, recall
+  filters schema description mentions `agent_id`, `_handle_simple`
+  dispatcher exercises the end-to-end path via a fresh `Memory`
+  instance (8/6 mcp-server-testing skill singleton pitfall pattern).
+
+**TDD Red-Green bidirectional check (T5 sabotage)**:
+Removed `_meta_recall_with_conn` agent_id filter temporarily; the
+three affected tests (`test_rrf_strategy_filters_by_agent_id`,
+`test_old_data_without_agent_id_filtered_when_filtering_alpha`,
+`test_memory_recall_dispatcher_accepts_agent_id_filter`) failed as
+expected. Restored the filter; all 17 pass. Sabotage confirmed tests
+bite the regression, not just decoration.
+
+**Coverage** (core logic, P0-only test set): 100% of newly added lines
+executed — `meta_dict` construction, the `for k, v` None-check loop,
+all three SQL `json_extract` filter branches, all three Python-side
+post-filter loops. Overall file coverage remains the pre-existing
+baseline (P0 test set does not exercise unrelated code paths).
+
+**Regression audit**:
+- pristine baseline (8d96ad3, before this PR) — `scripts/ci_per_file_runner.py`
+  reported 12 `pytest exit 1` files + 10 native crashes (`SIGSEGV`,
+  pre-existing on macOS arm64 + missing `mcp` SDK in test venv).
+- baseline with P0 — same runner reports 25 `pytest exit 1` files +
+  10 native crashes. All 13 newly-listed files pass when invoked
+  individually (`pytest tests/test_X.py` clean). The diff is
+  `ci_per_file_runner` test-order isolation, not a P0 regression.
+  Manual spot-check of the 13 files: each one passes solo with this
+  PR applied.
+- 17 new P0 tests — all green.
+
+**Docs**: none. The CHANGELOG entry + the inline code comments +
+the test docstrings are the documentation. Future task: add a
+section to `docs/DESIGN.md` describing the JSON-K-V `metadata_json`
+extension contract (P3 follow-up, not in P0 scope).
+
+## v1.1.2 — 2026-08-11
+
+feat(benchmarks): 迁移 latency benchmark 为可复跑 `python -m benchmarks` 子包
+
+**Why**: docs/research/mem0-comparison.md 借鉴 #6 (P3 落地) — mem0 有开源
+memory-benchmarks 框架, 任何人可复跑; mnelo 此前 BENCHMARKS.md 只有静态
+数字, 不是 harness. 建 `benchmarks/` 子包让 README 引用的延迟数字可一键复现.
+
+**What changes**:
+- 新增 `benchmarks/` 子包: `__init__.py` (harness 描述), `__main__.py`
+  (CLI 分发), `latency.py` (原 `scripts/benchmark.py` 核心迁移).
+- `scripts/benchmark.py` 降级为薄包装, 旧入口参数完全兼容.
+- CLI 入口: `python -m benchmarks latency --chunks N --queries N --top-k K --json PATH`.
+- `docs/BENCHMARKS.md` + README(EN/ZH) 复现命令更新为新入口.
+- tests: percentile/BENCHMARK_QUERIES 改从 `benchmarks.latency` 导入;
+  新增模块入口测试 (`python -m benchmarks` usage / `latency --help`).
+
+**Reproduce**: `python -m benchmarks latency --chunks 10000 --queries 100 --json bench.json`
+
+## v1.1.1 — 2026-08-10
+
+fix(memory): drop `_NAMELESS_KINDS` from namespace guard, align with §3.0.3 open taxonomy
+
+**Why**: The 8/8 P1 namespace guard (`_enforce_entity_namespace_guard`,
+commit `c8abae2`) added a `_NAMELESS_KINDS` whitelist requiring nameless
+ids (no `:` prefix, no `master_` prefix) to pair with one of {person,
+provider, event, task, setup, system, host, position_snapshot, concept,
+canonical_fact}. This violated DESIGN §3.0.3 (kind × memory_type 双谱系
+正交) and AGENTS.md "open taxonomy — no registration needed" — users
+could not introduce new kinds (e.g. `lesson`, `product`, `recipe`)
+without modifying core code.
+
+**What changes**:
+- `memory._enforce_entity_namespace_guard` no longer checks `kind` against
+  a whitelist. Any `kind` is accepted on any id that passes the namespace
+  blacklist + `_MAX_CONCEPT_NAME_LEN=50` check.
+- Blacklist (`anno:*`, `TOKEN_*`) and concept-name-length limits stay in
+  place — the original 8/8 P1 defense against HonchoImporter residue and
+  sentence-as-name is preserved.
+- `validation.py:147-152` still enforces `kind` ≤ 64 chars + non-empty +
+  safe characters — that L1 layer is unrelated to this change.
+
+**Docs**:
+- `DESIGN.md` §3.0.3.5 (new): formal spec of the namespace guard, its
+  blacklist, and the open-taxonomy rationale.
+- `AGENTS.md` "Adding a new entity kind" + new sub-section "Kind is open,
+  but entity `id` is namespace-gated (8/8 P1)": working guidance for
+  choosing id shapes (`stock:`, `master_`, `anno:` blacklist, anything
+  else with any kind).
+
+**Tests** (`tests/test_namespace_guard_p1_2026_08_08.py`,
+`tests/test_remember_rollback_p1_2026_08_08.py`):
+- `test_nameless_id_with_any_kind_allowed` — replaces the old
+  `test_nameless_id_with_unknown_kind_rejected` (the rejected behavior
+  was the bug).
+- `test_kind_length_limit_enforced` — regression guard that L1 length
+  limit still applies.
+- `test_kind_short_value_allowed_post_a1` — covers the original report
+  path (`kind=lesson` + nameless id).
+- `test_unknown_kind_now_allowed_open_taxonomy` — replaces
+  `test_unknown_kind_does_not_create_chunk` (was asserting the buggy
+  behavior).
+
+End-to-end live check (post-restart mcp_server pid 6757, curl direct):
+5/5 — `kind=lesson` passes; `anno:`, `TOKEN_*`, 65-char kind, 60-char
+concept name all still rejected as expected.
+
+## v1.1.0 — 2026-08-10
+
+**Multi-Agent 共用版** — v1.0.0 (单机版 Task/Loop subsystem feature-complete) 之后, mnelo 跨过 single-agent → multi-agent 共用边界. 同一 DB 上多 agent 写不撞 (host namespace), 跨网络接入 (Tailscale CGNAT + streamable-http), 远程 client 封装, Linux systemd / Tailscale listen-mode 部署, 验证 / task / client / rate-limit 配置化. PR #6 + #7 跟进 fresh-DB CI stability + drop Python 3.9 (usearch>=2.26 wheels 限制).
+
+### Highlights
+
+- **Entity host namespace guard** — 多 agent 写同一 DB 用 `host:<agent>` 前缀隔离, 防跨 agent 撞 id. Stock / demo 实体强制走 host namespace.
+- **Tailscale CGNAT hosts accepted by mcp_server** — 跨网络多 agent 接入主路径. install.sh 增 listen-mode (loopback / 裸 IP / 公网三模式选择).
+- **`MneloRemoteClient` wrapper** — Hermes gateway 锁死 `source='hermes-gw'`, 默认 URL 走 Tailscale ts.net 域名.
+- **streamable-http transport (MCP 2025-03-26 spec)** — 取代 SSE 主路径, modern MCP client 兼容.
+- **Linux systemd 支持** — `install.sh` 自动 install, `mnelo` CLI wrapper + classify + L2 hygiene 脚本, `$10/年 VPS` 完整部署 story.
+- **Config 化** — rate-limit / validation / task / client 4 个 section 从硬编码提到 `config.toml`. Multi-agent 可调.
+
+### CI / Stability (PR #6 + #7)
+
+- **fresh-DB per-file CI runner** — usearch native crash 10 test file 归因清晰, 不再淹没真因. `MNELO_TEST_FRESH=1` 跳过 live-only tests (2 tests + 3 TestRecallScoreFieldAlias tests).
+- **manual e2e scripts** (`tests/test_forget_junk_undo_e2e.py`) — pytest exit 5 (no tests collected) 不再误报 fail.
+- **CI matrix** — Python 3.10 / 3.11 / 3.12 (drop 3.9, usearch>=2.26 wheels 限制).
+- **CI 全绿**: Lint ruff + Security bandit + Tests 3.10/3.11/3.12 + CI summary.
+
+### Docs
+
+- **README + README.zh.md**: new `## multi-agent via Tailscale` section — what
+  mnelo provides (host: namespace guard, CGNAT whitelist, MneloRemoteClient,
+  per-agent config) + minimal 5-min setup (server `bash scripts/install.sh`,
+  `tailscale ip -4`, share `~/.config/mnelo/auth_token`; client
+  `MNELO_MEMORY_URL` + `MNELO_AUTH_TOKEN` + `health_check.py`).
+
+### Schema
+
+- `task_states` / `state_transitions` 表 (M1 v0.2 schema bump) — Task/Loop state machine 持久化.
+- `audit_log` (H-1 审计 §3) — L2 autonomous 自主层审计.
+- `host:` namespace validation (memory._enforce_entity_namespace_guard) — multi-agent 写隔离.
+- `schema_version` → 1.1.
+
+### Tools (27 total)
+
+| Group | Tools |
+|---|---|
+| Memory core (19) | remember / recall / relate / update / forget / graph_query / list_entities / |
+|  | entity_resolve / search_relations / stats / get_digest / |
+|  | audit_list / audit_undo / maintenance (run_maintenance) |
+| Task/Loop (8) | task_create / task_transition / task_list / task_replay / |
+|  | loop_create / loop_update / loop_list / loop_tick |
+
+### Migration from v1.0.0
+
+- No data migration required. Existing single-agent v1.0.0 DBs work as-is in v1.1.0.
+- **New writes enforce `host:` namespace prefix** — v1.0.0 entities without prefix (e.g. `stock_001`) will trigger ValidationError on first remember() call in v1.1.0. Run the namespace migration script `scripts/migrate_stock_namespace_2026_08_09.py` to add `host:default` prefix in bulk before the first v1.1.0 remember().
+- `install.sh` now offers `listen mode` for multi-agent — re-run `bash scripts/install.sh` to enable (loopback / 裸 IP / Tailscale CGNAT 三模式).
+- Config additions: see `config.toml.example` for new `[rate_limit]`, `[validation]`, `[task]`, `[client]` sections.
+
+### Breaking changes
+
+- None. v1.1.0 is backwards-compatible with v1.0.0 single-agent deployments.
+
+### Contributors
+
+- chinesewebman (owner) — multi-agent architecture + review + releases
+- Hermes (agent) — CI stability (PR #6 + #7) + CHANGELOG
+- Yanru-cafe (PR #2) — PII audit_log UNIQUE collision + tool count docs consistency
+
 ## v0.5.12.1 — 2026-07-20
 
 fix: test_edge_cases.test_03_mcp_recall_full_path reads content[1] instead of [0]

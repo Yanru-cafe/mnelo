@@ -1,16 +1,18 @@
 # mnelo
 
 > **mnelo** = μνήμη + λόγος（希腊语：*记忆* + *理性*）。
-> 面向 AI Agent 的本地优先、单文件知识图谱记忆层——带**可选自主维护层**和**会话状态摘要**（Agent 开场自动注入）。
+> **面向 AI Agent 的本地优先知识图谱记忆层**——Mem0 收费的那些能力，
+> 一个 SQLite 文件搞定：4 路 RRF + L2 自主维护 + 双语分类器。
+> **usearch f16 让它跑在 10 美元/年 的 VPS 上。**
 
 | [English](README.md) | 简体中文 |
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-1.26-green)](https://modelcontextprotocol.io)
 [![Bilingual](https://img.shields.io/badge/i18n-EN%20%2B%20中文-blueviolet)](#-文档)
 [![Local-first](https://img.shields.io/badge/local--first-100%25-brightgreen)](#-设计原则)
-[![Latest release](https://img.shields.io/github/v/release/chinesewebman/mnelo)](https://github.com/chinesewebman/mnelo/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/cure4u/mnelo)](https://github.com/cure4u/mnelo/releases/latest)
 
 **你的 AI Agent 记忆所栖息的运行时。**
 
@@ -35,10 +37,19 @@
   内存 + 磁盘足够小，可跑 KVM1 1 GB / 25 GB SSD；一个盒子 = 完整记
   忆系统 + agent 中转
 
+## 环境要求
+
+- **Python 3.10+** — `usearch>=2.26`（向量搜索后端）只发布 Python 3.10+
+  的 wheel。Python 3.9 及更低版本**不受支持**。macOS（arm64/x86_64）、Linux、
+  Windows WSL2 均可。
+- ~200 MB 磁盘（embedder 模型缓存 `BAAI/bge-small-zh-v1.5`，首次运行下载）
+- 可选：`sqlite-vec` 提供 vec0 快速路径——运行时自动检测，不可用时自动
+  回落到 `usearch`
+
 ## 安装
 
 ```bash
-git clone https://github.com/chinesewebman/mnelo.git
+git clone https://github.com/cure4u/mnelo.git
 cd mnelo
 bash scripts/install.sh        # 一键：venv + pip + init_db + 服务守护
                                # (macOS launchd / Linux systemd) + 鉴权 token
@@ -64,6 +75,79 @@ python3 scripts/health_check.py
 非技术用户：把这一句话提示词交给任意 AI 编程 agent（Claude Code、
 Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 [docs/AGENTS.md](docs/AGENTS.md#one-line-install-prompt)。
+
+## 多 agent 通过 Tailscale 共用
+
+一个 mnelo 实例可以服务**跨多机的多个 AI agent**——你的 MacBook、
+$10/年的 VPS、Raspberry Pi、或者朋友的笔记本，只要在同一个
+Tailscale mesh 里，所有 agent 共享同一个 `memory.db` 且 id 互不撞。
+
+### mnelo 提供什么
+
+- **`host:` namespace 隔离** — 每个 agent 写入自己前缀下（`host:macbook`、
+  `host:vps-agent-1`…），写入永不撞 ID。同一 DB 不同视角，无需全局锁。
+- **Tailscale CGNAT host 白名单** — `mcp_server.py` 接受 Tailscale
+  `100.x.x.x` IP 作为合法 bind target，mesh peer 可以直接连入，不用
+  把服务暴露到公网。
+- **`MneloRemoteClient`** — 客户端封装（`api/mnelo_client.py`），锁定
+  `source='hermes-gw'`，gateway agent 的写入可被标记 + 查询。
+- **`install.sh --listen-mode`** — 安装时两个模式（仅交互式安装；
+  非交互式默认 loopback）：
+  - `loopback`（默认，单机）— `--host 127.0.0.1`，最安全。如果你在 admin
+    console 注册了 `*.ts.net` Service，Tailscale daemon 也会把 Service
+    流量 forward 到这里。
+  - `Tailscale mesh`（多 agent）— `--host 0.0.0.0`，接受 mesh peer 直接
+    IP 连接。host 白名单仍拒绝 LAN / 公网 / 非 CGNAT IP，所以开放度
+    等同于你的 Tailscale ACL 策略。
+  - 想要 Service vs 裸 IP 路由的精细决策，见
+    [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent-affects-mcp_server---host)。
+- **Per-agent 配置（`config.toml`）** — `[rate_limit]`、`[validation]`、
+  `[task]`、`[client]` 4 个 section 按部署可调，每台机器策略不同
+  不需要改代码。
+
+### 5 分钟最小部署
+
+**服务端**机器（拥有 `memory.db` 的那台）：
+
+```bash
+# 1. 安装（交互式；Tailscale mesh 模式答 "2"）
+bash scripts/install.sh
+
+# 2. 查你的 Tailscale IP
+tailscale ip -4                  # → 100.x.x.x
+
+# 3. 把 auth token 分享给客户端（在 ~/.config/mnelo/auth_token）
+cat ~/.config/mnelo/auth_token
+```
+
+每台**客户端**机器（MacBook、VPS、R Pi…）：
+
+```bash
+pip install -r requirements.txt
+
+# 4. 指向服务端（它的 Tailscale IP）
+export MNELO_MEMORY_URL="http://100.x.x.x:8086/mcp"
+
+# 5. 设 auth token（从服务端 step 3 复制）
+export MNELO_AUTH_TOKEN="<paste-from-server-step-3>"
+
+# 6. 验证连接（AGENTS §1.5 还有 tailscale ip -4 curl 测试）
+python3 scripts/health_check.py
+```
+
+就这些——不需要端口转发、不需要公网证书。Tailscale mesh 负责
+传输加密 + ACL；mnelo 负责 auth token + namespace 隔离。
+
+### 参考
+
+- 完整 listen-mode 决策树（什么时候用 `127.0.0.1` vs `0.0.0.0`、
+  Tailscale Service vs 裸 IP、已知防火墙坑、R Pi / VPS 客户端
+  接入）：见
+  [docs/AGENTS.md §1.5](docs/AGENTS.md#15-decide-the-listen-mode-single-machine-vs-multi-agent-affects-mcp_server---host)
+- 多 agent 远程 client 封装代码：见
+  [`api/mnelo_client.py`](api/mnelo_client.py)
+- 廉价 VPS 部署完整 story + auth token：见
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#vps-deployment-cheap-us-vps--10year-tier)
 
 ## 文档
 
@@ -101,7 +185,7 @@ Hermes、Cursor…），它会一次性装好并接入 mnelo——见
 7. **稳定可预期。** 无魔法。fail-fast 优于静默降级。显式 opt-in
    优于意外默认。
 8. **可复现。** [docs/BENCHMARKS.md](docs/BENCHMARKS.md) 所有数字
-   都可复现。
+   都可复现 — `python -m benchmarks latency` 一键重跑。
 
 ## 跑测试
 
