@@ -2157,28 +2157,43 @@ class MemoryCore:
         start_node = validate_id(start_node, "start_node")
         asof = asof or now()
         # BFS: 拿 max_hops 跳内的所有节点
+        # [audit fix 4.1 2026-08-16] batch IN(...) — 1 次 SQL 拿整 frontier 节点的边
+        # 原 N+1: 每 hop × 每 frontier node 1 次 SELECT. max_hops=3 × frontier=20 → 60 round-trip.
+        # 现在: 每 hop 1 次 SELECT (frontier IN (...)) → 3 round-trip 总数.
+        # Python-side BFS dedupe (跟原版同语义: other = NOT in frontier).
         visited = {start_node}
         frontier = [start_node]
         edges = []
+        seen_edge_keys = set()  # dedupe edges by (source_id, target_id, relation)
         for _hop in range(max_hops):
+            if not frontier:
+                break
+            placeholders = ",".join("?" * len(frontier))
+            sql = f"""
+                SELECT * FROM relations
+                WHERE (source_id IN ({placeholders}) OR target_id IN ({placeholders}))
+                  AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
+            """
+            params = [*frontier, *frontier, asof, asof]
+            if edge_types:
+                sql += f" AND relation IN ({','.join('?' * len(edge_types))})"
+                params.extend(edge_types)
+            rows = self._conn.execute(sql, params).fetchall()
             next_frontier = []
-            for node in frontier:
-                sql = """
-                    SELECT * FROM relations
-                    WHERE (source_id = ? OR target_id = ?)
-                      AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
-                """
-                params = [node, node, asof, asof]
-                if edge_types:
-                    sql += f" AND relation IN ({','.join('?' * len(edge_types))})"
-                    params.extend(edge_types)
-                rows = self._conn.execute(sql, params).fetchall()
-                for r in rows:
-                    edges.append(dict(r))
-                    other = r["target_id"] if r["source_id"] == node else r["source_id"]
-                    if other not in visited:
-                        visited.add(other)
-                        next_frontier.append(other)
+            frontier_set = set(frontier)
+            for r in rows:
+                src, tgt = r["source_id"], r["target_id"]
+                # Dedupe edges by (src, tgt, relation)
+                edge_key = (src, tgt, r["relation"])
+                if edge_key in seen_edge_keys:
+                    continue
+                seen_edge_keys.add(edge_key)
+                edges.append(dict(r))
+                # BFS dedupe: other = NOT in frontier (跟原版同语义)
+                other = tgt if src in frontier_set else src if tgt in frontier_set else None
+                if other is not None and other not in visited:
+                    visited.add(other)
+                    next_frontier.append(other)
             frontier = next_frontier
 
         # 拿节点详情
