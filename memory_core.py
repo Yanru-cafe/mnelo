@@ -1090,9 +1090,7 @@ class MemoryCore:
             try:
                 self._index.remove(target_id, conn=self._conn)
             except Exception as _e:  # noqa: BLE001
-                logger.warning(
-                    f"[forget P1 #84] zvec _index.remove({target_id}) fail: {_e}. 后台 lazy delete."
-                )
+                logger.warning(f"[forget P1 #84] zvec _index.remove({target_id}) fail: {_e}. 后台 lazy delete.")
 
         # [7/19 v0.5.3] metrics
         _metrics_registry().forget_total.inc(kind=target_kind or "unknown")
