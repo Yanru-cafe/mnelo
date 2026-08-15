@@ -348,9 +348,15 @@ def _txn(conn):
     提交, 留下 vec0 rowid 漂移的孤儿 chunk.
 
     行为契约:
-      - 进入: 显式 BEGIN
-      - 正常退出: COMMIT
-      - 异常: ROLLBACK + 重新 raise (不吞)
+      - 进入: 检测是否已在事务里. 是 → SAVEPOINT (嵌套); 否 → BEGIN
+      - 正常退出: 嵌套里 RELEASE SAVEPOINT, 顶层 COMMIT
+      - 异常: 嵌套里 ROLLBACK TO SAVEPOINT, 顶层 ROLLBACK + 重新 raise (不吞)
+
+    [8/15 E-B fix] 加嵌套支持 — forget() 在测试 tearDownClass / mcp_server 主流程
+    已开事务, relate() 调 _txn() 不能再 BEGIN. 用 SAVEPOINT 解决.
+
+    [8/15 E-B fix #2] sqlite3.Connection 不接受任意 attribute (C type built-in),
+    必用独立 dict 存嵌套深度 (`_txn_depth_by_id`). 不能用 conn._txn_depth.
 
     注意事项 (usearch/zvec 索引独立于 SQLite 事务):
       - index.add() 失败 → SQLite ROLLBACK → chunk 不入库, index 也未污染 ✓
@@ -359,17 +365,43 @@ def _txn(conn):
         reverse index.remove. 这条留给 v0.16+ 处理 (主人确认当前
         threshold 接受).
     """
-    conn.execute("BEGIN")
+    # [8/15 E-B fix] sqlite3.Connection 不支持任意 attribute (C type), 用 id(conn) dict
+    conn_id = id(conn)
+    nested = False
+    savepoint_name = None
+    if hasattr(conn, "in_transaction") and conn.in_transaction:
+        nested = True
+        depth = _txn_depth_by_id.setdefault(conn_id, 0)
+        savepoint_name = f"sp_{depth}"
+        _txn_depth_by_id[conn_id] = depth + 1
+        conn.execute(f"SAVEPOINT {savepoint_name}")
+    else:
+        conn.execute("BEGIN")
+
     try:
         yield conn
     except BaseException:
         try:
-            conn.execute("ROLLBACK")
+            if nested:
+                conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            else:
+                conn.execute("ROLLBACK")
         except Exception as rb_err:  # noqa: BLE001
             logging.getLogger("mnelo").warning(f"[txn] ROLLBACK failed: {rb_err}")
         raise
     else:
-        conn.execute("COMMIT")
+        try:
+            if nested:
+                conn.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            else:
+                conn.execute("COMMIT")
+        finally:
+            if nested:
+                _txn_depth_by_id[conn_id] = max(0, _txn_depth_by_id[conn_id] - 1)
+
+
+# [8/15 E-B fix] module-level dict 存嵌套深度 (sqlite3.Connection 不接受 attr)
+_txn_depth_by_id: Dict[int, int] = {}
 
 
 # [8/8 P1] Entity namespace guard.
