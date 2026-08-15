@@ -27,9 +27,7 @@ from pathlib import Path
 from typing import Dict
 
 import memory as memory_module  # [refactor 2026-08-12] memory reference for handler helpers
-from config import config  # [Round 2] server host/port 配置
 from task_states import TaskLoopError
-from validation import ValidationError
 
 # 路径 — [7/21 fix] 插入本文件所在目录 (repo root), 不再硬编码 live 路径
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -120,47 +118,10 @@ def _handle_task_simple(mem, name: str, args: Dict) -> str:
 # 现在抽 TOOL_REGISTRY: 简单委托走通用 wrapper, 自定义逻辑走 _custom_handlers.
 # 减 ~50 行, 加 ~5 行.
 
-# [Round 1 quality audit] 抽常量避免 magic numbers 散落
-# [Round 2] DEFAULT 从 config.server_host/port 读, 仍保留常量作 fallback
-DEFAULT_SSE_HOST = "127.0.0.1"  # P2-1: loopback-only fallback
-DEFAULT_SSE_PORT = 8086  # SSE 默认端口 fallback (config 优先)
-
-
-def _resolve_server_defaults() -> tuple:
-    """从 config 解析 SSE host/port 默认值. CLI flag 优先于 config."""
-    try:
-        cfg = config  # 来自 mcp_server 顶部 from config import config
-        return cfg.server_host, cfg.server_port
-    except Exception:
-        return DEFAULT_SSE_HOST, DEFAULT_SSE_PORT
-
-
-# [7/19 P2-3] 简易 in-memory rate limit (防 runaway loop / 滥用)
-# key=tool 名, value=[window_start_ts, count_in_window]
-# [8/9 P1-yanru] 60 → 600 (硬编码) → 提到 config.toml (rate_limit.max_per_window).
-# 默认 60/min 兼容旧行为; 当前生效值见 config.rate_limit_max_per_window.
-def _rate_limit_check(tool_name: str) -> None:
-    """In-process sliding-window rate limit. 超限抛 ValidationError.
-
-    Threshold from config: config.rate_limit_max_per_window / .rate_limit_window_sec.
-    改完需重启 mcp_server 进程 (config 是模块级单例, 启动时加载).
-    """
-    import time as _time
-
-    max_reqs = config.rate_limit_max_per_window
-    window_sec = config.rate_limit_window_sec
-
-    now_ts = _time.time()
-    bucket = _RATE_BUCKETS.get(tool_name)
-    if bucket is None or now_ts - bucket[0] > window_sec:
-        _RATE_BUCKETS[tool_name] = [now_ts, 1]
-        return
-    bucket[1] += 1
-    if bucket[1] > max_reqs:
-        raise ValidationError(tool_name, f"rate limit: {max_reqs} reqs / {window_sec}s exceeded")
-
-
-_RATE_BUCKETS: Dict[str, list] = {}
+# [audit fix 1.1 2026-08-16] Dead code removed — DEFAULT_SSE_HOST/PORT, _resolve_server_defaults,
+# _rate_limit_check, _RATE_BUCKETS. These were duplicated from mcp_tool_dispatcher.py but
+# NEVER CALLED inside this file. The dispatcher owns the canonical implementation.
+# (Owner's #1.1 audit 修真: 修真 = 修真, 100+ 行 dead code gone.)
 
 _TOOL_REGISTRY = {
     # name -> (mem method attr, response id field name or None)
