@@ -66,8 +66,9 @@ def test_p92_list_entities_returns_filtered(mem):
     mem._conn.commit()
 
     # call via Memory.list_entities (not raw SQL)
-    results = mem.list_entities(kind="stock")
-    assert isinstance(results, list), f"list_entities 应返 list·实际 {type(results)}"
+    result_dict = mem.list_entities(kind="stock")
+    assert isinstance(result_dict, dict) and "entities" in result_dict, f"list_entities 应返 dict 包含 entities·实际 {type(result_dict)}"
+    results = result_dict["entities"]
     assert len(results) == 2, f"过滤 stock 应返 2 个·实际 {len(results)}"
 
 
@@ -83,7 +84,7 @@ def test_p92_list_entities_pagination(mem):
     mem._conn.commit()
 
     # limit=2 · offset=1 · 应返 2 个
-    page = mem.list_entities(kind="stock", limit=2, offset=1)
+    page = mem.list_entities(kind="stock", limit=2, offset=1).get("entities", [])
     assert len(page) == 2, f"应返 2 个·实际 {len(page)}"
 
 
@@ -96,7 +97,8 @@ def test_p92_list_entities_limit_cap(mem):
         ("stock:cap_test", "stock", "cap", 0.5, _now()),
     )
     mem._conn.commit()
-    results = mem.list_entities(kind="stock", limit=99999)
+    result_dict = mem.list_entities(kind="stock", limit=99999)
+    results = result_dict["entities"]
     assert len(results) == 1, f"应返 1 (只 1 entity)·实际 {len(results)}"
 
 
@@ -109,7 +111,7 @@ def test_p92_list_entities_filters_soft_deleted(mem):
         ("stock:soft_del", "stock", "soft", 0.5, _now(), _now()),
     )
     mem._conn.commit()
-    results = mem.list_entities(kind="stock", limit=100)
+    results = mem.list_entities(kind="stock", limit=100).get("entities", [])
     ids = [r["id"] for r in results]
     assert "stock:soft_del" not in ids, f"soft delete 不应被返回·实际 {ids}"
 
@@ -131,8 +133,9 @@ def test_p92_search_relations_by_type(mem):
     )
     mem._conn.commit()
 
-    results = mem.search_relations(relation="owns")
-    assert isinstance(results, list), f"search_relations 应返 list·实际 {type(results)}"
+    result_dict = mem.search_relations(relation="owns")
+    assert isinstance(result_dict, dict) and "relations" in result_dict, f"search_relations 应返 dict 包含 relations·实际 {type(result_dict)}"
+    results = result_dict["relations"]
     assert len(results) == 1, f"过滥 owns 应返 1·实际 {len(results)}"
     assert results[0]["relation"] == "owns", f"关系类型错·实际 {results[0]['relation']}"
 
@@ -148,7 +151,7 @@ def test_p92_search_relations_pagination_limit_cap(mem):
         )
     mem._conn.commit()
 
-    page = mem.search_relations(relation="owns", limit=2, offset=1)
+    page = mem.search_relations(relation="owns", limit=2, offset=1).get("relations", [])
     assert len(page) == 2, f"应返 2 个·实际 {len(page)}"
 
 
@@ -161,7 +164,7 @@ def test_p92_search_relations_filters_soft_deleted(mem):
         ("stock:r_soft", "identity:agent:soft", "owns", 0.5, _now(), _now()),
     )
     mem._conn.commit()
-    results = mem.search_relations(relation="owns")
+    results = mem.search_relations(relation="owns").get("relations", [])
     assert len(results) == 0, f"soft delete relation 不应返·实际 {len(results)}"
 
 

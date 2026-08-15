@@ -955,8 +955,7 @@ class MemoryCore:
 
         rows = self._conn.execute(sql, params).fetchall()
         # 不走 _hit_dict (entity 走中 metadata · _hit_dict 是 chunks recall 用的)。
-        # 直接返回 entity dict (包含 id/kind/name/summary/importance · 不包含 timestamp 等)
-        return [
+        entities = [
             {
                 "id": r[0],
                 "kind": r[1],
@@ -966,6 +965,8 @@ class MemoryCore:
             }
             for r in rows
         ]
+        # [8/16 P1 #93 fix] 吞后向兼容 test_dead_code_round13 · 原 _handle_list_entities 返 {"entities": [...], "count": N}
+        return {"entities": entities, "count": len(entities)}
 
     # [§1.2 #5 P1 #92.5 fix] search_relations 上限 100 (同 list_entities)
     _SEARCH_RELATIONS_LIMIT_MAX = 100
@@ -1009,7 +1010,7 @@ class MemoryCore:
         params.extend([limit, offset])
 
         rows = self._conn.execute(sql, params).fetchall()
-        return [
+        relations = [
             {
                 "id": r[0],
                 "source_id": r[1],
@@ -1021,6 +1022,8 @@ class MemoryCore:
             }
             for r in rows
         ]
+        # [8/16 P1 #93 fix] 吞后向兼容 test_dead_code_round13 · 原 _handle_search_relations 返 {"relations": [...], "count": N}
+        return {"relations": relations, "count": len(relations)}
 
     def update(
         self,
