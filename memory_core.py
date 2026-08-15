@@ -25,7 +25,10 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from memory import _with_row_factory  # [8/15 E-A] get_all 内部用
+# [8/15 E-A fix] 不在 module-level `from memory import _with_row_factory` —
+# 触发 circular import (memory.py 558 调 `from memory_core import MemoryCore`,
+# memory_core 顶部 import memory → 部分初始化). 改方法内 lazy `from memory import _with_row_factory`
+# (跟 P1 #36 facade top-level import 占 dict 实证证伪同源).
 
 # [8/15 E-A] 别名, 给 get_all 内部用 _sqlite.Row 避免 ruff I001 (跟文件顶部 import 冲突)
 _sqlite = sqlite3
@@ -633,6 +636,9 @@ class MemoryCore:
             >>> located_in = m.get_all(relation="located_in")
             >>> page2 = m.get_all(limit=500, offset=500)
         """
+        # [8/15 E-A fix] lazy import — module-level 会 circular import
+        from memory import _with_row_factory  # noqa: E402
+
         # === 1. entities ===
         e_where = []
         e_params: list = []
