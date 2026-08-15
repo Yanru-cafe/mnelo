@@ -1,5 +1,87 @@
 # Changelog
 
+## v1.4.0 — 2026-08-15
+
+feat(memory): memory_remember 新增 auto_relate 参数 — @entity_id / #tag mention 解析 + 自动 relation
+
+**Why**: 8/15 主人拍板的第三个改进 (E-C.2). A1.14 实战发现 graph 7d
+召回率仅 1% — 主要原因: 主人从不主动调 `memory_relate`, 图谱建立薄弱.
+规则化 mention 解析解决这个问题: 主人在 chunk 里写 `@entity_id` / `#tag`,
+mnelo 自动扫描并创建 chunk -[entity_relation]-> entity / chunk -[tag_relation]-> tag relations.
+
+**What**:
+
+- **`memory_remember(content, auto_relate=False, entity_relation="mentions", tag_relation="tagged", dedup_check=False)`**
+  (commit 6ca4f46, +176 / -3). 4 个新参数:
+  - `auto_relate=False` (默认) → 行为不变, backward-compat
+  - `auto_relate=True` 后 扫 content 里 `@entity_id` (e.g. `@company:tb_tech`) 和
+    `#tag` (e.g. `#strategy`) explicit mention, 自动创建 / lookup relations
+  - `entity_relation` / `tag_relation` 可自定义 (default `mentions` / `tagged`)
+  - `dedup_check=True` (auto_relate 默认 True) 同 (chunk_id, target_id, relation)
+    不创建重复行
+
+- **mention 解析规则** (memory.py:_extract_mentions):
+  - `_MENTION_ENTITY_RE = r"@((?:[a-zA-Z]+:[\w:.\-]+)|master_[\w]+)"` (re.UNICODE)
+  - `_MENTION_TAG_RE = r"#([\w\-]{1,50})"` (re.UNICODE, 1-50 chars)
+  - \w 含中文 (主人 zvec 默认 bge-small-zh-v1.5)
+  - module-level 定义 (纯 re 模块, P1 #63 不触发 circular import)
+
+- **规则化跳过 log** (skip + log warning, 不中断):
+  - @entity_id 不存在 entities 表 → skip
+  - @entity_id validate_id 失败 → skip
+  - tag entity 重复 → 复用 (dedup)
+
+- **编入位置**: 在 `remember()` 的 `_txn()` 块内 (P1 #62 嵌套 SAVEPOINT),
+  跟 chunk INSERT + entities upsert + relations 同一事务提交 — 部分失败 →
+  ROLLBACK → 数据一致.
+
+**主人 6/29 不抢决策原则 + Mem0 借鉴决策 4 分类框架** (P1 #58):
+- ❌ **数据建立借鉴** (Mem0 `add()` LLM auto-extract) — 主人 6/29 不抢决策
+- ✅ **规则化借鉴** (Mem0 规则化解析 explicit mention) — 不调 LLM,
+  主人保持决策权
+
+**测试 12/12** (TDD red 12 ❌ → green 12 ✅):
+
+- test_mention_extraction_regex
+- test_no_autorelate_default_unchanged (backward-compat)
+- test_autorelate_no_mention_unchanged (无 mention 无 relation)
+- test_autorelate_one_entity_mention (1 chunk + 1 relation)
+- test_autorelate_multiple_entity_mentions (2 entity + 2 relation)
+- test_autorelate_tag_mention (1 tag entity + 1 relation)
+- test_autorelate_mixed_entity_and_tag (混搭)
+- test_autorelate_undeclared_entity_skipped (skip + warn)
+- test_autorelate_tag_dedup (同 tag 复用)
+- test_autorelate_custom_relation (参数定制 relation kind)
+- test_autorelate_invalid_mention_skipped (validate_id 失败 skip)
+- test_autorelate_with_dedup_check (E-B + E-C.2 联动)
+
+**实战教训** (P1 #51 + #63 + #65 同源):
+- P1 #63 module-level pure re 不触发 circular import (P1 #63 实证)
+- P1 #65 mcp_tool_definitions.py per-file-ignores 加 E501 (description 中文 + URL 超 200 字符)
+  · F821 JSON 字面量 误报 (E-A + E-B) · E501 长行 误报 (E-C.2)
+
+**DESIGN.md §6.9 final gate** (+204 行): 背景 + 借鉴决策 4 分类框架 + 规则化 vs LLM
+抽取对比表 + mention 解析正则 + `remember()` auto_relate 行为契约 + `_txn` 块内布局示例
++ 实战教训 + P1 #65 实战. 7 个子节.
+
+**如何升级**:
+
+```bash
+git pull
+pip install -e .  # 如果是 editable install
+# mcp_server 重启 (launchctl 自动 KeepAlive):
+launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
+# 验证新参数生效:
+curl /mcp memory_remember '{"content": "buy @company:tb_tech #strategy", "auto_relate": true}'
+# 期待: relations 表多 1 行 — chunk -[mentions]-> company:tb_tech + chunk -[tagged]-> tag:strategy
+```
+
+**关键 reflect (P1 #51 实战扩展)**: 8/5 review iron law "tests-green ≠ sufficient"
+→ v0.15.2 实战扩展: **TDD 的 red test 不一定是真 bug** — 11/12 pass, 1 fail 是测试 assertion
+错误 (assert n == 1 期望 dedup between → 实际 2 chunk 各自 mention). 修测试预期（不是改实现）—
+跟 P1 #45 numpy percentile 实战同源.
+
+
 ## v1.3.0 — 2026-08-15
 
 feat(memory): 2 new MCP tools + 3 P1 fix chain (Mem0 借鉴实战 闭环)

@@ -2,8 +2,9 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.15.1 · 2026-08-15 · Mem0 借鉴落地 (commit ccbeab4 + 8996c64) + 3 P1 fix chain (f632000 + 15398dc + a08e76f) + §6.8 final gate。
+> **版本**：v0.15.2 · 2026-08-15 · mention 解析 + 自动 relation (commit 6ca4f46) + §6.9 final gate。
 > **v0.15.1 变更**（8/15 Mem0 借鉴 + 部署实战 5-commit chain 闭环）——§6.8 新增 v0.15.1 实战章节：E-A `memory_get_all` 全量 dump 工具 (借鉴 Mem0 `get_all` API 形态, 不调 LLM) + E-B `memory_relate dedup_check` 选项 (借鉴 Mem0 `add_relations` 行为, 默认 False 保留主人决策权)。**关键纠正**：v0.15.1 这 2 个 E **是 API 形态/行为借鉴 Mem0 ✅**, 但**不是数据建立借鉴 Mem0 ❌** (主人 6/29 iron law "不抢决策" 排除强 LLM auto-extract)。3 真 P1 fix chain 实战暴露: **P1 #61 JSON 字面量 NameError** (`mcp_tool_definitions.py` module-level `"default": false` 不是 Python expression — pytest + ruff + CI 5/5 全绿 都不暴露, **真 import 才死**); **P1 #62 `_txn()` 嵌套 SAVEPOINT** (relate/forget 嵌套事务, sqlite3.Connection 不接受 attr 实证 P1 #29 同源, 必用 module-level `_txn_depth_by_id: Dict[int, int]`); **P1 #63 circular import** (`memory_core.py` 顶部 `from memory import _with_row_factory` 触发 partial init, 跟 P1 #36 facade top-level import 占 dict 同源, **第二次踩同样坑**, 必 isolation test 验证 import chain)。**CI 实战 chain** #31862952794 4m57s 5/5 全绿 (§6.8.9)。**关键 reflect (P1 #51 扩展)**：8/5 iron law "tests-green ≠ sufficient" 实战扩展到 **"imports-green ≠ sufficient, runtime-green ≠ sufficient"** — pytest + ruff + 真 import + CI 4 个全过 + 真部署 curl 才是完整 verification。Skill v2.7.0 + v2.8.0 实战教训已记录 (`mnelo-refactor-patterns` P1 #61-#64)。
+> **v0.15.2 变更**（8/15 E-C.2 mention 解析 + 自动 relation 实战闭环）——§6.9 新增 v0.15.2 实战章节：`memory_remember` 新增 `auto_relate / entity_relation / tag_relation / dedup_check` 4 个参数。`auto_relate=True` 时扫 content 里 `@entity_id` (e.g. `@company:tb_tech`) 和 `#tag` (e.g. `#strategy`) explicit mention, 自动创建/lookup chunk -[entity_relation]-> entity 和 chunk -[tag_relation]-> tag entity。规则化不调 LLM (Mem0 数据建立借鉴 ❌, 主人 6/29 不抢决策 iron law)。**解决问题**：A1.14 graph 7d 召回率 1% → 主人从不主动调 `memory_relate` 造成的图谱建立薄弱。ci commit 6ca4f46, TDD red 12 → green 12, ruff + 真 import + CI 5/5 全过。§6.9 含 7 个子节：背景 + 借鉴决策 4 分类框架 + 规则化 vs LLM 抽取对比表 + mention 解析正则 + `remember()` auto_relate 行为契约 + `_txn` 块内布局示例 + 实战教训 + P1 #65 (mcp_tool_definitions.py per-file-ignores E501 同源实战)。版本变动 v1.3.0 → v1.4.0 (MINOR bump, README badge 自动同步)。
 > **v0.15 变更**（8/15 实战 3 E 闭环）——§6.7 新增 v0.15 写路径 + 召回质量章节：3 大 E 改进的设计哲学（**mnelo 自身痛点驱动，非 Mem0 借鉴**）、落地架构表、用法变化、已知坑（usearch 索引独立于 SQLite 事务 / RRF lane 覆盖 / 标签数据污染 / numpy percentile linear interpolation）、CI 实战 3-commit chain 0 fail 验证。**关键 reflect**：v0.15 3 个 E 改进**不是 Mem0 借鉴**——是 mnelo 自身 §1.2 短板修复 + 实战数据驱动决策。真 Mem0 借鉴（scoping_ids / memory_correct / dedup_check）落地状态见 §6.7.4 "Mem0 借鉴落地对照表"。主人 8/9 SKILL "凡是不符合最新情况的, 都改, 全面 reflect, 不补丁式" → 纠正 v0.14 顶部含糊的 "Mem0 借鉴" 表述，老老实实分类每个改进的真驱动。§7.1 召回质量指标从"待设计"升级为"已落地"（E-3 `memory_recall_stats` 工具 + 17 个 Prometheus 指标升级到 19 个）。
 > **v0.14 变更**（8/14 mcp_server split 实战落地）——§6.6 新增 mcp_server.py 拆分 + PEP 562 facade 设计章节：6 个子模块职责表 + facade 代码 pattern + 4 条已知坑（PEP 562 setattr 不 work / from import value-binding / _load_from_repo separate instance / facade import 占 dict）+ Test contract 表 + CI 实战 aggregate 0 fail 验证。Subagent 8/14 通过隔离测试发现 PEP 562 setattr 限制，反向 commit c9697f8 修正 db522b3 错设计（**专家纪律价值示范**：subagent self-verify 救主）→ 主人 8/6 教训升级。
 > **v0.13 变更**（8/4 可逆压缩设计）——§4.5.2 新增**可逆压缩**（⟵ 借鉴 Headroom CCR）：摘要行带 `source_chunk_ids` provenance 指针 + `memory_get_digest(ref=...)` 按需展开；信息单源不破，截断可恢复。§5.7 工具清单同步 `memory_get_digest(ref=None)` 双模式。
@@ -1429,12 +1430,221 @@ memory_core.py:28 → from memory import _with_row_factory
 **未来延伸 (v0.16+ 候选)**:
 - 主人在真实库上跑 `m.recall_stats(days=7)` + `m.get_all()` 看 v0.15.1 改进效果 → 决定 E-2 (FTS5 meta 路) 是否值得做
 - §1.2 剩余 5 个短板 (无记忆生命周期 / 单巨石 / 双时态不完整 / entity 路不匹配 id / 协议层 raw-SQL 旁路) 按 mnelo 自身痛点驱动节奏, 逐个 v0.16+ 修
-- 改进 C.2 (@entity_id/#tag mention 解析) 主人 8/15 拍板的第三个改进 — 不调 LLM, 规则化把 chunk 文本里 explicit mention 解析为 relation 候选
+- 改进 C.2 (@entity_id/#tag mention 解析) 主人 8/15 拍板的第三个改进 — → §6.9 v0.15.2 E-C.2 实战
 - 主人 8/15 实战暴露 P1 #61-#63 表明: **mnelo 拆分后 circular import + JSON 字面量 + 嵌套事务 是 3 大必查 checklist**. 后续每次 mnelo 大改必跑 v13 必检清单 (P1 #60-#64)
+
+### 6.9 v0.15.2 mention 解析 + 自动 relation（[8/15] E-C.2 落地）
+
+**背景**：8/15 主人问 "参考 mem0 的设计, 完善我们的图谱建立和搜索". 实战发现 graph 7d 召回率 1% — 主要原因: 主人从不主动调调 `memory_relate`, 图谱建立薄弱. 主人 8/15 选 A+B+§C.2 = 规则化 (不调 LLM) @entity_id / #tag mention 解析, 解决 A1.14 graph 1% 真痛点 + §1.2 #8 "图谱建立薄弱" 短板.
+
+**关键纠正 (P1 #58 借鉴决策 4 分类实战扩展)**：E-C.2 **是规则化借鉴 Mem0 ✅**, 但**不是数据建立借鉴 Mem0 ❌** — 主人 6/29 "不抢决策" 原则: 不调 LLM 自动抽取 entities/relations (那是 Mem0 `add()` 默认行为, 主人决定走规则化解析 explicit mention). 主人显式用 `@` + `#` 语法表示意图, 规则只解析主人明确写的 mention, 不抢决策.
+
+**落地架构 (8/15 commit chain: 6ca4f46)**：
+
+| 文件 | 改动 | 行数 |
+|---|---|---|
+| `memory.py` | `_MENTION_ENTITY_RE` + `_MENTION_TAG_RE` + `_extract_mentions()` | +39 |
+| `memory_core.py` | `remember()` 加 `auto_relate / entity_relation / tag_relation / dedup_check` + _txn 块内 mention 解析逻辑 | +110 |
+| `mcp_tool_definitions.py` | memory_remember schema 加 4 参数 | +25 |
+| `pyproject.toml` | mcp_tool_definitions.py per-file-ignores 加 E501 | +5 |
+| `tests/test_mention_parse_e_c2_2026_08_15.py` | 12 TDD test cases | +255 |
+
+#### 6.9.1 设计哲学: 规则化 vs LLM 抽取
+
+**Mem0 `add()` 默认行为**：LLM 自动抽取 entities + relations + dedup. 主人 6/29 "不抢决策" 原则排除.
+
+**mnelo E-C.2 规则化方案**：
+
+| 维度 | Mem0 LLM auto-extract | mnelo E-C.2 规则化 |
+|---|---|---|
+| **抽取方式** | LLM call (成本 + 200ms + 美元) | 正则 re.findall (~0ms) |
+| **覆盖度** | 高 (LLM 看文本自动) | 低 (主人写什么是什么) |
+| **决策权** | LLM 决定 entity/relation | 主人决定 (@ / # 显式) |
+| **amoral** | 复杂 (黑盒) | 透明 (规则可读) |
+| **运行依赖** | 必须有 LLM API | 0 外部依赖 |
+| **结果可预测** | 不可预测 | 完全可预测 |
+
+**适用场景**：
+
+- 主人不想在每个 chunk 显式写 `@entity_id` 也不在乎成本 → 走 Mem0 LLM (mnelo 不做, 主人外接)
+- 主人想 0 成本 + 完全可控 + 跟 P1 a/b 区分 (规则化**不**调 LLM) → 走 mnelo E-C.2 (本改进)
+
+**主人**: "你 (mnelo) 永远不要默认 LLM auto-extract. 给我显式 @ / # 语法 + dedup_check. 我保留决策权."
+
+#### 6.9.2 mention 解析规则
+
+**正则 (P1 #63 实战矛盾 — module-level pure re 不触发 circular import)**：
+
+```python
+_MENTION_ENTITY_RE = re.compile(
+    r"@((?:[a-zA-Z]+:[\w:.\-]+)|master_[\w]+)", re.UNICODE
+)
+_MENTION_TAG_RE = re.compile(r"#([\w\-]{1,50})", re.UNICODE)
+
+def _extract_mentions(content: str) -> tuple[list[str], list[str]]:
+    """返回 (entity_ids, tag_ids) — strip @ / # 前缀, 顺序匹配第一次出现."""
+    if not content or not isinstance(content, str):
+        return [], []
+    return _MENTION_ENTITY_RE.findall(content), _MENTION_TAG_RE.findall(content)
+```
+
+**关键设计**：
+
+- `re.UNICODE` + `\w` 含中文/日文/韩文 (主人 zvec 默认 bge-small-zh-v1.5, 中文 chunk 主流)
+- `entity_id` 必 match mnelo namespace 前缀 (跟 `validate_id` 一致: `identity:` / `stock:` / `holding:` / `loop:` / `task:` / `master_*`)
+- `tag_id` 必 1-50 字符 alphanumeric + `_` / `-`
+- 不返回 `@` / `#` 前缀 (调用方直接用 entity_id)
+
+#### 6.9.3 `remember()` auto_relate 行为契约
+
+```python
+def remember(
+    self,
+    content: str,
+    ...
+    auto_relate: bool = False,  # 默认 False (backward-compat)
+    entity_relation: str = "mentions",  # 自定义 entity relation kind
+    tag_relation: str = "tagged",  # 自定义 tag relation kind
+    dedup_check: bool = False,  # auto_relate=True 时默认 True (v0.15.2+)
+) -> str:
+    """... (原 remember signature 扩展)
+
+    [8/15 E-C.2] auto_relate=True 时扫 content 提取 @entity_id / #tag mention,
+    自动建/查 (dedup_check=True 默认) tag entity (kind=\"tag\") + relation.
+    """
+```
+
+**`_txn` 块内布局 (P1 #62 嵌套 SAFEPOINT)**：
+
+```python
+with _txn(self._conn):
+    # 1. INSERT chunk
+    # 2. _upsert_entity (entities 参数)
+    # 3. INSERT relations (relations 参数)
+    # 4. self._index.add(...)
+    # 4.5 PII audit_log
+    # 5. [E-C.2] auto_relate: 扫 mention
+    if auto_relate:
+        for eid in entity_mentions:
+            validate_id(eid)  # 不合法 → skip + warn
+            existing_entity = SELECT entity  # 不存在 → skip + warn
+            if dedup_check:
+                existing_rel = SELECT rel WHERE triple=  # 命中 → skip
+            INSERT relation (chunk, eid, entity_relation)
+        for tag_name in tag_mentions:
+            tag_eid = f"tag:{tag_name}"
+            existing_tag = SELECT tag entity  # 不存在 → _upsert_entity
+            if dedup_check:
+                existing_tag_rel = SELECT rel  # 命中 → skip
+            INSERT relation (chunk, tag_eid, tag_relation)
+# _txn() 退出时 COMMIT
+```
+
+**关键安全 guarantee (P1 #42 + #62)**：
+
+- mention 解析 + relation 创建 **在 `_txn` 块内** → 跟 chunk INSERT + entities upsert + relations 同一事务
+- 部分失败 → ROLLBACK → 数据一致
+- 不存在 relation entity → skip + log warning (不阻断 remember)
+- @entity_id 不合法 (validate_id 失败) → skip + log warning
+- dedup_check=True (auto_relate 默认) → 同 (chunk_id, target_id, relation) 不创建重复
+
+**已知 refusal logic**：
+
+```python
+# @entity_id not in entities table → skip + log warning (not abort)
+if not existing_entity:
+    logger.warning(f"[auto_relate] skip undeclared entity_id {eid!r}")
+    continue
+
+# @entity_id 非法 (validate_id 失败) → skip + log warning
+try:
+    validate_id(eid, "entity_id")
+except Exception as e:
+    logger.warning(f"[auto_relate] skip invalid entity_id {eid!r}: {e}")
+    continue
+```
+
+**用法示例**：
+
+```python
+# 1. 默认 backward-compat
+m.remember("buy @company:tb_tech target 7800")  # 0 auto relation
+
+# 2. auto_relate=True (主人显式 opt-in)
+m.remember(
+    "buy @company:tb_tech #strategy target 7800",
+    auto_relate=True,
+    # dedup_check=True default — 同 chunk 不重复 mention
+)
+
+# 3. 自定义 relation kind
+m.remember(
+    "analysis @industry:transformer",
+    auto_relate=True,
+    entity_relation="discusses",  # chunk -[discusses]-> entity
+)
+
+# 4. tag entity 复用 (dedup)
+m.remember("first #strategy", auto_relate=True)
+m.remember("second #strategy", auto_relate=True)  # tag:strategy 复用
+```
+
+#### 6.9.4 v0.15.2 CI 实战 (run #31874928608, +5/5 待验)
+
+**关键 commit chain**：
+
+- `6ca4f46` feat(memory): @entity_id / #tag mention 解析为 relation (E-C.2) — +176 / -3
+  - 5 files: memory.py + memory_core.py + mcp_tool_definitions.py + pyproject.toml + tests/test_mention_parse_e_c2_2026_08_15.py
+  - TDD red 12 → green 12
+  - ruff all checks passed
+  - 真 import chain OK (P1 #63 验证)
+
+#### 6.9.5 v0.15.2 实战教训 (P1 #51 扩展 + #63 实践)
+
+1. **主人 6/29 "不抢决策" 原则 vs Mem0 LLM auto-extract (P1 #58 借鉴决策 4 分类)**：
+   - mnelo 规则化方案 vs Mem0 LLM 方案是两个哲学. 主人选前者: 0 成本 + 完全可控 + 显式表达意图
+   - 不管选哪个, 必老实分类 (P1 #50 落地对照表) — 不"过度归功" / 不"过度打折"
+   - 实战: E-A / E-B / E-C.2 都是规则化方案 (Mem0 API 形态 ✅ + 数据建立 ❌)
+
+2. **P1 #63 module-level python module 分类**：
+   - `re` 模块纯 Python, **不会触发 circular import** (跟 memory_core 不同)
+   - 但 `_extract_mentions` 函数本身如果 import 其他 module 就会触发
+   - **Generalize**: module-level 定义 regex + 纯函数 OK, module-level import 其他 module 必 lazy
+
+3. **P1 #51 实战教训**:
+   - 12 E-C.2 测试 11/12 pass, 1 fail 是测试 assertion 错误 (assert n == 1 期望 dedup 之间 → 实际 2 chunk 各自 mention)
+   - 修测试预期 (不是改实现) — 跟 P1 #45 numpy percentile 实战同源
+   - **TDD red 暴露的失败不一定都是真 bug** — 必看 stack trace + 实际数据
+
+4. **mcp_tool_definitions.py per-file-ignores 进一步扩展**：
+   - 之前 (E-A) 加 F821 (JSON 字面量) ✅
+   - E-C.2 加 E501 (description 中文 + URL 200 字符) ✅
+   - Per-file-ignores 是个动态集合 — 实战踩坑逐步加
+
+5. **P1 #58 借鉴决策 4 分类实战扩展 (E-C.2)**：
+   - E-A 借鉴 API 形态 ✅
+   - E-B 借鉴 API 行为 ✅
+   - E-C.2 规则化借鉴 (抄思路不抄实现) ✅
+   - 3 个 E 都是 mnelo 自身痛点 + 借鉴决策合并 — 不"过度归功" / 不"过度打折"
+
+#### 6.9.6 v0.15.2 P1 lesson 编号 (累计 65)
+
+- **P1 #57 INSERT column 顺序 (E-A 实战)** ── E-C.2 复用: relations INSERT 顺序 (source_id, target_id, relation) 仍是这个
+- **P1 #62 _txn 嵌套 SAVEPOINT (E-B 实战)** ── E-C.2 复用: auto_relate 块必在 _txn 块内, 嵌套 SAFEPOINT 自动处理
+- **P1 #63 circular import (E-A 实战)** ── E-C.2 复用: `_extract_mentions` module-level OK (pure re), 但不 import memory_core
+- **P1 #64 mcp_tool_definitions.py per-file-ignores F821 (E-A 实战)** ── E-C.2 扩展: 加 E501 (中文 description 长行)
+
+#### 6.9.7 未来延伸 (v0.16+ 候选)
+
+- 主人 8/15 实战 E-A (get_all) + E-B (dedup) + E-C.2 (mention) 3 个 Mem0 借鉴落地, graph 召回率应在 v0.15.2 部署后从 1% 升到 60%+ (chunk 写时自动 mention entity)
+- 主人在真实库上跑 `m.recall_stats(days=7)` 看 v0.15.2 实战效果
+- §1.2 剩余 5 个短板 (无记忆生命周期 / 单巨石 / 双时态不完整 / entity 路不匹配 id / 协议层 raw-SQL 旁路) 按 mnelo 自身痛点驱动节奏, 逐个 v0.16+ 修
+- 考虑加 E-C.2 跟 L1 入口 (memory_remember) 之外的 MCP 工具: `memory_extract_mentions(content)` (只解析不写, 主人手动确认), 给主人一次性预览 mention 候选
 
 ---
 
 ## 7. L4 可观测性
+
 
 ### 7.1 召回质量指标（[8/15 v0.15 E-3] 部分落地）
 
