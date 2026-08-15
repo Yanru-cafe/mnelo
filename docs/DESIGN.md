@@ -1744,6 +1744,118 @@ def _call_tool(name, args):
 
 ---
 
+
+### 6.11 v0.16 E-2 FTS5 重启 non-trigger 模式实战（[8/16] P1 #66-#81 + #91 全应用）
+
+ 6.11 v0.16 E-2 FTS5 重启 non-trigger 模式实战（[8/16] P1 #66-#81 + #91 全应用）
+
+**背景**：8/15 上轮 E-2 FTS5 实战 (commit aa5469b + 4 fix chain) 被撤回 \u2014 P1 #81 SIGSEGV (FTS5 trigger firing + index.add zvec native crash, exit -11) \u672c\u8d28\u95ee\u9898\u3002\u4e0a\u8f6e 4 commit revert + \u5b9e\u6218\u6559\u8bad\u5b8c\u6574\u4fdd\u7559\u3002
+
+8/16 \u91cd\u542f\u00b7**\u4e0a\u4e2d P1 #66-#81 \u5168\u90e8\u5b9e\u6218\u6559\u8bad\u4f5c\u4e3a\u8bbe\u8ba1\u7ea6\u675f**\u00b7 \u5b9e\u8df5 E-2 \u5b9e\u6218\u95ed\u73af\u3002
+
+#### 6.11.1 \u8bbe\u8ba1\u54f2\u5b66 (P1 #28 + P1 #62 + P1 #84 \u5b9e\u6218\u7ec4\u5408)
+
+1. **\u4e0d\u4f7f\u7528 trigger** (P1 #66/#75/#78/#79/#81)\uff1a
+   - schema.sql \u4ec5 1 \u4e2a\u865a\u8868 `chunks_fts` \u00b7 0 trigger
+   - \u624b\u52a8 INSERT \u8d70 _txn \u5757\u5185\u8ddf\u968f chunks.rowid INTEGER
+2. **soft delete \u4e0d\u4f7d\u8001 row** (P1 #72 \u5b9e\u6218 \u00b7 mnelo immutable design)\uff1a
+   - \u67e5\u8be2\u4fa7 `WHERE valid_until IS NULL OR valid_until > ?` \u8fc7\u6ee4\u8f6f\u5220
+   - FTS5 \u4fdd\u7559 stale rowid \uff08\u540e\u53f0 _fts_sync_cleanup_stale \u8d77\u9019\u4e91\u5904\u7406\uff09
+3. **zvec native \u8865\u507f** (P1 #84 pattern)\uff1a
+   - remember/update \u5757 _txn \u4e2d\u624b\u52a8 FTS5 sync \uff08\u907f\u514d trigger \u9508\u53d1 SIGSEGV\uff09
+
+#### 6.11.2 schema.sql \u00a79 chunks_fts \u865a\u8868
+
+```sql
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    content,
+    source,
+    session_id,
+    tokenize='trigram'
+);
+```
+
+\u4e0d\u52a0 trigger \u00b7 \u4e0d\u52a0 UPDATE trigger \u00b7 \u4e0d\u52a0 DELETE trigger \uff08\u907f\u514d P1 #66/#75/#78/\u4e0a\u8f6e 4 revert \u5168\u90e8\u9677\u9631\uff09\u3002
+
+#### 6.11.3 memory.py \u65b0\u589e\u4e09 helper
+
+| Helper | \u529f\u80fd |
+|---|---|
+| `_fts_escape_query(query)` | FTS5 MATCH query \u8f6c\u4e49\u00b7\u9632\u5f15\u53f7 syntax error |
+| `_fts_sync_upsert(conn, rowid, content, source, session_id)` | INSERT chunks_fts\u00b7\u540c rowid \u91cd\u590d\u81ea\u52a8 DELETE+INSERT |
+| `_fts_sync_delete(conn, rowid)` | DELETE chunks_fts row\uff08hard DELETE chunks \u65f6\u8c03\u7528\uff09 |
+| `_fts_sync_cleanup_stale(conn)` | bulk DELETE stale rowids \uff08P1 #77 \u907f\u514d cumulative\uff09 |
+
+#### 6.11.4 _meta_recall \u91cd\u5199 \u00b7 FTS5 BM25 \u4e3b\u8def + LIKE fallback
+
+```
+SELECT * FROM (
+  (fts_sql \u00b7 JOIN chunks ON rowid \u00b7 MATCH ? \u00b7 bm25 ASC \u00b7 importance DESC)
+  UNION ALL
+  (like_sql \u00b7 content LIKE ?)
+) ORDER BY 6 ASC, 5 DESC LIMIT top_k * 2
+```
+
+\uc91c\u4ee3\u7801\u70b9\uff08P1 #67/#68/#69/#70 \u907f\u514d\uff09\uff1a
+- FTS5 + LIKE UNION ALL \u5305 subquery \uff08P1 #69\uff09
+- trigram \u8def LIMIT \u5916\u79fb \uff08bm25 ASC \u8d8a\u4f4e\u8d8a\u76f8\u5173\uff09
+- LIKE fallback \u8865\u8db3\u4e2d\u6587\u77ed\u67e5\u8be2 + \u7b26\u53f7 token \uff08P1 #68\uff09
+- Python set \u53bb\u91cd + top_k \u9650\u5236\uff08P1 #70\uff09
+
+#### 6.11.5 \u96c6\u6210\u70b9
+
+| \u8def\u5f84 | \u96c6\u6210 |
+|---|---|
+| `memory_core.py:remember` | INSERT chunks \u540e \u00b7 `_fts_sync_upsert` |
+| `memory_core.py:update` | INSERT new chunk \u540e \u00b7 `_fts_sync_upsert` \uff08immutable\uff09 |
+| `memory_core.py:meta_recall` | FTS5 BM25 + LIKE \u00b7 UNION ALL \u5305 subquery |
+| `memory_core.py:meta_recall` | + `user_id` filter \uff08P1 #91 \u5b9e\u6218\u62ab\u9732\uff09 |
+| `benchmarks/latency.py:cleanup_seed` | + `_fts_sync_cleanup_stale` \uff08P1 #77\uff09 |
+| `tests/test_digest.py:_new_mem` | + `_fts_sync_cleanup_stale` \uff08P1 #77\uff09 |
+
+#### 6.11.6 P1 \u5b9e\u6218\u6559\u8adb\u7d2f\u8ba1 (P1 #66-#91)
+
+E-2 \u91cd\u542f\u5b9e\u6218\u5168\u9762\u907f\u514d\u4e0a\u8f6e P1 \u9677\u9631\u00b7 \u5e76\u5728\u5b9e\u8df5\u4e2d\u62ab\u9732 1 \u4e2a\u65b0 P1 \uff08#91\uff09\uff1a
+
+| P1 # | \u907f\u514d\u00b7\u4fee\u6b63\u65b9\u5f0f |
+|---|---|
+| #66 | \u4e0d\u4f7f\u7528 trigger \uff08non-trigger \u6a21\u5f0f\uff09 |
+| #67 | UNION ALL \u5305 subquery \u00b7 \u4e0d\u4f7f\u5916\u5c42 paren |
+| #68 | LIKE fallback \u8865\u8db3 trigram \u77ed\u67e5\u8be2\u4e0d\u547d\u4e2d |
+| #69 | FTS5 + LIKE \u5408\u5e76\u540e LIMIT \u00b7 ORDER BY \u5916\u79fb subquery |
+| #70 | params \u6570\u91cf\u4e25\u683c\u4e0e UNION \u5b50\u67e5\u8be2\u5339\u914d |
+| #71 | m.update() \u5185\u90e8\u4e8b\u52a1 vs FTS5 \u4e0d\u51b2\u7a81\uff08\u624b\u52a8 sync \u907f\u514d\uff09 |
+| #72 | \u9690\u85cf stale row \u4fdd\u7559 \u00b7 query \u4fa7 WHERE \u8fc7\u6ee4 |
+| #75 | \u4e0d\u4f7f\u7528 DELETE trigger \uff08FTS5 'delete' cmd SQL logic error\uff09 |
+| #77 | `_fts_sync_cleanup_stale` bulk cleanup \u00b7 test fixture + benchmark |
+| #78 | chunks.rowid INTEGER \uff08\u4e0d\u7528 chunks.id TEXT PK\uff09 |
+| #79 | manual INSERT chunks_fts \u00b7 type \u4e25\u683c INTEGER rowid |
+| #80 | test fixture \u4f7f\u7528 isolated tmp_path |
+| **#81** | **non-trigger \u624b\u52a8 sync \u00b7 \u907f\u514d zvec SIGSEGV** |
+| #91 | `_meta_recall` \u52a0 user_id filter \uff08\u539f\u53ea\u67e5 agent_id\uff09 |
+
+\u672c\u6b21 E-2 \u91cd\u542f\u5168\u90e8\u907f\u514d\u4e0a\u4e2d 12 \u4e2a P1 \u9677\u9631 \u00b7 \u672a\u62a5 SIGSEGV \u00b7 CI 5/5 \u5168\u7eff \u00b7 TDD 11/11 \u5168\u8fc7\u3002
+
+#### 6.11.7 CI \u5b9e\u6218\u9a8c\u8bc1
+
+- Run #31890384285 5m58s \u00b7 5/5 \u5168\u7eff (Py 3.10/3.11/3.12 + Lint + Security)\u3002
+- TDD \u5b9e\u6218 11/11 \uff08test_meta_fts5_non_trigger_e2_2026_08_15.py\uff09\u3002
+- \u5168 E + Plan A3 + P1 #84 + E-2 \u603b\u5171 80/80 \u6d4b\u8bd5\u8fc7\u3002
+
+#### 6.11.8 \u4e0a\u8f6e 4 revert + \u672c\u6b21 1 commit \u00b7 \u5b9e\u6218\u8d21\u732e
+
+| \u72b6\u6001 | commits | CI |
+|---|---|---|
+| \u4e0a\u8f6e (E-2 \u5b9e\u73b0) | aa5469b \u00b7 f34ca40 \u00b7 c192511 \u00b7 2c12cd5 | 5/5 \u00b7 SIGSEGV \u5b9e\u6218\u62ab\u9732 |
+| \u9000\u56de | 4 revert commits | \u00b7 \u4e0a\u4e2d P1 \u6559\u8bad\u5b8c\u6574\u4fdd\u7559 |
+| **\u672c\u6b21\u91cd\u542f** | **3ca1502** | **5/5 \u5168\u7eff** \u00b7 **\u4e0d\u62a5 SIGSEGV** |
+
+\u603b\u8ba1 6 commits \u4e2d \u00b7 \u91cd\u542f\u540e 1 commit \u00b7 CI 5/5 \u4e3b\u8981\u662f P1 #81 SIGSEGV \u5b9e\u6218\u62ab\u9732 \u00b7 non-trigger \u6a21\u5f0f\u624b\u52a8 sync \u00b7 4 revert \u7684\u6559\u8bad\u5e76\u672a\u767d\u652f\u51fa \u00b7 \u91cd\u542f\u540e \u9010\u4e2a\u907f\u514d\u3002
+
+---
+
+---
+
 ## 7. L4 可观测性
 
 

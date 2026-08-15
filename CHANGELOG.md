@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.6.0 — 2026-08-16
+
+feat(memory): meta 路集成 FTS5 BM25 + LIKE fallback · non-trigger 模式 (E-2 重启实战)
+
+**Why**: 8/15 E-2 FTS5 上轮 4 commit 因 P1 #81 zvec SIGSEGV 被撤回。本次重启·上中 P1 #66-#81 实战教训全部应用· 重启后不报 SIGSEGV。
+
+**What**: 设计哲学 - non-trigger 模式手动 sync (P1 #66/#75/#78/#79/#81):
+- schema.sql §9: chunks_fts 虚表 · 0 trigger · trigram tokenizer
+- memory.py: _fts_escape_query + _fts_sync_upsert + _fts_sync_delete + _fts_sync_cleanup_stale 四 helper
+- memory_core.py: remember/update 块 _txn 中手动 INSERT chunks_fts · _meta_recall 重写 FTS5 BM25 主路 + LIKE fallback
+- _meta_recall 加 user_id filter (P1 #91 实战披露·原只查 agent_id)
+- benchmarks/latency.py cleanup_seed + tests/test_digest.py _new_mem: P1 #77 stale rowid cleanup
+
+**CI 实战**: Run #31890384285 5/5 全绿 · 不报 SIGSEGV (P1 #81 实战解决) · 11/11 TDD 全过.
+
+P1 实战保留 13 个:
+- P1 #66 trigger context 报错
+- P1 #67 UNION ALL paren
+- P1 #68 trigram 中文短查询
+- P1 #69 UNION ALL 外层 ORDER BY
+- P1 #70 params 数量
+- P1 #72 test fixture 跨 db 冲突
+- P1 #75 FTS5 'delete' cmd SQL logic error
+- P1 #77 stale rowid 需手动 cleanup
+- P1 #78 rowid INTEGER
+- P1 #79 datatype mismatch
+- P1 #80 test fixture global db
+- P1 #81 zvec SIGSEGV (本次重启解决)
+- P1 #91 user_id filter (本次实战披露)
+
 ## v1.5.0 — 2026-08-15
 
 feat(mcp): tool visibility Plan A3 — default 13 tools + --audit-tools/--l2-tools/--all-tools flags
