@@ -43,6 +43,10 @@ _load("mcp_tool_handlers")
 _load("mcp_tool_definitions")
 mcp = _load("mcp_server")
 
+# [8/15 E-3 fix] L2/admin tier tools 需要 all_tools flag 启用.
+mcp._TOOL_VIS_FLAGS = {"audit_tools": True, "l2_tools": True, "all_tools": True}
+
+
 
 def _isolated_db(tmp_path):
     """[8/9 B13] 用 tmp_path 隔离 DB, 不污染 live. 临时建 memory instance.

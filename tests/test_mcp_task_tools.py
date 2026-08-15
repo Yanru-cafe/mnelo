@@ -30,6 +30,10 @@ _load("search_index")
 _load("validation")
 _load("auth")
 mcp = _load("mcp_server")
+
+# [8/15 E-3 fix] L2/admin tier tools 需要 all_tools flag 启用.
+mcp._TOOL_VIS_FLAGS = {"audit_tools": True, "l2_tools": True, "all_tools": True}
+
 ts_mod = _load("task_states")
 
 
