@@ -16,21 +16,8 @@ def _cleanup(mem, ids, entity_ids=()):
 
 
 def _new_mem():
-    """[8/15 E-2 P1 #80 fix] sync FTS5 stale rowid cleanup.
-
-    不走 DELETE trigger (避免 P1 #75 FTS5 'delete' cmd SQL logic error).
-    同步清理 chunks_fts 中已被 hard DELETE 的 chunks rowid (例 上轮 test 遗留).
-    """
     mem = Memory()
     mem._conn.execute("DELETE FROM meta WHERE key IN ('digest_chunk_id', 'digest_dirty')")
-    # P1 #80 sync FTS5 不走 trigger (避免 P1 #75)
-    try:
-        mem._conn.execute(
-            "DELETE FROM chunks_fts WHERE rowid NOT IN (SELECT rowid FROM chunks)"
-        )
-    except Exception:
-        # FTS5 table missing 或另一个实例 — 跳过
-        pass
     mem._conn.commit()
     return mem
 
