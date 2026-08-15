@@ -2,7 +2,7 @@
 
 > **定位**：本文件是 mnelo 的**演进蓝图**——描述目标架构、各层设计与演进路线。
 > **现状基线**：`ARCHITECTURE.md`（当前实现分析）、`SCHEMA.md`（SQL schema 参考）。
-> **版本**：v0.15.2 · 2026-08-15 · mention 解析 + 自动 relation (commit 6ca4f46) + §6.9 final gate。
+> **版本**：v0.15.3 · 2026-08-15 · mention 解析 + 自动 relation (commit 6ca4f46) + §6.9 final gate。
 > **v0.15.1 变更**（8/15 Mem0 借鉴 + 部署实战 5-commit chain 闭环）——§6.8 新增 v0.15.1 实战章节：E-A `memory_get_all` 全量 dump 工具 (借鉴 Mem0 `get_all` API 形态, 不调 LLM) + E-B `memory_relate dedup_check` 选项 (借鉴 Mem0 `add_relations` 行为, 默认 False 保留主人决策权)。**关键纠正**：v0.15.1 这 2 个 E **是 API 形态/行为借鉴 Mem0 ✅**, 但**不是数据建立借鉴 Mem0 ❌** (主人 6/29 iron law "不抢决策" 排除强 LLM auto-extract)。3 真 P1 fix chain 实战暴露: **P1 #61 JSON 字面量 NameError** (`mcp_tool_definitions.py` module-level `"default": false` 不是 Python expression — pytest + ruff + CI 5/5 全绿 都不暴露, **真 import 才死**); **P1 #62 `_txn()` 嵌套 SAVEPOINT** (relate/forget 嵌套事务, sqlite3.Connection 不接受 attr 实证 P1 #29 同源, 必用 module-level `_txn_depth_by_id: Dict[int, int]`); **P1 #63 circular import** (`memory_core.py` 顶部 `from memory import _with_row_factory` 触发 partial init, 跟 P1 #36 facade top-level import 占 dict 同源, **第二次踩同样坑**, 必 isolation test 验证 import chain)。**CI 实战 chain** #31862952794 4m57s 5/5 全绿 (§6.8.9)。**关键 reflect (P1 #51 扩展)**：8/5 iron law "tests-green ≠ sufficient" 实战扩展到 **"imports-green ≠ sufficient, runtime-green ≠ sufficient"** — pytest + ruff + 真 import + CI 4 个全过 + 真部署 curl 才是完整 verification。Skill v2.7.0 + v2.8.0 实战教训已记录 (`mnelo-refactor-patterns` P1 #61-#64)。
 > **v0.15.2 变更**（8/15 E-C.2 mention 解析 + 自动 relation 实战闭环）——§6.9 新增 v0.15.2 实战章节：`memory_remember` 新增 `auto_relate / entity_relation / tag_relation / dedup_check` 4 个参数。`auto_relate=True` 时扫 content 里 `@entity_id` (e.g. `@company:tb_tech`) 和 `#tag` (e.g. `#strategy`) explicit mention, 自动创建/lookup chunk -[entity_relation]-> entity 和 chunk -[tag_relation]-> tag entity。规则化不调 LLM (Mem0 数据建立借鉴 ❌, 主人 6/29 不抢决策 iron law)。**解决问题**：A1.14 graph 7d 召回率 1% → 主人从不主动调 `memory_relate` 造成的图谱建立薄弱。ci commit 6ca4f46, TDD red 12 → green 12, ruff + 真 import + CI 5/5 全过。§6.9 含 7 个子节：背景 + 借鉴决策 4 分类框架 + 规则化 vs LLM 抽取对比表 + mention 解析正则 + `remember()` auto_relate 行为契约 + `_txn` 块内布局示例 + 实战教训 + P1 #65 (mcp_tool_definitions.py per-file-ignores E501 同源实战)。版本变动 v1.3.0 → v1.4.0 (MINOR bump, README badge 自动同步)。
 > **v0.15 变更**（8/15 实战 3 E 闭环）——§6.7 新增 v0.15 写路径 + 召回质量章节：3 大 E 改进的设计哲学（**mnelo 自身痛点驱动，非 Mem0 借鉴**）、落地架构表、用法变化、已知坑（usearch 索引独立于 SQLite 事务 / RRF lane 覆盖 / 标签数据污染 / numpy percentile linear interpolation）、CI 实战 3-commit chain 0 fail 验证。**关键 reflect**：v0.15 3 个 E 改进**不是 Mem0 借鉴**——是 mnelo 自身 §1.2 短板修复 + 实战数据驱动决策。真 Mem0 借鉴（scoping_ids / memory_correct / dedup_check）落地状态见 §6.7.4 "Mem0 借鉴落地对照表"。主人 8/9 SKILL "凡是不符合最新情况的, 都改, 全面 reflect, 不补丁式" → 纠正 v0.14 顶部含糊的 "Mem0 借鉴" 表述，老老实实分类每个改进的真驱动。§7.1 召回质量指标从"待设计"升级为"已落地"（E-3 `memory_recall_stats` 工具 + 17 个 Prometheus 指标升级到 19 个）。
@@ -1640,6 +1640,107 @@ m.remember("second #strategy", auto_relate=True)  # tag:strategy 复用
 - 主人在真实库上跑 `m.recall_stats(days=7)` 看 v0.15.2 实战效果
 - §1.2 剩余 5 个短板 (无记忆生命周期 / 单巨石 / 双时态不完整 / entity 路不匹配 id / 协议层 raw-SQL 旁路) 按 mnelo 自身痛点驱动节奏, 逐个 v0.16+ 修
 - 考虑加 E-C.2 跟 L1 入口 (memory_remember) 之外的 MCP 工具: `memory_extract_mentions(content)` (只解析不写, 主人手动确认), 给主人一次性预览 mention 候选
+
+---
+
+
+### 6.10 v0.15.3 Plan A3 tool visibility（[8/15] E-3 实战落地 + P1 #84 + P1 #88-#89）
+
+ 6.10 v0.15.3 Plan A3 tool visibility（[8/15] E-3 实战落地 + P1 #84 + P1 #88-#89）
+
+**背景**：v0.15.2 \u5b8c\u6210\u540e\u4e3b\u4eba 8/15 \u95ee "mnelo mcp \u5de5\u5177\u6709\u591a\u5c11\uff1f\u662f\u5426\u53ef\u4ee5\u4f18\u5316\uff1f"
+
+\u7ecf\u5ba1\u8ba1\u62ab\u9732\uff1a24 tools \u9ed8\u8ba4\u5168\u90e8\u66b4\u9732\u3002\u4e3b\u4eba 8/15 iron law "every tool ships on every API call" \u2014 tool schema \u5728\u6bcf turn \u90fd\u4f1a\u53d1\u51fa\u53bb\u3002
+
+\u8be5\u95ee\u9898\u672c\u8d28\u662f\uff1a**token \u6d6a\u8d39** + **\u9ed8\u8ba4\u8fc7\u4e8e\u5f00\u653e** \u00b7 \u4f1a\u53d8\u6210 \u201c\u8c01\u90fd\u53ef\u4ee5\u8c03\u7528 memory_audit_undo\u201d\u3002
+
+\u4e3b\u4eba\u9009\u62e9 Plan A3\uff1a
+- \u9ed8\u8ba4\u9690\u85cf l2 (8) + admin (3) tools
+- --audit-tools / --l2-tools / --all-tools flag \u89e3\u9501\u00b7 hidden tool \u9690\u5f0f call \u8fd4 informative error
+
+\u8be5\u8bb\u8ba1\u5212\u7684\u54f2\u5b66\uff08P1 #44 MCP 4-file \u5b9e\u6218 + \u4e3b\u4eba 8/15 \u201ctoken \u6d6a\u8d39 \u8be5\u770b\u201d\u539f\u5219\uff09\uff1a
+- **\u9ed8\u8ba4\u4f5c\u4e3a\u5b89\u5168\u53d1\u751f\u5668**\uff08\u9690\u85cf l2/admin\u51cf\u5c11 token\uff09
+- **\u8c03\u8bd5\u9001\u53e3\u660e\u663e\u53ef\u89c1**\uff08--all-tools flag \u00b7 \u4e0d\u9700\u6539\u4ee3\u7801\uff09
+- **\u9690\u5f0f call \u4e0d silent \u62a5\u9519**\uff08\u8fd4 informative error + \u89e3\u9501\u6307\u793a\uff0c\u4e3b\u4eba\u80fd\u81ea\u67e5\uff09
+
+#### 6.10.1 24 tools \u5b9a\u4e49\uff08TOOL_METADATA\uff09
+
+| Tier | \u6570\u91cf | \u5de5\u5177 | hidden_by_default | Flag \u89e3\u9501 |
+|---|---|---|---|---|
+| core | 7 | remember/recall/relate/get_all/update/get_digest/forget | False | \u9ed8\u8ba4 |
+| audit | 4 | recall_stats/list_entities/search_relations/entity_resolve | False | \u9ed8\u8ba4 |
+| advanced | 2 | graph_query/stats | False | \u9ed8\u8ba4 |
+| l2 | 8 | task_* (4) + loop_* (4) | True | --l2-tools |
+| admin | 3 | audit_list/audit_undo/maintenance | True | --audit-tools |
+
+`memory_audit_undo` \u989d\u5916\u6807 `destructive=True`\u00b7`memory_maintenance` \u989d\u5916\u6807 `long_running=True`\u3002\u672a\u6765 UX confirm \u4f7f\u7528\uff08\u4e0d\u5728\u672c\u6b21\u8303\u56f4\u5185\uff09\u3002
+
+#### 6.10.2 mcp_server.py flags
+
+```bash
+mcp_server start                        # \u9ed8\u8ba4 13 tools \uff08core + audit + advanced\uff09
+mcp_server start --audit-tools          # 16 tools \uff08+ audit_list/audit_undo/maintenance\uff09
+mcp_server start --l2-tools             # 21 tools \uff08+ 8 task/loop\uff09
+mcp_server start --all-tools            # 24 tools \uff08\u9001\u53e3\u8c03\u8bd5\u00b7\u4e3b\u4eba\u4f1a\u8b66\u544a\uff09
+```
+
+#### 6.10.3 mcp_tool_dispatcher.py \u9690\u85cf check \u8def\u5f84
+
+```python
+def _call_tool(name, args):
+    # 1. rate_limit_check \uff08owner \u9632\u5fc5\u5927\u8df3\u8fc7\uff09
+    try: _rate_limit_check(name)
+    except ValidationError: return ...
+    
+    # 2. hidden_check \uff08--l2-tools/--audit-tools/--all-tools flag\uff09
+    flags = _TOOL_VIS_FLAGS
+    if is_tool_hidden(name, flags):
+        return {"error": "...", "type": "hidden_tool", "hint": "--l2-tools"}
+    
+    # 3. mem = _get_mem()  \uff08\u9690\u85cf\u540e\u624d load\u00b7\u8282\u7701 zvec LOCK \u8d44\u6e90\uff09
+    mem = _get_mem()
+    
+    # 4. \u4e0b\u6e38 dispatch (\u4e0d\u53d8)
+    ...
+```
+
+#### 6.10.4 Token \u8282\u7701\u4f30\u7b97
+
+| Mode | Tools | Schema tokens \u00d7 turn | \u4e3b\u4eba\u5b9e\u6218 ~30 turns/day |
+|---|---|---|---|
+| \u5168\u66b4\u9732 (--all-tools) | 24 | ~3600 | ~108k/day |
+| \u9ed8\u8ba4 | 13 | ~1950 | ~58k/day |
+| \u8282\u7701 | -11 | -1650/turn | **~-50k tokens/day** |
+
+\u4e3b\u4eba 8/15 iron law "everything on every API call" \u00b7 \u9ed8\u8ba4\u9690\u85cf 11 tool \u8282\u7701 ~50k tokens/day (\u9ed8\u8ba4\u8d44\u6e90\u53e0\u52a0\u4e0d\u8d70\u91cd\u590d\u5de5\u4f5c)\u3002
+
+#### 6.10.5 mnelo \u5b9e\u6218 P1 lesson #88-#89 \u589e\u91cf
+
+[P1 #88] mcp_server \u8c03\u7528 L2/admin tier tools \u88ab hidden check \u62e6\u4f4f \u00b7 test fixture \u9700\u660e\u786e\u8bbe `_TOOL_VIS_FLAGS = all_tools=True`\u3002
+
+[P1 #89] **PEP 562 facade module \u9694\u79bb**\uff1a`mcp_server._TOOL_VIS_FLAGS = {...}` \u4e0d\u4f1a\u5230 mcp_tool_dispatcher module\u00b7\u56e0\u4e3a `mcp_server` \u662f facade\u00b7\u8d4b\u503c\u8d70 PEP 562 __setattr__\u4f46 facade \u672c\u8eab\u4e0d\u5b58\u50a8\u3002
+\u6b63\u89e3\uff1a`mcp_disp = sys.modules["mcp_tool_dispatcher"]` (\u539f module object) \u00b7 \u8d4b\u503c\u624d\u4f1a\u751f\u6548\u3002
+
+[P1 #90] `_ilu.spec_from_file_location` \u52a0\u8f7d mcp_tool_dispatcher \u4f1a\u751f\u6210\u65b0 module object (\u4e0d\u540c\u4e8e mcp_server \u672c\u8eab import \u7684\u90a3\u4e2a)\u3002\u4e24\u8005\u9694\u79bb\u00b7\u4ec5\u4ec5 mcp_tool_dispatcher[\u201cmemory_loop_create\u201d] \u8fd4\u4e0d\u540c\u3002
+
+#### 6.10.6 Plan A3 \u5b9e\u6218\u5b66\u4e60 \u00b7 P1 #50 + P1 #44 + P1 #52 \u7ec4\u5408
+
+1. **P1 #50 \u8001\u5b9e\u5206\u7c7b\u5bf9\u7167\u8868**\uff1a24 tool \u4e0d\u4e00\u5e73\u53f0\u91cd\u8981\u00b7\u4e3b\u5165\u53e3 core \u4ec5 7\u00b7\u4f17\u591a\u9690\u85cf\u3002
+2. **P1 #44 MCP 4-file registration \u5b9e\u6218\u4e00\u81f4**\uff1adefinitions + dispatcher + handlers + server \u8054\u52a8\u00b7\u4e0d\u4e00\u81f4\u5b9e\u6218 fail\u3002
+3. **P1 #52 hidden safe pattern**\uff1a**\u9690\u85cf\u4e0d silent**\uff08\u9690\u5f0f call \u8fd4 informative error\uff09\u00b7\u5b89\u5168\u4e0d\u4f9d\u8d56 owner \u81ea\u5df1\u8bb0\u5fc6\u3002
+
+\u672c\u6b21 E-3 \u5b9e\u6218\u4f7f\u8bb0\u5fc6\u4e2d\u8d44\u6e90\u53e0\u52a0\u4e0d\u53d8\u539f\u5219\u00b7\u540c\u65f6\u8c03\u8bd5\u9001\u53e3\u660e\u663e\u00b7\u9690\u5f0f call \u53cb\u597d\u63d0\u793a\u3002
+
+#### 6.10.7 CI \u5b9e\u6218\u9a8c\u8bc1
+
+- Run #31885526235 \uff1aP1 #88 fix \u672a\u751f\u6548\u00b74 fail\u3002\u8bbe PEP 562 facade bug\u3002
+- Run #31885922408\uff1aP1 #89 fix \u4ec5 fix \u5230 facade\u00b7\u539f module \u4ecd\u672a\u53d8\u00b7\u7ee7\u7eed fail\u3002
+- Run #31886286842\uff1a\u5c1d\u8bd5\u4ec5 facade setattr\u00b7\u7ee7\u7eed fail\u3002
+- Run #31886678393\uff1a**\u4ec5\u8bbe sys.modules["mcp_tool_dispatcher"]._TOOL_VIS_FLAGS**\uff08P1 #89 \u6b63\u89e3\uff09\u00b7**5/5 \u5168\u7eff**\uff08Lint + Security + Py 3.10/3.11/3.12 Tests\uff09\u3002
+
+\u603b\u5171\u63a8\u4e3b 4 \u4e2a commit\uff08a604856 + 678520a + 828d436 + ba95d69\uff09\u4e2d 3 \u4e2a\u4e3a fix PEP 562 + sys.modules \u9694\u79bb\u3002\u8fd9\u662f mnelo P1 #89 \u5b9e\u6218\u4e2d \u96be\u5f97\u7684\u90a3\u4e2a \u00b7 \u4e5f\u662f owner \u201ctoken \u8be5\u770b\u201d\u539f\u5219\u7684\u5177\u4f53\u5b9e\u73b0\u3002
+
+---
 
 ---
 

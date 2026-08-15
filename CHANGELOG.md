@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.5.0 — 2026-08-15
+
+feat(mcp): tool visibility Plan A3 — default 13 tools + --audit-tools/--l2-tools/--all-tools flags
+
+**Why**: 主人 8/15 问 "mcp 工具有多少？是否可以优化？" 24 tools 默认全部暴露。主人 8/15 iron law "every tool ships on every API call" · tool schema 在每 turn 都发出去。
+该问题本质是 **token 浪费** + **隐藏过于开放** (谁都可调 memory_audit_undo)。
+
+主人选择 Plan A3 · 5 tier (core/audit/advanced/l2/admin):
+
+| Tier | 数量 | 默认 | Flag 解锁 |
+|---|---|---|---|
+| core | 7 | 暴露 | - |
+| audit | 4 | 暴露 | - |
+| advanced | 2 | 暴露 | - |
+| l2 | 8 | 隐藏 | --l2-tools |
+| admin | 3 | 隐藏 | --audit-tools |
+
+隐藏总计 11 tools (8 l2 + 3 admin)。主人隐式 call hidden tool → informative error + 解锁指示。
+
+实战 P1 fix chain:
+- P1 #88 mcp 调用 L2/admin tier test fixture 需 _TOOL_VIS_FLAGS=all_tools
+- P1 #89 PEP 562 facade module 隔离 · sys.modules["mcp_tool_dispatcher"] 才会生效
+
+Token 节省估算: 24 → 13 tools · ~1650 tokens/turn 节省 · ~50k tokens/day 节省 (主人 30 turns/day 实战估算)。
+
+CI 实战验证:
+- Run #31885526235: P1 #88 fail
+- Run #31885922408: P1 #88 fix 未生效 (你 mcp_server facade)
+- Run #31886286842: P1 #89 fix 未生效 (facade setattr 不走)
+- Run #31886678393: 5/5 全绿 (sys.modules 正解)
+
+总共推主 4 commits (a604856 + 678520a + 828d436 + ba95d69)。
+
 ## v1.4.0 — 2026-08-15
 
 feat(memory): memory_remember 新增 auto_relate 参数 — @entity_id / #tag mention 解析 + 自动 relation
