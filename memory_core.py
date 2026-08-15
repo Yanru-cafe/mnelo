@@ -1028,40 +1028,72 @@ class MemoryCore:
                 f"不能直接 mnelo forget() 删除活跃任务. "
                 f"reason={reason!r} 仅审计用, 不执行."
             )
-        if target_kind == "chunk":
-            self._conn.execute("UPDATE chunks SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id))
-            # [7/21] 向量索引删除下沉到 SearchIndex 适配器 (原 v0.5.6 drift fix 逻辑)
-            # 软删 chunk 的 embedding 是死数据 — 清掉防 vec0 rowid 漂移/碰撞.
-            self._index.remove(target_id, conn=self._conn)
-        elif target_kind == "entity":
-            self._conn.execute("UPDATE entities SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id))
-        elif target_kind == "relation":
-            self._conn.execute("UPDATE relations SET valid_until = ? WHERE id = ? AND valid_until IS NULL", (now(), target_id))
-        else:
-            raise ValueError(f"unknown kind: {target_kind}")
+        # [8/15 P1 #84 fix] forget() 上 _txn 包裹 (SQLite 多步一致).
+        # zvec _index.remove 走 try/except · raise 后以 try/except 装载.
+        # 灵活策略: SQLite commit 优先, zvec native fail 仅 log warning (后台 lazy delete).
+        from memory import _txn  # lazy import — P1 #63 circular 避免
 
-        # cascade (主流程中, 触发器也会自动做)
+        # [P1 #84.4 fix] idempotent guard: 该 target 已 soft-deleted (在 purged_queue 中)→ 跳过.
+        existing = self._conn.execute(
+            "SELECT 1 FROM purged_queue WHERE target_id = ? AND done = 0 LIMIT 1",
+            (target_id,),
+        ).fetchone()
+        if existing:
+            logger.debug(f"[forget P1 #84] target={target_id} 已在 purged_queue · 跳过")
+            return {"edges_invalidated": 0, "queued_purge": 0}
+
         edges_invalidated = 0
-        if cascade:
-            cur = self._conn.execute(
+        _now = now()
+        with _txn(self._conn):
+            if target_kind == "chunk":
+                self._conn.execute(
+                    "UPDATE chunks SET valid_until = ? WHERE id = ? AND valid_until IS NULL",
+                    (_now, target_id),
+                )
+            elif target_kind == "entity":
+                self._conn.execute(
+                    "UPDATE entities SET valid_until = ? WHERE id = ? AND valid_until IS NULL",
+                    (_now, target_id),
+                )
+            elif target_kind == "relation":
+                self._conn.execute(
+                    "UPDATE relations SET valid_until = ? WHERE id = ? AND valid_until IS NULL",
+                    (_now, target_id),
+                )
+            else:
+                raise ValueError(f"unknown kind: {target_kind}")
+
+            # cascade (主流程中, 触发器也会自动做)
+            if cascade:
+                cur = self._conn.execute(
+                    """
+                    UPDATE relations SET valid_until = ?
+                    WHERE (source_id = ? OR target_id = ?) AND valid_until IS NULL
+                """,
+                    (_now, target_id, target_id),
+                )
+                edges_invalidated = cur.rowcount
+
+            # 入队 30 天后物理删除
+            self._conn.execute(
                 """
-                UPDATE relations SET valid_until = ?
-                WHERE (source_id = ? OR target_id = ?) AND valid_until IS NULL
+                INSERT INTO purged_queue (target_id, target_kind, purged_at, done)
+                VALUES (?, ?, datetime('now', '+30 days'), 0)
             """,
-                (now(), target_id, target_id),
+                (target_id, target_kind),
             )
-            edges_invalidated = cur.rowcount
 
-        # 入队 30 天后物理删除
-        self._conn.execute(
-            """
-            INSERT INTO purged_queue (target_id, target_kind, purged_at, done)
-            VALUES (?, ?, datetime('now', '+30 days'), 0)
-        """,
-            (target_id, target_kind),
-        )
+        # [P1 #84.5 fix] zvec _index.remove 走 try/except · 不 raise.
+        # SQLite 已 commit, graph 一致; zvec stale 由 _maintenance_run / 下次 vector add
+        # 复盖同 rowid 时被 lazy 替换 (后台 worker, 不阻塞 forget 主路径).
+        if target_kind == "chunk":
+            try:
+                self._index.remove(target_id, conn=self._conn)
+            except Exception as _e:  # noqa: BLE001
+                logger.warning(
+                    f"[forget P1 #84] zvec _index.remove({target_id}) fail: {_e}. 后台 lazy delete."
+                )
 
-        self._conn.commit()
         # [7/19 v0.5.3] metrics
         _metrics_registry().forget_total.inc(kind=target_kind or "unknown")
         return {"edges_invalidated": edges_invalidated, "queued_purge": 1}
