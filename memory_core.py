@@ -1436,14 +1436,26 @@ class MemoryCore:
         )
         _scope_active = [pair for pair in _scope_filters if pair[1] is not _MISSING]
 
+        # [audit fix 4.2 2026-08-16] batch fetch — 1 次 SQL 拿全 knn_hits 的 chunk
+        # 原 N+1: 每 knn_hit 1 次 SELECT (top_k=10 → 10 round-trip).
+        # 现在: 1 次 IN(...) SELECT 拿全 batch.
+        chunk_ids = [h.chunk_id for h in knn_hits]
+        placeholders = ",".join("?" * len(chunk_ids))
+        chunk_rows = conn.execute(
+            f"""
+            SELECT id, content, memory_type, source, timestamp, importance, metadata_json FROM chunks
+            WHERE id IN ({placeholders}) AND (valid_until IS NULL OR valid_until > ?)
+            """,
+            (*chunk_ids, asof),
+        ).fetchall()
+        # Build dict by chunk_id for O(1) lookup
+        chunks_by_id = {r["id"]: r for r in chunk_rows}
+
         results = []
         for hit in knn_hits:
             # [7/21 fix] asof: chunk 在 asof 时点有效 = valid_until IS NULL OR > asof
             # [P0 2026-08-11] 同时拿 metadata_json, Python 侧 json 解析 agent_id
-            chunk = conn.execute(
-                "SELECT id, content, memory_type, source, timestamp, importance, metadata_json FROM chunks WHERE id = ? AND (valid_until IS NULL OR valid_until > ?)",
-                (hit.chunk_id, asof),
-            ).fetchone()
+            chunk = chunks_by_id.get(hit.chunk_id)
             if not chunk:
                 continue
             if filters:
