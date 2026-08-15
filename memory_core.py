@@ -1550,7 +1550,7 @@ class MemoryCore:
         fts_sql = """
             SELECT c.id, c.content, c.memory_type, c.source, c.timestamp, c.importance,
                    bm25(chunks_fts) AS fts_score
-            FROM chunks_fts JOIN chunks c ON c.rowid = c.id  -- FTS5 rowid = chunks.id (TEXT PK)
+            FROM chunks_fts JOIN chunks c ON c.rowid = c.id
             WHERE chunks_fts MATCH ?
               AND (c.valid_until IS NULL OR c.valid_until > ?)
         """
