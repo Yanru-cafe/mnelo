@@ -178,6 +178,9 @@ _TOOL_REGISTRY = {
     # === [8/15 E-3] Recall quality analytics (DESIGN §1.2 #6) ===
     # 走 _handle_simple: args={days, group_by} 走 **kwargs 透传, 方法签名有默认值兜底.
     "memory_recall_stats": ("recall_stats", None),
+    # === P1 #92 fix: protocol layer raw-SQL bypass reconstruction ===
+    "memory_list_entities": ("list_entities", None),
+    "memory_search_relations": ("search_relations", None),
     # === [H-1 8/4] DESIGN §5.7 (3 L1 入口 + 1 stats 整合) ===
     "memory_audit_list": ("list_audit", None),  # 不走 _handle_simple (有枚举过滤)
     "memory_audit_undo": ("audit_undo", None),
