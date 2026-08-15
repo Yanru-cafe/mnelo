@@ -21,11 +21,48 @@ memory.py — mnelo 核心 CRUD API (facade re-export)
 import contextlib
 import logging
 import os
+import re as _re
 import sqlite3
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import sqlite_vec
+
+# [8/15 E-C.2] @entity_id / #tag mention 检测正则. 规则化, 不调 LLM.
+# entity_id: 必 match mnelo namespace prefix (memory.py:validate_id):
+#   letter+ / letter:slug / letter:slug:slug (master_* 也接受)
+# tag: alphanumeric + _ - 1-50 chars (跟 #tag 命名约定)
+# 注意: re.UNICODE + 全角字符 (中文) — 主人 zvec 默认 bge-small-zh-v1.5, 中文 chunk 主流
+# \w 在 UNICODE 模式 = [a-zA-Z0-9_] + Unicode letter 类 (含中文/日文/韩文等)
+_MENTION_ENTITY_RE = _re.compile(r"@((?:[a-zA-Z]+:[\w:.\-]+)|master_[\w]+)", _re.UNICODE)
+_MENTION_TAG_RE = _re.compile(r"#([\w\-]{1,50})", _re.UNICODE)
+
+
+def _extract_mentions(content: str) -> Tuple[List[str], List[str]]:
+    """[8/15 E-C.2] 从 chunk content 提取 @entity_id / #tag mention.
+
+    规则化, 不调 LLM. 主人 6/29 "不抢决策" 原则: 只解析 explicit mention,
+    主人显式用 @ + # 语法表示意图. No mention → 自动 empty list.
+
+    返回:
+        (entity_ids, tag_ids) — 顺序匹配第一次出现.
+
+    Examples:
+        >>> _extract_mentions("买入 @company:tb电工 #strategy")
+        (['company:tb电工'], ['strategy'])
+        >>> _extract_mentions("hello world")
+        ([], [])
+        >>> _extract_mentions("@stock:sh600089 @industry:半导体 #swing")
+        (['stock:sh600089', 'industry:半导体'], ['swing'])
+    """
+    if not content or not isinstance(content, str):
+        return [], []
+    raw_entity_matches = _MENTION_ENTITY_RE.findall(content)
+    # raw_entity_matches is list of tuples [(g1, g2), ...] - either group is entity_id
+    entity_ids = raw_entity_matches
+    tag_ids = _MENTION_TAG_RE.findall(content)
+    return entity_ids, tag_ids
+
 
 # [P0 2026-08-11] scoping IDs — sentinel 用于 'agent_id filter 未传' 状态.
 # 区别于 None: None = 调用方显式传 None (= 过滤 agent_id=None 的 chunk,

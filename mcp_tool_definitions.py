@@ -75,6 +75,31 @@ TOOLS = [
                 "agent_id": {"type": "string", "description": "[P0 scoping] agent 标识 (e.g. 'main', 'tiancanbian'). 召回时按 agent_id 过滤."},
                 "user_id": {"type": "string", "description": "[P0 scoping] 用户标识 (e.g. 'owner_ling')."},
                 "run_id": {"type": "string", "description": "[P0 scoping] 单次 run 标识 (e.g. session UUID)."},
+                # [8/15 E-C.2] 规则化 mention 解析 (Mem0 借鉴不调 LLM, 主人 6/29 不抢决策原则)
+                "auto_relate": {
+                    "type": "boolean",
+                    "description": (
+                        "[赞谈历史] 默认 False (backward-compat). True 后 扫 content 中 @entity_id (e.g. @company:tb_tech) 和 #tag (e.g. #strategy) explicit mention, 自动创建/lookup chunk -[entity_relation]-> entity 和 chunk -[tag_relation]-> tag entity. 默认 dedup_check=True. 运行时被原调用者 沉默为“chunk mention 某 entity”关系, owner 可以用 entity_relation / tag_relation 参数自定义."
+                    ),
+                    "default": False,
+                },
+                "entity_relation": {
+                    "type": "string",
+                    "description": "[8/15 E-C.2] auto_relate=True 时, chunk -[entity_relation]-> entity 的关系类型. 默认 “mentions”.",
+                    "default": "mentions",
+                },
+                "tag_relation": {
+                    "type": "string",
+                    "description": "[8/15 E-C.2] auto_relate=True 时, chunk -[tag_relation]-> tag entity 的关系类型. 默认 “tagged”.",
+                    "default": "tagged",
+                },
+                # [8/15 E-C.2 叠加 E-B dedup_check] 在 auto_relate=True 时也生效:
+                # 同 (chunk_id, target_id, relation) 不创建重复行
+                "dedup_check": {
+                    "type": "boolean",
+                    "description": "默认 False. auto_relate=True 时默认 True (同 chunk 同 target 只创 1 个 relation).",
+                    "default": False,
+                },
             },
             "required": ["content"],
         },

@@ -365,6 +365,14 @@ class MemoryCore:
         agent_id: Optional[str] = None,
         user_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        # [8/15 E-C.2] 规则化 mention 解析. 主人 6/29 “不抢决策” 原则:
+        # auto_relate=False (默认) 行为不变, 默认 backward-compat.
+        # auto_relate=True 后, 扫 content 里 @entity_id / #tag explicit mention,
+        # 自动 create/check (dedup 默认 True) tag entity + relation.
+        auto_relate: bool = False,
+        entity_relation: str = "mentions",
+        tag_relation: str = "tagged",
+        dedup_check: bool = False,
     ) -> str:
         """写入一条 chunk + 实体 + 关系.
 
@@ -519,6 +527,108 @@ class MemoryCore:
                 except sqlite3.IntegrityError as _e:
                     # INSERT OR IGNORE 通常已吸收; 兜底 catch 防御 schema 变化引入新 UNIQUE.
                     logger.warning(f"[pii_audit] audit_log skip for {chunk_id}/{hit['category']}: {_e}")
+
+            # 5. [8/15 E-C.2] @entity_id / #tag mention 解析 + 自动 relation.
+            # 规则化, 不调 LLM. 主人 6/29 不抢决策原则: auto_relate=False (默认) 行为
+            # 不变. auto_relate=True 后扫 content 提取 @entity_id / #tag mention,
+            # 自动建/查 (dedup 默认 True) tag entity (kind="tag") + relation.
+            # 不同/eve dedup_check / tag_entity 同 kind dedup (同一个 #tag 复用 同 entity_id).
+            if auto_relate:
+                from memory import _extract_mentions
+
+                entity_mentions, tag_mentions = _extract_mentions(content)
+                # Refresh ts 内部使用 (ts 在 _txn 外定义, but 这里在 with 块内,
+                # 使用另一个被 _txn 上下文隔离的本地变量名以免与 _txn by ghost.
+                # 踩到一个起名: 不重复定义, 直接使用 ts.
+                _ar_ts = ts
+                # 5a. entity mentions: chunk -[entity_relation]-> entity
+                for eid in entity_mentions:
+                    # 验证 entity_id 合法 (validate_id)
+                    try:
+                        validate_id(eid, "entity_id")
+                    except Exception as e:
+                        logger.warning(f"[auto_relate] skip invalid entity_id {eid!r}: {e}")
+                        continue
+                    # 检查 entity 是否存在
+                    existing = self._conn.execute(
+                        "SELECT id FROM entities WHERE id = ? AND valid_until IS NULL",
+                        (eid,),
+                    ).fetchone()
+                    if not existing:
+                        logger.warning(f"[auto_relate] skip undeclared entity_id {eid!r} (entity not found)")
+                        continue
+                    # 检查 relation 是否存在 (dedup)
+                    if dedup_check:
+                        existing_rel = self._conn.execute(
+                            "SELECT id FROM relations WHERE source_id=? AND target_id=? AND relation=? AND valid_until IS NULL LIMIT 1",
+                            (chunk_id, eid, entity_relation),
+                        ).fetchone()
+                        if existing_rel:
+                            continue
+                    self._conn.execute(
+                        """
+                        INSERT INTO relations (source_id, target_id, relation, weight, properties_json,
+                                               valid_from, valid_until, source, confidence, evidence_chunk_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            chunk_id,
+                            eid,
+                            entity_relation,
+                            1.0,
+                            "{}",
+                            _ar_ts,
+                            None,
+                            source,
+                            1.0,
+                            chunk_id,
+                        ),
+                    )
+                # 5b. tag mentions: 自动创建 tag entity (kind="tag") + relation
+                for tag_name in tag_mentions:
+                    tag_eid = f"tag:{tag_name}"
+                    # tag entity 检查是否存在 (同 kind dedup)
+                    existing_tag = self._conn.execute(
+                        "SELECT id FROM entities WHERE id = ? AND valid_until IS NULL",
+                        (tag_eid,),
+                    ).fetchone()
+                    if not existing_tag:
+                        # 创建 tag entity (以 tag:tagname 为 id, kind="tag")
+                        self._upsert_entity(
+                            {
+                                "id": tag_eid,
+                                "kind": "tag",
+                                "name": tag_name,
+                                "memory_type": memory_type,
+                            }
+                        )
+                    # tag relation 检查 (dedup_check)
+                    if dedup_check:
+                        existing_tag_rel = self._conn.execute(
+                            "SELECT id FROM relations WHERE source_id=? AND target_id=? AND relation=? AND valid_until IS NULL LIMIT 1",
+                            (chunk_id, tag_eid, tag_relation),
+                        ).fetchone()
+                        if existing_tag_rel:
+                            continue
+                    self._conn.execute(
+                        """
+                        INSERT INTO relations (source_id, target_id, relation, weight, properties_json,
+                                               valid_from, valid_until, source, confidence, evidence_chunk_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            chunk_id,
+                            tag_eid,
+                            tag_relation,
+                            1.0,
+                            "{}",
+                            _ar_ts,
+                            None,
+                            source,
+                            1.0,
+                            chunk_id,
+                        ),
+                    )
         # _txn() 退出时已 COMMIT
         # Digest only depends on identity facts and high-importance decisions/episodes.
         if any(ent.get("kind") == "identity_fact" for ent in (entities or [])) or (memory_type in ("decision", "episode") and importance >= config.config.digest_importance_threshold):
