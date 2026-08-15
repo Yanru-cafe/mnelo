@@ -53,9 +53,27 @@ def _get_mem() -> Any:
         from memory import DB_PATH as _DB_PATH
         from memory import Memory
 
-        _mem_instance = Memory()
-        logger.info(f"mnelo MCP ready (db: {_DB_PATH})")
+        effective_db_path = db_path if db_path is not None else _DB_PATH
+        # [audit fix 6.1] 修真: 即使 Memory() 抛异常, 也保留为 None 让下次重试
+        # (旧版 _get_mem 直接抛 — 单例失败后永远 stuck None, 但表现一致.
+        # 新版行为: raise 让 caller 看见 — caller (test fixture) 可决定 retry 还是 skip)
+        _mem_instance = Memory(db_path=effective_db_path) if db_path is not None else Memory()
+        logger.info(f"mnelo MCP ready (db: {effective_db_path})")
     return _mem_instance
+
+
+def _reset_mem_for_test() -> None:
+    """[audit fix 6.2 2026-08-16] test fixture helper — reset Memory singleton.
+    用法: 在 TestMain 或 fixture setup/teardown 调, 让每个 test 拿新 Memory 实例.
+    关 _mem_instance 引用 → 下次 _get_mem() 重建 (db_path 注入生效).
+    """
+    global _mem_instance
+    if _mem_instance is not None:
+        try:
+            _mem_instance.close()
+        except Exception:
+            pass  # defensive — close may fail if not opened
+        _mem_instance = None
 
 
 def _resolve_server_defaults() -> tuple:
