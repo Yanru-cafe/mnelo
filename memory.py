@@ -38,6 +38,86 @@ _MENTION_ENTITY_RE = _re.compile(r"@((?:[a-zA-Z]+:[\w:.\-]+)|master_[\w]+)", _re
 _MENTION_TAG_RE = _re.compile(r"#([\w\-]{1,50})", _re.UNICODE)
 
 
+def _fts_escape_query(query: str) -> str:
+    """[8/16 E-2 重启] FTS5 MATCH query 安全转义.
+
+    防止 query 中引号 / 双引号触发 FTS5 syntax error
+    (上轮 P1 #66 实战报错).
+
+    规则: 转义 " 为 "" \u3002其他 FTS5 特欧字符 ( · 又 未 反 为 语义的都不修改.
+    """
+    if not query:
+        return ""
+    return query.replace(chr(34), chr(34) + chr(34))
+
+
+def _fts_sync_upsert(conn, chunk_rowid: int, content: str, source: str, session_id: str) -> None:
+    """[8/16 E-2 重启 non-trigger] 手动 INSERT chunks_fts (跟随 chunks.rowid INTEGER).
+
+    实战背景: 不使用 trigger 避免 P1 #66/#75/#78/#79/#81 实战问题。
+    调用方: 记忇 (remember) · update (immutable, 新 chunk) · forget (不调 · stale row 过滤).
+
+    Args:
+        conn: sqlite3.Connection (在 _txn 块内 跟随主事务)
+        chunk_rowid: chunks.rowid INTEGER (FTS5 rowid 与 chunks.rowid 一致)
+        content: chunk content (FTS5 全文入库)
+        source: chunk source (过滤用)
+        session_id: chunk session_id (过滤用)
+    """
+    if chunk_rowid is None:
+        return  # 调用方必须提供 INTEGER rowid
+    try:
+        conn.execute(
+            "INSERT INTO chunks_fts(rowid, content, source, session_id) VALUES (?, ?, ?, ?)",
+            (chunk_rowid, content or "", source or "", session_id or "default"),
+        )
+    except Exception as _e:  # noqa: BLE001
+        # P1 #66/#75/#77/#78: 同 rowid 重复 insert 不报错·弃老 row 避免 zvec SIGSEGV
+        # 考虑走 "代替"·但 sqlite3 UPSERT (§3.24+) 语法复杂·手动 DELETE+INSERT 更简单。
+        try:
+            conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (chunk_rowid,))
+            conn.execute(
+                "INSERT INTO chunks_fts(rowid, content, source, session_id) VALUES (?, ?, ?, ?)",
+                (chunk_rowid, content or "", source or "", session_id or "default"),
+            )
+        except Exception:
+            pass  # P1 #77 stale cleanup 已处理·静默忽略即可
+
+
+def _fts_sync_delete(conn, chunk_rowid: int) -> None:
+    """[8/16 E-2] 手动 DELETE chunks_fts (P1 #75/#77 实战避免 trigger).
+
+    调用方: hard DELETE chunks (test fixture / benchmark cleanup).
+    forget() 不调 (stale row + WHERE valid_until IS NULL 过滤).
+
+    Args:
+        conn: sqlite3.Connection
+        chunk_rowid: chunks.rowid INTEGER (不是 chunks.id TEXT PK)
+    """
+    if chunk_rowid is None:
+        return
+    try:
+        conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (chunk_rowid,))
+    except Exception:
+        pass  # FTS5 不存在 · 跳过
+
+
+def _fts_sync_cleanup_stale(conn) -> int:
+    """[8/16 E-2 P1 #77 fix] 清理 FTS5 中已被 hard DELETE 的 chunks rowid.
+
+    调用方: test fixture cleanup / benchmark cleanup_seed / forget() · 在
+    hard DELETE chunks 后调用。避免下次 INSERT 同 rowid 冲突 (P1 #77)。
+
+    Returns:
+        int · 删除的 stale row 数
+    """
+    try:
+        cur = conn.execute("DELETE FROM chunks_fts WHERE rowid NOT IN (SELECT rowid FROM chunks)")
+        return cur.rowcount
+    except Exception:
+        return 0  # FTS5 不存在 · 跳过
+
+
 def _extract_mentions(content: str) -> Tuple[List[str], List[str]]:
     """[8/15 E-C.2] 从 chunk content 提取 @entity_id / #tag mention.
 

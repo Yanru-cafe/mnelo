@@ -8,6 +8,7 @@ from memory import Memory
 def _cleanup(mem, ids, entity_ids=()):
     # [8/6 plan §10] 后端感知清理 (helper 先 _index.remove 再 DELETE chunks)
     from helpers import cleanup_chunks
+
     cleanup_chunks(mem, chunk_ids=list(set(ids)))
     for eid in entity_ids:
         mem._conn.execute("DELETE FROM entities WHERE id = ?", (eid,))
@@ -18,6 +19,12 @@ def _cleanup(mem, ids, entity_ids=()):
 def _new_mem():
     mem = Memory()
     mem._conn.execute("DELETE FROM meta WHERE key IN ('digest_chunk_id', 'digest_dirty')")
+    # [8/16 E-2 P1 #77 fix] sync FTS5 stale rowid cleanup (non-trigger)
+    try:
+        mem._conn.execute("DELETE FROM chunks_fts WHERE rowid NOT IN (SELECT rowid FROM chunks)")
+    except Exception:
+        # FTS5 不存在 · 跳过
+        pass
     mem._conn.commit()
     return mem
 
@@ -149,10 +156,7 @@ def test_ttl_revert_sql_revives_chunk_and_cancels_purge():
         ids.append(cid)
         before = {"valid_until": None}
         after = {"valid_until": "2026-08-05T00:00:00"}
-        revert_sql = (
-            f"UPDATE chunks SET valid_until = NULL WHERE id = '{cid}'; "
-            f"DELETE FROM purged_queue WHERE target_id = '{cid}' AND target_kind = 'chunk' AND done = 0"
-        )
+        revert_sql = f"UPDATE chunks SET valid_until = NULL WHERE id = '{cid}'; DELETE FROM purged_queue WHERE target_id = '{cid}' AND target_kind = 'chunk' AND done = 0"
         assert mem._apply_ttl_soft_delete("test_digest_ttl", cid, "ephemeral", before, after, revert_sql, "2026-08-05T00:00:00")
         assert mem._conn.execute("SELECT COUNT(*) FROM purged_queue WHERE target_id=? AND done=0", (cid,)).fetchone()[0] == 1
         mem._conn.executescript(revert_sql)
@@ -174,7 +178,23 @@ def test_audit_undo_executes_multistatement_revert_and_appends_reverted_log():
         after = {"valid_until": "2026-08-05T00:00:00"}
         sql = f"UPDATE chunks SET valid_until = '2026-08-05T00:00:00' WHERE id = '{cid}';"
         mem._conn.execute("UPDATE chunks SET valid_until=? WHERE id=?", ("2026-08-05T00:00:00", cid))
-        mem._conn.execute("INSERT INTO audit_log (run_id,pass_name,action_type,ref_type,ref_id,before_json,after_json,confidence,llm_used,status,created_at,revert_sql) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ("test_undo", "hygiene", "ttl_soft_delete", "chunk", cid, json.dumps(before), json.dumps(after), 1.0, 0, "applied", "2026-08-05T00:00:00", f"UPDATE chunks SET valid_until=NULL WHERE id='{cid}'; DELETE FROM purged_queue WHERE target_id='{cid}' AND done=0;"))
+        mem._conn.execute(
+            "INSERT INTO audit_log (run_id,pass_name,action_type,ref_type,ref_id,before_json,after_json,confidence,llm_used,status,created_at,revert_sql) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "test_undo",
+                "hygiene",
+                "ttl_soft_delete",
+                "chunk",
+                cid,
+                json.dumps(before),
+                json.dumps(after),
+                1.0,
+                0,
+                "applied",
+                "2026-08-05T00:00:00",
+                f"UPDATE chunks SET valid_until=NULL WHERE id='{cid}'; DELETE FROM purged_queue WHERE target_id='{cid}' AND done=0;",
+            ),
+        )
         mem._conn.commit()
         result = mem.audit_undo(mem._conn.execute("SELECT max(id) FROM audit_log WHERE run_id='test_undo'").fetchone()[0])
         assert result["status"] == "reverted"

@@ -267,3 +267,21 @@ INSERT INTO meta (key, value) VALUES
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 30000;
 PRAGMA foreign_keys = ON;
+
+-- ========================================
+-- 9. chunks_fts 虚表 (E-2 重启 non-trigger 模式, P1 #66-#81 实战教训)
+-- ========================================
+-- [8/16 E-2] 不使用 trigger · 上中 P1 #66 trigger context 报错 / P1 #75 FTS5 'delete' cmd SQL logic error / P1 #78 rowid mismatch / P1 #81 zvec SIGSEGV.
+-- 设计哲学: _txn 块内手动 INSERT · soft delete 不佽老 row (查询侧 WHERE valid_until IS NULL 过滤) · P1 #77 stale rowid 需手动 cleanup · P1 #84 zvec 补偿.
+--
+-- 虚表定义：content / source / session_id 3 列 · trigram tokenizer · meta 路加速查询
+-- chunks 表隐式 rowid INTEGER · FTS5 rowid 跟随·不用 chunks.id TEXT PK (P1 #78)
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    content,
+    source,
+    session_id,
+    tokenize='trigram'
+);
+
+-- [重要] 不加 INSERT / UPDATE / DELETE trigger · 防 P1 #66 / P1 #75 / P1 #78 / P1 #79 / P1 #81 实战重现.
+-- 手动 sync 走 memory_core.py _meta_recall / remember / update / forget 路径.

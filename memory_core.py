@@ -459,6 +459,11 @@ class MemoryCore:
                     json.dumps(meta_dict, ensure_ascii=False),
                 ),
             )
+            # [8/16 E-2] 手动 FTS5 sync (跟随 chunks.rowid INTEGER · 避免 trigger SIGSEGV)
+            from memory import _fts_sync_upsert
+
+            chunk_rowid = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (chunk_id,)).fetchone()["rowid"]
+            _fts_sync_upsert(self._conn, chunk_rowid, content, source, session_id)
 
             # 2. 写 entities (insert or ignore — 实体可能已存在)
             for ent in entities or []:
@@ -963,6 +968,17 @@ class MemoryCore:
                     importance_value,
                     json.dumps({"supersedes": old_id, "reason": reason}, ensure_ascii=False),
                 ),
+            )
+            # [8/16 E-2] 手动 FTS5 sync 新 chunk (老 chunk valid_until 设为 now · stale row 过滤)
+            from memory import _fts_sync_upsert
+
+            new_rowid = self._conn.execute("SELECT rowid FROM chunks WHERE id = ?", (new_id,)).fetchone()["rowid"]
+            _fts_sync_upsert(
+                self._conn,
+                new_rowid,
+                new_content or old["content"],
+                "update:" + reason,
+                old["session_id"],
             )
 
             # 2. 老 chunk 标 superseded_by + valid_until (中 supersede 后不再召回)
@@ -1587,19 +1603,95 @@ class MemoryCore:
         if filters and "agent_id" in filters:
             sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
             params.append(filters["agent_id"])
-        # [P2 2026-08-11] temporal intent 加成 — 跟 _meta_recall_with_conn 同源
+        # [8/16 P1 #91 fix] user_id filter 也在 metadata_json · 跟 agent_id 平行
+        if filters and "user_id" in filters:
+            sql += " AND json_extract(metadata_json, '$.user_id') = ?"
+            params.append(filters["user_id"])
+        # [8/16 E-2 重启 non-trigger] FTS5 BM25 主路 + LIKE fallback.
+        # 设计哲学 (上轮 P1 #67/#68/#69/#70 实战教諛· 避免 P1 #81 SIGSEGV):
+        # - BM25 路: 完整中文句 · bm25 ASC 优先·importance DESC 加权·LIMIT 外移
+        # - LIKE 路: 2-char 中文短查 · 符号 token · 起這云 fallback
+        # - UNION ALL 后包 subquery (避免 P1 #69 ORDER BY/LIMIT 报错)· 去重走 Python set
+        from memory import _fts_escape_query  # [P1 #63] lazy · 避免 circular
+
+        # 状态变量：source / type / agent_id / user_id filter · temporal intent · valid_until
+        fts_filter_clauses = []
+        fts_filter_params = []
+        like_filter_clauses = []
+        like_filter_params = []
+        if filters and "source" in filters:
+            fts_filter_clauses.append("c.source = ?")
+            fts_filter_params.append(filters["source"])
+            like_filter_clauses.append("source = ?")
+            like_filter_params.append(filters["source"])
+        if filters and "type" in filters:
+            _t = norm_memory_type(filters["type"])
+            fts_filter_clauses.append("c.memory_type = ?")
+            fts_filter_params.append(_t)
+            like_filter_clauses.append("memory_type = ?")
+            like_filter_params.append(_t)
+        if filters and "agent_id" in filters:
+            fts_filter_clauses.append("json_extract(c.metadata_json, '$.agent_id') = ?")
+            fts_filter_params.append(filters["agent_id"])
+            like_filter_clauses.append("json_extract(metadata_json, '$.agent_id') = ?")
+            like_filter_params.append(filters["agent_id"])
+        if filters and "user_id" in filters:  # [8/16 P1 #91 fix]
+            fts_filter_clauses.append("json_extract(c.metadata_json, '$.user_id') = ?")
+            fts_filter_params.append(filters["user_id"])
+            like_filter_clauses.append("json_extract(metadata_json, '$.user_id') = ?")
+            like_filter_params.append(filters["user_id"])
         intent = detect_query_intent(query)
         if intent == "upcoming":
             _now_ts = asof if asof else now()
-            sql += " AND timestamp > ?"
-            params.append(_now_ts)
+            fts_filter_clauses.append("c.timestamp > ?")
+            fts_filter_params.append(_now_ts)
+            like_filter_clauses.append("timestamp > ?")
+            like_filter_params.append(_now_ts)
         elif intent == "current_state":
-            sql += " AND valid_until IS NULL"
-        # historical / soft_recency: 不加约束
-        sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
-        params.append(top_k)
+            fts_filter_clauses.append("c.valid_until IS NULL")
+            like_filter_clauses.append("valid_until IS NULL")
 
-        rows = self._conn.execute(sql, params).fetchall()
+        fts_where = " AND ".join(["(c.valid_until IS NULL OR c.valid_until > ?)", *fts_filter_clauses]) or "(c.valid_until IS NULL OR c.valid_until > ?)"
+        like_where = " AND ".join(["(valid_until IS NULL OR valid_until > ?)", *like_filter_clauses]) or "(valid_until IS NULL OR valid_until > ?)"
+
+        # FTS5 BM25 路：SELECT id, content, ..., bm25(chunks_fts) · LIMIT 外移
+        fts_sql = (
+            "SELECT c.id, c.content, c.memory_type, c.source, c.timestamp, c.importance, "
+            "       bm25(chunks_fts) AS fts_score "
+            "FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid "
+            "WHERE chunks_fts MATCH ? AND " + fts_where
+        )
+        fts_params = [_fts_escape_query(query), asof, *fts_filter_params]
+        # LIKE fallback 路：SELECT id, content, ..., 0.0 AS fts_score
+        like_sql = "SELECT id, content, memory_type, source, timestamp, importance, 0.0 AS fts_score FROM chunks WHERE " + like_where + " AND content LIKE ?"
+        like_params = [asof, *like_filter_params, f"%{query}%"]
+
+        # UNION ALL 包 subquery (P1 #67/#69 避免) · 去重 (P1 #70 params 数量 严格匹配)
+        union_sql = f"SELECT * FROM ({fts_sql} UNION ALL {like_sql}) ORDER BY 6 ASC, 5 DESC LIMIT ?"
+        # fts_sql 选 bm25 ASC (越低越相关) · ORDER BY 6 = fts_score · 5 = importance
+        union_params = tuple(fts_params) + tuple(like_params) + (top_k * 2,)
+
+        try:
+            rows = self._conn.execute(union_sql, union_params).fetchall()
+        except Exception:
+            # FTS5 不存在或 LIKE 单路 fallback (跨 schema 兼容)
+            rows = self._conn.execute(
+                "SELECT id, content, memory_type, source, timestamp, importance "
+                "FROM chunks WHERE (valid_until IS NULL OR valid_until > ?) "
+                "AND content LIKE ? ORDER BY importance DESC, timestamp DESC LIMIT ?",
+                (asof, f"%{query}%", top_k),
+            ).fetchall()
+
+        # 去重：同 id 优先 FTS5 (BM25 更智能排序) · 实际 LIMIT top_k
+        seen = set()
+        deduped = []
+        for r in rows:
+            cid = r["id"]
+            if cid in seen:
+                continue
+            seen.add(cid)
+            deduped.append(r)
+        rows = deduped[:top_k]
         return [self._hit_dict(r, method="meta") for r in rows]
 
     def _entity_recall(self, query: str, top_k: int, filters: Dict, asof: str) -> List[Dict]:
