@@ -92,7 +92,7 @@ class TestHandleListEntitiesFullPath:
 
     def test_list_entities_empty(self, mem):
         """No args → all active entities."""
-        result = _mcp_repo._handle_list_entities(mem, {})
+        result = self._mcp_repo._call_tool("memory_list_entities", {})
         data = json.loads(result)
         assert isinstance(data, dict)
         assert "entities" in data
@@ -108,7 +108,7 @@ class TestHandleListEntitiesFullPath:
                 (f"{clean_prefix}_{kind}", kind, "2026-07-19T00:00:00"),
             )
         mem._conn.commit()
-        result = _mcp_repo._handle_list_entities(mem, {"kind": "test_kind_a"})
+        result = self._mcp_repo._call_tool("memory_list_entities", {"kind": "test_kind_a"})
         data = json.loads(result)
         # Should only have test_kind_a
         for ent in data["entities"]:
@@ -125,7 +125,7 @@ class TestHandleListEntitiesFullPath:
             (f"{clean_prefix}_high", "2026-07-19T00:00:00"),
         )
         mem._conn.commit()
-        result = _mcp_repo._handle_list_entities(mem, {"min_importance": 0.5})
+        result = self._mcp_repo._call_tool("memory_list_entities", {"min_importance": 0.5})
         data = json.loads(result)
         # All returned entities should have importance >= 0.5
         for ent in data["entities"]:
@@ -139,7 +139,7 @@ class TestHandleListEntitiesFullPath:
                 (f"{clean_prefix}_limit_{i}", f"name_{i}", "2026-07-19T00:00:00"),
             )
         mem._conn.commit()
-        result = _mcp_repo._handle_list_entities(mem, {"limit": 2})
+        result = self._mcp_repo._call_tool("memory_list_entities", {"limit": 2})
         data = json.loads(result)
         # Should have at most 2 entities
         assert data["count"] <= 2
@@ -155,7 +155,7 @@ class TestHandleListEntitiesFullPath:
             (f"{clean_prefix}_deleted", "2026-07-19T00:00:00", "2026-07-19T01:00:00"),
         )
         mem._conn.commit()
-        result = _mcp_repo._handle_list_entities(mem, {})
+        result = self._mcp_repo._call_tool("memory_list_entities", {})
         data = json.loads(result)
         # Deleted should not appear
         ids = [e["id"] for e in data["entities"]]
@@ -180,7 +180,7 @@ class TestHandleSearchRelationsFullPath:
         )
         mem.relate(a_id, b_id, "r9_test_rel", weight=0.8)
         mem._conn.commit()
-        result = _mcp_repo._handle_search_relations(mem, {"relation": "r9_test_rel"})
+        result = self._mcp_repo._call_tool("memory_search_relations", {"relation": "r9_test_rel"})
         data = json.loads(result)
         assert isinstance(data, dict)
         assert "relations" in data
@@ -201,24 +201,18 @@ class TestHandleSearchRelationsFullPath:
         mem.relate(a_id, b_id, "r9_test_rel_2", weight=0.5)
         mem._conn.commit()
         # Future asof should still find it
-        result = _mcp_repo._handle_search_relations(
-            mem,
-            {
+        result = self._mcp_repo._call_tool("memory_search_relations", {
                 "relation": "r9_test_rel_2",
                 "asof": "2099-12-31T00:00:00",
-            },
-        )
+            })
         data = json.loads(result)
         assert isinstance(data, dict)
 
     def test_search_relations_no_results(self, mem, clean_prefix):
         """Nonexistent relation type → empty list."""
-        result = _mcp_repo._handle_search_relations(
-            mem,
-            {
+        result = self._mcp_repo._call_tool("memory_search_relations", {
                 "relation": "definitely_does_not_exist_xyz",
-            },
-        )
+            })
         data = json.loads(result)
         assert data["relations"] == []
         assert data["count"] == 0
@@ -239,13 +233,10 @@ class TestHandleSearchRelationsFullPath:
             )
             mem.relate(a_id, b_id, "r9_many_rels", weight=0.5)
         mem._conn.commit()
-        result = _mcp_repo._handle_search_relations(
-            mem,
-            {
+        result = self._mcp_repo._call_tool("memory_search_relations", {
                 "relation": "r9_many_rels",
                 "limit": 2,
-            },
-        )
+            })
         data = json.loads(result)
         assert data["count"] <= 2
 
