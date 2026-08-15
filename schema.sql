@@ -246,6 +246,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 -- 只需 INSERT/DELETE 两个触发器 (初始化 + 硬删除 走老路)
 CREATE TRIGGER trg_chunks_fts_insert AFTER INSERT ON chunks
 BEGIN
+    -- [8/15 E-2 P1 #78 fix] FTS5 rowid 默认 INTEGER, 必须用 new.rowid (不能用 new.id TEXT PK 受 FTS5 implicit rowid).
     INSERT INTO chunks_fts(rowid, content, source, session_id)
     VALUES (new.rowid, new.content, new.source, new.session_id);
 END;
