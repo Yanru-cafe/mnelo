@@ -127,7 +127,7 @@ TOOLS = [
                 "dedup_check": {
                     "type": "boolean",
                     "description": "默认 False. True → 三元组重复时返已有 relation_id, 不创建新 (Mem0 add_relations 行为借鉴).",
-                    "default": false,
+                    "default": False,
                 },
             },
             "required": ["source_id", "target_id", "relation"],
@@ -170,7 +170,7 @@ TOOLS = [
                 "include_superseded": {
                     "type": "boolean",
                     "description": "默认 False = 排除软删 (valid_until 非 NULL). True = 含历史.",
-                    "default": false,
+                    "default": False,
                 },
             },
         },
