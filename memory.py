@@ -464,6 +464,11 @@ def _txn(conn):
     依赖 sqlite3 隐式事务, 中途异常 → 单例 conn 复用下次 commit 可能连同
     提交, 留下 vec0 rowid 漂移的孤儿 chunk.
 
+    [audit fix #9 2026-08-16] 嵌套 _txn: 检测外层 active txn → SAVEPOINT, 否则 BEGIN.
+    原版用 BEGIN, 嵌套 _txn(_txn) 会 OperationalError "within a transaction".
+    新版: conn.in_transaction 判断 → SAVEPOINT (嵌套) / BEGIN (顶层).
+    异常时 RELEASE / ROLLBACK TO + RAISE outer catch; 顶层 ROLLBACK.
+
     行为契约:
       - 进入: 检测是否已在事务里. 是 → SAVEPOINT (嵌套); 否 → BEGIN
       - 正常退出: 嵌套里 RELEASE SAVEPOINT, 顶层 COMMIT
@@ -494,7 +499,6 @@ def _txn(conn):
         conn.execute(f"SAVEPOINT {savepoint_name}")
     else:
         conn.execute("BEGIN")
-
     try:
         yield conn
     except BaseException:
