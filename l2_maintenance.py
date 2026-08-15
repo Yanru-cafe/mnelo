@@ -59,16 +59,6 @@ class L2MaintenanceMixin:
         "caps": {"supersede": 20, "merge": 20, "purge": 50},
     }
 
-    # TTL 规则按 memory_type (TASKS_L2_HYGIENE H3 §3 + DESIGN §3.0.5)
-    _MEMORY_TYPE_TTL_DAYS: Dict[str, Optional[int]] = {
-        "ephemeral": 7,
-        "fact": 365,
-        "preference": 180,
-        "episode": 730,
-        "decision": 730,
-        "procedure": None,
-    }
-
     # ============================================================
     # Promote / Demote 阈值 (DESIGN §5.2 P4 + TASKS_L2_HYGIENE H4)
     # ============================================================
