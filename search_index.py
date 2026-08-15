@@ -189,23 +189,37 @@ class ZvecIndex(SearchIndex):
         zv = self._zvec
         docs = self._col.query(zv.Query(field_name="embedding", vector=vec, param=zv.HnswQueryParam(ef=top_k * 2)))
         hits = []
+        # [audit fix 4.3 2026-08-16] batch rowid → chunk_id translation
+        # 原 N+1: 每 zvec hit 1 次 SELECT chunks WHERE rowid = ? (top_k=10 → 10 round-trip).
+        # 现在: 累积 rowid → 1 次 IN(...) SELECT + dict lookup.
+        rowids_to_fetch = []
+        hits_meta = []  # parallel to docs[:top_k] for assembling final hits
         for d in docs[:top_k]:
-            # [8/6 fix] zvec doc id = chunks.rowid (int, 生产路径). 翻译回 chunk_id via SQLite.
-            # 测试路径 (conn=None, fake zvec): d.id 可能是 chunk_id 本身 (非 int), 直接用.
             try:
                 zvec_doc_id = int(d.id)
                 if conn is not None:
-                    row = conn.execute("SELECT id FROM chunks WHERE rowid = ?", (zvec_doc_id,)).fetchone()
-                    if row is None:
-                        continue
-                    chunk_id = row[0]
+                    rowids_to_fetch.append(zvec_doc_id)
+                    hits_meta.append((zvec_doc_id, float(d.score)))
                 else:
                     # 生产路径但 conn=None 兜底 (不推荐)
-                    chunk_id = str(zvec_doc_id)
+                    hits.append(KNNHit(chunk_id=str(zvec_doc_id), distance=float(d.score)))
             except (TypeError, ValueError):
                 # 测试路径 / 旧 rebuild 残留 (chunk_id 直接当 zvec_id)
-                chunk_id = str(d.id)
-            hits.append(KNNHit(chunk_id=chunk_id, distance=float(d.score)))
+                hits.append(KNNHit(chunk_id=str(d.id), distance=float(d.score)))
+
+        # Batch rowid → chunk_id translation
+        if conn is not None and rowids_to_fetch:
+            placeholders = ",".join("?" * len(rowids_to_fetch))
+            rows = conn.execute(
+                f"SELECT rowid, id FROM chunks WHERE rowid IN ({placeholders})",
+                rowids_to_fetch,
+            ).fetchall()
+            rowid_to_chunk_id = {r["rowid"]: r["id"] for r in rows}
+            for zvec_doc_id, score in hits_meta:
+                chunk_id = rowid_to_chunk_id.get(zvec_doc_id)
+                if chunk_id is None:
+                    continue
+                hits.append(KNNHit(chunk_id=chunk_id, distance=score))
         return hits
 
     def add(self, chunk_id: str, vector_bytes: bytes, conn=None, content: Optional[str] = None, memory_type: str = "", source: str = "") -> None:
