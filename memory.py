@@ -38,21 +38,6 @@ _MENTION_ENTITY_RE = _re.compile(r"@((?:[a-zA-Z]+:[\w:.\-]+)|master_[\w]+)", _re
 _MENTION_TAG_RE = _re.compile(r"#([\w\-]{1,50})", _re.UNICODE)
 
 
-def _fts_escape_query(query: str) -> str:
-    r"""[8/15 E-2] FTS5 MATCH query 安全转义.
-
-    FTS5 MATCH expression 中某些字符有特殊含义 (双引号 作为词组定界) 会陷阱为 syntax error.
-    中文不需转义 — FTS5 默认 unicode61 / trigram 不对 unicode 元素特别敏感.
-    输入 "买入 AAPL" → 输出 "买入 AAPL" (原样返回).
-
-    实践证明: 中文短查询 (例 买入) trigram 不命中 — 这个 helper 不能 fix 那个问题,
-    只是防范 FTS5 MATCH 拼入字符 "" \ 【 【 等 SQL syntax 拆变.
-    """
-    if not query or not isinstance(query, str):
-        return ""
-    return query.replace(chr(34), chr(34) + chr(34))
-
-
 def _extract_mentions(content: str) -> Tuple[List[str], List[str]]:
     """[8/15 E-C.2] 从 chunk content 提取 @entity_id / #tag mention.
 

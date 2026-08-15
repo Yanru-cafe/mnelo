@@ -228,41 +228,6 @@ CREATE TRIGGER trg_chunks_updated AFTER UPDATE OF superseded_by, valid_until ON 
 BEGIN UPDATE chunks SET created_at = created_at WHERE id = NEW.id; END;
 -- (chunks 表不用 updated_at, 触发器保持 created_at 不变)
 
--- ========================================
--- [8/15 E-2] FTS5 虚表 + 触发器: meta 路径 加速 (DESIGN §4.1 实战)
--- trigram tokenizer (中文 3-gram 子串召回), 外部内容表 + 触发器维护
--- 软删不锈发 FTS 删除 (软删 = UPDATE valid_until, 不 UPDATE content),
--- UPDATE 触发器已覆盖 (不动 FTS).
--- 查询侧 WHERE valid_until IS NULL 过滤.
--- ========================================
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    content,
-    source,
-    session_id,
-    tokenize='trigram'
-);
-
--- 软删不锈发 DELETE 触发器 (软删 = UPDATE valid_until, 不锈发 AFTER UPDATE)
--- 只需 INSERT/DELETE 两个触发器 (初始化 + 硬删除 走老路)
-CREATE TRIGGER trg_chunks_fts_insert AFTER INSERT ON chunks
-BEGIN
-    INSERT INTO chunks_fts(rowid, content, source, session_id)
-    VALUES (new.rowid, new.content, new.source, new.session_id);
-END;
-
--- [8/15 E-2 P1 #75 fix] 不加 DELETE trigger—SQLite 3.45/3.53 FTS5 'delete' cmd in trigger context
--- 报 SQL logic error (官方示例照拷都败). mnelo 走 immutable history (new chunk + old supersede)
--- + 软删 (UPDATE valid_until), 不走 hard DELETE 路径 (P1 #42). 如需手动 hard DELETE,
--- escape hatch: UPDATE chunks_fts SET rowid=rowid WHERE chunks_fts MATCH '<text>' 检索 + 删除。
--- FTS5 保留 stale rowid (query 侧 WHERE valid_until IS NULL 过滤).
-
--- [8/15 E-2 fix] UPDATE trigger: content 变更后 FTS5 必须同步.
--- 老逻辑: 先 delete 旧 row → 再 insert 新 row.
--- 软删不锈发 (软删 = UPDATE valid_until 但 content 不变,
--- 本触发器不 fire — FTS5 保留旧 rowid 可查询历史软删).
--- 但 content/中间删人修改会锈发, 同步是必要的.
--- [8/15 E-2] 不加 UPDATE OF content trigger — mnelo update() 走 immutable history (新 chunk + 老 supersede), 不直接 UPDATE content. 该 trigger 从不跳发. 如需 manual UPDATE content (只该路径后期其他使用), 需手动 chunks_fts(replace) 刷新.
-
 -- 8.2 entity 被 supersede 时, 自动级联失效引用边 (核心创新!)
 CREATE TRIGGER trg_entities_supersede AFTER UPDATE OF superseded_by ON entities
 WHEN NEW.superseded_by IS NOT NULL AND OLD.superseded_by IS NULL
