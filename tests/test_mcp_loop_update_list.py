@@ -24,9 +24,12 @@ _load("search_index")
 _load("validation")
 _load("auth")
 mcp = _load("mcp_server")
+mcp_disp = _load("mcp_tool_dispatcher")
 
-# [8/15 E-3 fix] L2/admin tier tools 需要 all_tools flag 启用.
-mcp._TOOL_VIS_FLAGS = {"audit_tools": True, "l2_tools": True, "all_tools": True}
+# [8/15 E-3 fix] L2/admin tier tools 需 all_tools flag 启用.
+# _TOOL_VIS_FLAGS 在 mcp_tool_dispatcher module 上 (PEP 562 facade 不存储).
+mcp_disp._TOOL_VIS_FLAGS = {"audit_tools": True, "l2_tools": True, "all_tools": True}
+
 
 
 
