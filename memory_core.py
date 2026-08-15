@@ -1422,8 +1422,20 @@ class MemoryCore:
 
         # [P0 2026-08-11] scoping IDs: 一次 SQL 把 chunk 元数据 + agent_id 拿回来.
         # 在 Python 侧过滤 agent_id (避免每行一次 json_extract SQL).
+        # [audit 修真 #7 2026-08-16] user_id / run_id filter recall 也走 Python 侧
+        # post-filter (跟 agent_id 同款 — json_extract NULL 兼容旧数据).
         agent_id_filter = (filters or {}).get("agent_id")
         agent_id_filter_norm = agent_id_filter if agent_id_filter is not None else _MISSING
+        user_id_filter = (filters or {}).get("user_id")
+        user_id_filter_norm = user_id_filter if user_id_filter is not None else _MISSING
+        run_id_filter = (filters or {}).get("run_id")
+        run_id_filter_norm = run_id_filter if run_id_filter is not None else _MISSING
+        _scope_filters = (
+            ("agent_id", agent_id_filter_norm),
+            ("user_id", user_id_filter_norm),
+            ("run_id", run_id_filter_norm),
+        )
+        _scope_active = [pair for pair in _scope_filters if pair[1] is not _MISSING]
 
         results = []
         for hit in knn_hits:
@@ -1442,7 +1454,8 @@ class MemoryCore:
                     continue
                 # [P0 2026-08-11] agent_id filter — 旧数据 metadata_json=NULL
                 # 或不含 agent_id → JSON 解出 None → 不等于 filter, 保留.
-                if agent_id_filter_norm is not _MISSING:
+                # [audit 修真 #7 2026-08-16] 同款 pattern 扩 user_id / run_id.
+                if _scope_active:
                     raw = chunk["metadata_json"]
                     if raw is None or raw == "":
                         continue
@@ -1450,7 +1463,8 @@ class MemoryCore:
                         meta_obj = json.loads(raw)
                     except (json.JSONDecodeError, TypeError):
                         continue
-                    if meta_obj.get("agent_id") != agent_id_filter_norm:
+                    # 所有 active scope filter 必须 match (any mismatch → skip)
+                    if any(meta_obj.get(k) != v for k, v in _scope_active):
                         continue
             results.append(self._hit_dict(chunk, method="vector", distance=float(hit.distance)))
         return results[:top_k]  # type: ignore
@@ -1492,6 +1506,13 @@ class MemoryCore:
             # 这天然保证旧数据兼容.
             sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
             params.append(filters["agent_id"])
+        # [audit 修真 #7 2026-08-16] user_id / run_id 同款 json_extract SQL filter
+        if filters and "user_id" in filters:
+            sql += " AND json_extract(metadata_json, '$.user_id') = ?"
+            params.append(filters["user_id"])
+        if filters and "run_id" in filters:
+            sql += " AND json_extract(metadata_json, '$.run_id') = ?"
+            params.append(filters["run_id"])
         # [P2 2026-08-11] temporal intent 加成 — 用 detect_query_intent
         # 注意: recall() 入口处已 validate_query(), 这里 query 非空.
         intent = detect_query_intent(query)
@@ -1556,8 +1577,14 @@ class MemoryCore:
             params.append(top_k)
             rows = conn.execute(sql, params).fetchall()
             # [P0 2026-08-11] agent_id post-filter (SQL LEFT JOIN 后 Python 侧 filter)
-            if filters and "agent_id" in filters:
-                target_agent = filters["agent_id"]
+            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            _entity_scope_filters = (
+                ("agent_id", (filters or {}).get("agent_id")),
+                ("user_id", (filters or {}).get("user_id")),
+                ("run_id", (filters or {}).get("run_id")),
+            )
+            _entity_scope_active = [(k, v) for k, v in _entity_scope_filters if v is not None]
+            if _entity_scope_active:
                 kept = []
                 for r in rows:
                     c_meta = r["c_meta"]
@@ -1570,7 +1597,7 @@ class MemoryCore:
                     except (json.JSONDecodeError, TypeError):
                         kept.append(r)  # 解析失败保留 (defensive)
                         continue
-                    if parsed.get("agent_id") == target_agent:
+                    if all(parsed.get(k) == v for k, v in _entity_scope_active):
                         kept.append(r)
                 rows = kept
             for r in rows:
@@ -1733,6 +1760,10 @@ class MemoryCore:
         if filters and "user_id" in filters:
             sql += " AND json_extract(metadata_json, '$.user_id') = ?"
             params.append(filters["user_id"])
+        # [8/16 audit-2 #7 fix] run_id filter 同 user_id 模式
+        if filters and "run_id" in filters:
+            sql += " AND json_extract(metadata_json, '$.run_id') = ?"
+            params.append(filters["run_id"])
         # [8/16 E-2 重启 non-trigger] FTS5 BM25 主路 + LIKE fallback.
         # 设计哲学 (上轮 P1 #67/#68/#69/#70 实战教諛· 避免 P1 #81 SIGSEGV):
         # - BM25 路: 完整中文句 · bm25 ASC 优先·importance DESC 加权·LIMIT 外移
@@ -1740,7 +1771,7 @@ class MemoryCore:
         # - UNION ALL 后包 subquery (避免 P1 #69 ORDER BY/LIMIT 报错)· 去重走 Python set
         from memory import _fts_escape_query  # [P1 #63] lazy · 避免 circular
 
-        # 状态变量：source / type / agent_id / user_id filter · temporal intent · valid_until
+        # 状态变量：source / type / agent_id / user_id / run_id filter · temporal intent · valid_until
         fts_filter_clauses = []
         fts_filter_params = []
         like_filter_clauses = []
@@ -1766,6 +1797,12 @@ class MemoryCore:
             fts_filter_params.append(filters["user_id"])
             like_filter_clauses.append("json_extract(metadata_json, '$.user_id') = ?")
             like_filter_params.append(filters["user_id"])
+        if filters and "run_id" in filters:  # [8/16 audit-2 #7 fix]
+            fts_filter_clauses.append("json_extract(c.metadata_json, '$.run_id') = ?")
+            fts_filter_params.append(filters["run_id"])
+            like_filter_clauses.append("json_extract(metadata_json, '$.run_id') = ?")
+            like_filter_params.append(filters["run_id"])
+        # [P2 2026-08-11] temporal intent 加成 — 跟 _meta_recall_with_conn 同源
         intent = detect_query_intent(query)
         if intent == "upcoming":
             _now_ts = asof if asof else now()
@@ -1870,8 +1907,14 @@ class MemoryCore:
             # [P0 2026-08-11] agent_id filter — SQL 已经 LEFT JOIN chunks,
             # 但 chunk 可能不存在 (老 entity); 改为 Python 侧 post-filter.
             # NULL metadata_json / 缺 agent_id 的 chunk 保留 (旧数据兼容).
-            if filters and "agent_id" in filters:
-                target_agent = filters["agent_id"]
+            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            _ent_scope_filters_1 = (
+                ("agent_id", (filters or {}).get("agent_id")),
+                ("user_id", (filters or {}).get("user_id")),
+                ("run_id", (filters or {}).get("run_id")),
+            )
+            _ent_scope_active_1 = [(k, v) for k, v in _ent_scope_filters_1 if v is not None]
+            if _ent_scope_active_1:
                 kept_rows = []
                 for r in rows:
                     c_meta = r["c_meta"]
@@ -1884,7 +1927,7 @@ class MemoryCore:
                     except (json.JSONDecodeError, TypeError):
                         kept_rows.append(r)  # 解析失败也保留 (defensive)
                         continue
-                    if parsed.get("agent_id") == target_agent:
+                    if all(parsed.get(k) == v for k, v in _ent_scope_active_1):
                         kept_rows.append(r)
                 rows = kept_rows
             for r in rows:
@@ -1904,6 +1947,10 @@ class MemoryCore:
                 )
 
         # === 第二阶段: 通用 token LIKE (高优先级 → 补 concept) ===
+        # [audit 修真 #7 2026-08-16] rows 在 phase 1 (identity_query) 内才定义,
+        # phase 2 独立跑 (is_identity_query=False) 时必须初始化否则 UnboundLocalError.
+        if not is_identity_query:
+            rows = []
         tokens = set()
         for w in re.split(r'[\s,;.!?\(\)\[\]\{\}"\'`]+', query):
             w = w.strip().lower()
@@ -1952,11 +1999,14 @@ class MemoryCore:
                 cur_params.append(norm_memory_type(filters["type"]))
             # [P0 2026-08-11] agent_id filter — SQL 不直接 json_extract (entity
             # 可能没关联 chunk); 改 Python 侧 post-filter 同第一阶段.
-            sql += " ORDER BY e.importance DESC, e.recall_count DESC LIMIT ?"
-            cur_params.append(take)
-            rows = self._conn.execute(sql, cur_params).fetchall()
-            if filters and "agent_id" in filters:
-                target_agent = filters["agent_id"]
+            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            _ent_scope_filters_2 = (
+                ("agent_id", (filters or {}).get("agent_id")),
+                ("user_id", (filters or {}).get("user_id")),
+                ("run_id", (filters or {}).get("run_id")),
+            )
+            _ent_scope_active_2 = [(k, v) for k, v in _ent_scope_filters_2 if v is not None]
+            if _ent_scope_active_2:
                 filtered_rows = []
                 for r in rows:
                     c_meta = r["c_meta"]
@@ -1968,7 +2018,7 @@ class MemoryCore:
                     except (json.JSONDecodeError, TypeError):
                         filtered_rows.append(r)
                         continue
-                    if parsed.get("agent_id") == target_agent:
+                    if all(parsed.get(k) == v for k, v in _ent_scope_active_2):
                         filtered_rows.append(r)
                 rows = filtered_rows
             for r in rows:
