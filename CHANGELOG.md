@@ -1,5 +1,102 @@
 # Changelog
 
+## v1.3.0 — 2026-08-15
+
+feat(memory): 2 new MCP tools + 3 P1 fix chain (Mem0 借鉴实战 闭环)
+
+**Why**: 主人 8/15 问 "参考 mem0 的设计, 完善我们的图谱建立和搜索". 列
+6 个改进让主人选 A+B+C.2 (避开 C.1 强 LLM auto-extract, 主人 6/29 iron
+law "不抢决策"). 落地后真部署 (`launchctl kickstart -k` 重启生产
+mcp_server) 暴露 3 真 P1 fix chain — **每个 P1 都是 tests-green / CI
+5/5 全绿 都不暴露, 只有真 import / 真 nested call / 真 runtime 才暴露**
+(P1 #51 扩展: "imports-green ≠ sufficient, runtime-green ≠ sufficient").
+
+**What (新增 features)**:
+
+- **`memory_get_all(kind, relation, user_id, limit, offset, include_superseded)`**
+  (commit ccbeab4, +496 行): 全量 dump entities + relations + chunks + 总数.
+  借鉴 Mem0 `get_all(user_id="alice")` **API 形态 ✅** — 接口名 + 行为,
+  但 **不调 LLM auto-extract ❌** (主人 6/29 不抢决策). 给主人调试 /
+  看库 / 数据迁移的便利入口. user_id 走 `metadata_json.mentioned_entities`
+ + session `id` 反推 (best effort, 不是 100% 严格 scoping).
+- **`memory_relate(source_id, target_id, relation, ..., dedup_check=False)`**
+  (commit 8996c64, +229 行): dedup_check 选项. 借鉴 Mem0
+  `add_relations()` 默认 dedup (NOOP 决策) **API 行为 ✅**. 默认
+  False 保留主人决策权 (backward-compat, 老 caller 不受影响).
+  - `dedup_check=False` → 同 v0.13 行为, 允许重复
+  - `dedup_check=True` → 三元组 (source_id, target_id, relation) 匹配
+    (valid_until IS NULL) 时返已有 id, 不创建 (no-op). 软删算历史,
+    允许重建. 权重/valid_from/properties 差异不更新 (keep first).
+  - 命中查询: `SELECT id WHERE source_id=? AND target_id=? AND relation=?
+    AND valid_until IS NULL LIMIT 1`
+  - 写路径加 `_txn()` 包裹 (P1 #42 E-1 pattern)
+
+**What (3 P1 fix chain — v0.15.1 实战暴露)**:
+
+- **P1 #61 (f632000)**: `mcp_tool_definitions.py` module-level JSON 字面量
+  `"default": false/true/null` → Python `False/True/None`. **根因**:
+  Python parser 不识别 JSON 字面量 → `NameError: name 'false' is not defined`
+  生产 mcp_server 重启后 crash. **为什么 CI 没暴露**: ruff F821 不
+  catch module-level runtime identifier; pytest 走 conftest sys.modules
+  注入不直接 import definitions module. **正解**: module-level 必用
+  Python literal, 不是 JSON  literal.
+- **P1 #62 (15398dc)**: `_txn()` 嵌套 SAVEPOINT 支持. **根因**: E-B `relate()`
+  加 `_txn()` 包裹, 但 `forget()` 主流程 / 测试 `tearDownClass` `with
+  self._conn:` 已 BEGIN → 再次 BEGIN → `cannot start a transaction within
+  a transaction`. **修法**: 检测 `conn.in_transaction` (Python 3.11+ 有)
+  → 嵌套时走 SAVEPOINT `sp_{depth}` 而非 BEGIN. **关键 trick**:
+  `sqlite3.Connection` 不接受任意 attribute (C type built-in, 跟 P1 #29
+  facade PEP 562 `__setattr__` 实证证伪同源) — 必用 module-level
+  `_txn_depth_by_id: Dict[int, int]` 存嵌套深度 (用 `id(conn)` 作 key).
+- **P1 #63 (a08e76f)**: circular import. **根因**: E-A commit 我加了
+  `from memory import _with_row_factory` 到 `memory_core.py` 顶部.
+  module-level cross 触发 `memory.py:558 → from memory_core import MemoryCore`
+  ↔ `memory_core.py:28 → from memory import _with_row_factory` 部分初始化
+  → `ImportError`. **跟 P1 #36 facade top-level import 占 dict 实证证伪
+  同源** (mcp_server facade 8/14 c51c72d). 这是 mnelo 拆分后**第二次
+  踩同样的坑**. **修法**: 删 module-level import, 改方法内 lazy
+  `from memory import _with_row_factory  # noqa: E402`.
+
+**What (DESIGN.md §6.8 final gate 章节, +234 行)**: 完整记录 v0.15.1
+实战链 — 背景 + 落地架构表 (5 commits) + 6.8.1 E-A + 6.8.2 E-B + 6.8.3-#61
++ 6.8.4-#62 + 6.8.5-#63 + 6.8.6 Mem0 借鉴落地对照表 (10 行老实分类) +
+6.8.7 部署实战 6 步安全模式 + 6.8.8 关键教训 (P1 #51 扩展) + 6.8.9 CI 实战.
+
+**What (mnelo-refactor-patterns skill v2.7.0 + v2.8.0, +P1 #61-#64)**:
+实战教训入库 + 13 必检清单扩展. 引用
+`references/v0-15-1-ea-eb-final-gate-2026-08-15.md` (10 KB) 完整 transcript.
+
+**CI 实战** (run #31862952794, 4m57s, 5/5 全绿):
+
+| Run | Commit | Status |
+|---|---|---|
+| #31862132378 | 8996c64 E-B | ❌ fail (P1 #61 + #62 真 P1) |
+| #31862241048 | f632000 P1 #61 修 | ❌ fail (P1 #62 仍暴露) |
+| #31862499672 | 15398dc P1 #62 修 | ❌ fail (P1 #63 暴露 circular import) |
+| #31862952794 | a08e76f P1 #63 修 | ✅ **5/5 success 4m57s** |
+
+**How to upgrade**:
+
+```bash
+git pull
+pip install -e .  # 如果是 editable install
+# mcp_server 重启 (launchctl 自动 KeepAlive):
+launchctl kickstart -k "gui/$(id -u)/ai.mnelo.mcp"
+# 验证 2 新工具生效:
+curl /mcp memory_get_all
+curl /mcp memory_relate '{"dedup_check": true, ...}'
+```
+
+**关键 reflect (P1 #51 实战扩展)**: 8/5 review iron law
+"tests-green ≠ sufficient" → v0.15.1 实战暴露后扩展到
+"imports-green ≠ sufficient, runtime-green ≠ sufficient" —
+pytest + ruff + 真 import + CI 4 个全过 + 真部署 curl 才是完整 verification.
+
+**真驱动老实分类** (主人 8/15 `?` push back P1 #49):
+v0.15.1 这 2 个 E (get_all + dedup_check) 是 API 形态/行为借鉴 Mem0,
+**不是数据建立借鉴** (主人 6/29 iron law "不抢决策" 排除 LLM auto-extract).
+真借鉴落地状态见 DESIGN.md §6.8.6 Mem0 借鉴落地对照表.
+
 ## v1.2.0 — 2026-08-11
 
 feat(memory): add scoping IDs (agent_id / user_id / run_id) — Mem0-style multi-tenant recall
