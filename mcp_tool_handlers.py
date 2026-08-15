@@ -200,96 +200,43 @@ def _handle_simple(mem, name: str, args: Dict) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+# [§1.2 #5 P1 #92 fix] entity_resolve 保留 raw handler · 加 limit cap + validate_id
+_ENTITY_RESOLVE_MAX_PAIRS = 500  # 上限·防 difflib O(N²) hang · 5K entities → 12.5M pairs
+
+
 def _handle_entity_resolve(mem, args: Dict) -> str:
-    """[v1.1] Find duplicate entity candidates via entity_resolve module.
+    """[v1.1 + §1.2 #5 P1 #92 fix] Find duplicate entity candidates · 加 limit cap.
 
     Args:
         args.threshold: similarity threshold [0.0, 1.0], default 0.85
         args.kind: filter by entity kind (optional)
+        args.max_pairs: 上限 500 (防 difflib O(N²) hang · 5K entities → 12.5M pairs)
 
     Returns:
         {'candidates': [{'a', 'b', 'score', 'reason'}], 'count': N}
     """
     from entity_resolve import find_duplicate_candidates
 
-    # [Round 3 fix] 加 max_pairs=500 cap 防 live DB hang
-    # (5K entities → 12.5M O(N²) pairs, 数十秒 difflib 计算)
+    # [§1.2 #5 P1 #92 fix] limit cap (防上限越限 hang)
+    max_pairs = max(1, min(int(args.get("max_pairs", 500)), _ENTITY_RESOLVE_MAX_PAIRS))
+    threshold = float(args.get("threshold", 0.85))
+    kind = args.get("kind")
+
     with memory_module._with_row_factory(mem._conn, sqlite3.Row):
         candidates = find_duplicate_candidates(
             mem._conn,
-            threshold=args.get("threshold", 0.85),
-            kind=args.get("kind"),
-            max_pairs=args.get("max_pairs", 500),
+            threshold=threshold,
+            kind=kind,
+            max_pairs=max_pairs,
         )
     out = [{"a": a, "b": b, "score": s, "reason": r} for a, b, s, r in candidates]
     return json.dumps({"candidates": out, "count": len(out)}, ensure_ascii=False)
 
 
-def _handle_list_entities(mem, args: Dict) -> str:
-    """[v1.1] List entities filtered by kind/min_importance, ordered by importance DESC.
-
-    Args:
-        args.kind: filter by entity kind (e.g. 'stock', 'identity_fact')
-        args.min_importance: minimum importance threshold [0.0, 1.0]
-        args.limit: max results, default 50
-
-    Returns:
-        {'entities': [{'id', 'kind', 'name', 'summary', 'importance'}], 'count': N}
-    """
-    sql = "SELECT id, kind, name, summary, importance FROM entities WHERE valid_until IS NULL"
-    params = []
-    if args.get("kind"):
-        sql += " AND kind = ?"
-        params.append(args["kind"])
-    if args.get("min_importance"):
-        sql += " AND importance >= ?"
-        params.append(args["min_importance"])
-    sql += " ORDER BY importance DESC LIMIT ?"
-    params.append(args.get("limit", 50))
-    rows = mem._conn.execute(sql, params).fetchall()
-    entities = [{"id": r[0], "kind": r[1], "name": r[2], "summary": r[3], "importance": r[4]} for r in rows]
-    return json.dumps({"entities": entities, "count": len(entities)}, ensure_ascii=False)
-
-
-def _handle_search_relations(mem, args: Dict) -> str:
-    """[v1.1] Search relations by relation type, with time-as-of filter.
-
-    Args:
-        args.relation (required): relation type string (e.g. 'owns', 'references')
-        args.asof: ISO 8601 timestamp, default = now()
-        args.limit: max results, default 100
-
-    Returns:
-        {'relations': [{'id', 'source_id', 'target_id', 'relation', 'weight', 'valid_from', 'valid_until'}], 'count': N}
-    """
-    asof = args.get("asof") or memory_module.now()
-    sql = """
-        SELECT id, source_id, target_id, relation, weight, valid_from, valid_until
-        FROM relations
-        WHERE relation = ?
-          AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)
-        ORDER BY weight DESC, valid_from DESC
-        LIMIT ?
-    """
-    rows = mem._conn.execute(sql, (args["relation"], asof, asof, args.get("limit", 100))).fetchall()
-    relations = [
-        {
-            "id": r[0],
-            "source_id": r[1],
-            "target_id": r[2],
-            "relation": r[3],
-            "weight": r[4],
-            "valid_from": r[5],
-            "valid_until": r[6],
-        }
-        for r in rows
-    ]
-    return json.dumps({"relations": relations, "count": len(relations)}, ensure_ascii=False)
-
-
 # Custom handlers — 不走 TOOL_REGISTRY, 因有特殊 SQL 或依赖
+# [§1.2 #5 P1 #92 fix] 重构 · 仅 entity_resolve 保留 raw handler (特殊 difflib 算法)
+# list_entities / search_relations 走 _handle_simple · 调 memory.list_entities / memory.search_relations
+# · 统一 MCP 4-file (definitions + dispatcher + handlers + method 一致)
 _CUSTOM_HANDLERS = {
     "memory_entity_resolve": _handle_entity_resolve,
-    "memory_list_entities": _handle_list_entities,
-    "memory_search_relations": _handle_search_relations,
 }

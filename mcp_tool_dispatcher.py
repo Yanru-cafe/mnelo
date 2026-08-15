@@ -3,20 +3,20 @@
 
 #!/usr/bin/env python3
 """
-mcp_server.py — mnelo MCP Server
+mcp_server.py â mnelo MCP Server
 
-- 7/19 v0.5.0 breaking change: 变量名 `HERMES_MEMORY_*` → `MNELO_MEMORY_*`, `MNELO_HOME` → `MNELO_HOME`
-- 接口: 22 tools — 4 L1 入口 (memory_remember / memory_recall / memory_relate / memory_forget)
+- 7/19 v0.5.0 breaking change: åéå `HERMES_MEMORY_*` â `MNELO_MEMORY_*`, `MNELO_HOME` â `MNELO_HOME`
+- æ¥å£: 22 tools â 4 L1 å¥å£ (memory_remember / memory_recall / memory_relate / memory_forget)
        + memory_update / memory_graph_query / memory_stats / memory_entity_resolve /
        memory_list_entities / memory_search_relations / memory_audit_list / memory_audit_undo /
        memory_maintenance / memory_get_digest / memory_task_{create,transition,list,replay} /
        memory_loop_{create,tick,update,list}
-- 22 tools, 与 mnelo 当前 TOOL_REGISTRY + TASK_TOOL_REGISTRY 实际一致 (grep '"name": "memory_' mcp_server.py = 22)
-- transports: SSE (/sse) / streamable-http (/mcp, MCP 2025-03-26) / dual — 推荐 streamable-http
+- 22 tools, ä¸ mnelo å½å TOOL_REGISTRY + TASK_TOOL_REGISTRY å®éä¸è´ (grep '"name": "memory_' mcp_server.py = 22)
+- transports: SSE (/sse) / streamable-http (/mcp, MCP 2025-03-26) / dual â æ¨è streamable-http
 
-[运行]
+[è¿è¡]
     cd LIVE_ROOT && python3 mcp_server.py --transport streamable-http
-    (port 走 config: env MNELO_MEMORY_SERVER_PORT > toml [server].port > 8086)
+    (port èµ° config: env MNELO_MEMORY_SERVER_PORT > toml [server].port > 8086)
 """
 
 import json
@@ -26,10 +26,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from config import config  # [Round 2] server host/port 配置
+from config import config  # [Round 2] server host/port éç½®
 from validation import ValidationError
 
-# 路径 — [7/21 fix] 插入本文件所在目录 (repo root), 不再硬编码 live 路径
+# è·¯å¾ â [7/21 fix] æå¥æ¬æä»¶æå¨ç®å½ (repo root), ä¸åç¡¬ç¼ç  live è·¯å¾
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 logger = logging.getLogger("mnelo.mcp")
@@ -40,14 +40,14 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 
-# [refactor 2026-08-12] 单进程单 Memory 实例 (lock 风险归零) — 模块级
-# (跨模块 import: mcp_transports 在 endpoint lazy 引用, dispatcher 在 _get_mem
-#  内部 global 引用).
+# [refactor 2026-08-12] åè¿ç¨å Memory å®ä¾ (lock é£é©å½é¶) â æ¨¡åçº§
+# (è·¨æ¨¡å import: mcp_transports å¨ endpoint lazy å¼ç¨, dispatcher å¨ _get_mem
+#  åé¨ global å¼ç¨).
 _mem_instance: Optional[Any] = None
 
 
 def _get_mem() -> Any:
-    """单例 Memory."""
+    """åä¾ Memory."""
     global _mem_instance
     if _mem_instance is None:
         from memory import DB_PATH as _DB_PATH
@@ -59,25 +59,25 @@ def _get_mem() -> Any:
 
 
 def _resolve_server_defaults() -> tuple:
-    """从 config 解析 SSE host/port 默认值. CLI flag 优先于 config."""
+    """ä» config è§£æ SSE host/port é»è®¤å¼. CLI flag ä¼åäº config."""
     try:
-        cfg = config  # 来自 mcp_server 顶部 from config import config
+        cfg = config  # æ¥èª mcp_server é¡¶é¨ from config import config
         return cfg.server_host, cfg.server_port
     except Exception:
         return DEFAULT_SSE_HOST, DEFAULT_SSE_PORT
 
 
-# [7/19 P2-3] 简易 in-memory rate limit (防 runaway loop / 滥用)
-# key=tool 名, value=[window_start_ts, count_in_window]
-# [8/9 P1-yanru] 60 → 600 (硬编码) → 提到 config.toml (rate_limit.max_per_window).
-# 默认 60/min 兼容旧行为; 当前生效值见 config.rate_limit_max_per_window.
+# [7/19 P2-3] ç®æ in-memory rate limit (é² runaway loop / æ»¥ç¨)
+# key=tool å, value=[window_start_ts, count_in_window]
+# [8/9 P1-yanru] 60 â 600 (ç¡¬ç¼ç ) â æå° config.toml (rate_limit.max_per_window).
+# é»è®¤ 60/min å¼å®¹æ§è¡ä¸º; å½åçæå¼è§ config.rate_limit_max_per_window.
 
 
 def _rate_limit_check(tool_name: str) -> None:
-    """In-process sliding-window rate limit. 超限抛 ValidationError.
+    """In-process sliding-window rate limit. è¶éæ ValidationError.
 
     Threshold from config: config.rate_limit_max_per_window / .rate_limit_window_sec.
-    改完需重启 mcp_server 进程 (config 是模块级单例, 启动时加载).
+    æ¹å®ééå¯ mcp_server è¿ç¨ (config æ¯æ¨¡åçº§åä¾, å¯å¨æ¶å è½½).
     """
     import time as _time
 
@@ -96,49 +96,53 @@ def _rate_limit_check(tool_name: str) -> None:
 
 _RATE_BUCKETS: Dict[str, list] = {}
 
-# [8/15 E-3] Default tool visibility flags — 默认仅暴露 core+audit+advanced.
-# mcp_server.py 启动时根据 --audit-tools/--l2-tools/--all-tools 覆盖.
-# [P1 #83 fix] 本类资源仅在 mcp_server 主路径设置; 本地 import 不暴露 l2/admin.
+# [8/15 E-3] Default tool visibility flags â é»è®¤ä»æ´é² core+audit+advanced.
+# mcp_server.py å¯å¨æ¶æ ¹æ® --audit-tools/--l2-tools/--all-tools è¦ç.
+# [P1 #83 fix] æ¬ç±»èµæºä»å¨ mcp_server ä¸»è·¯å¾è®¾ç½®; æ¬å° import ä¸æ´é² l2/admin.
 _DEFAULT_TOOL_VIS_FLAGS = {
     "audit_tools": False,
     "l2_tools": False,
     "all_tools": False,
 }
-_TOOL_VIS_FLAGS = _DEFAULT_TOOL_VIS_FLAGS  # 可被 mcp_server 动态覆盖
+_TOOL_VIS_FLAGS = _DEFAULT_TOOL_VIS_FLAGS  # å¯è¢« mcp_server å¨æè¦ç
 
 _TOOL_REGISTRY = {
     # name -> (mem method attr, response id field name or None)
     "memory_remember": ("remember", "chunk_id"),
     "memory_recall": ("recall", None),
     "memory_relate": ("relate", "relation_id"),
-    # === [8/15 E-A] 借鉴 Mem0 get_all ===
-    # 走 _handle_simple: args={kind, relation, user_id, limit, offset, include_superseded}
-    # 走 **kwargs 透传, 方法签名有默认值兜底.
+    # === [8/15 E-A] åé´ Mem0 get_all ===
+    # èµ° _handle_simple: args={kind, relation, user_id, limit, offset, include_superseded}
+    # èµ° **kwargs éä¼ , æ¹æ³ç­¾åæé»è®¤å¼ååº.
     "memory_get_all": ("get_all", None),
     "memory_forget": ("forget", None),
     "memory_update": ("update", "new_chunk_id"),
     "memory_graph_query": ("graph_query", None),
     "memory_stats": ("stats", None),
-    # === [8/15 E-3] Recall quality analytics (DESIGN §1.2 #6) ===
-    # 走 _handle_simple: args={days, group_by} 走 **kwargs 透传, 方法签名有默认值兜底.
+    # === [8/15 E-3] Recall quality analytics (DESIGN Â§1.2 #6) ===
+    # èµ° _handle_simple: args={days, group_by} èµ° **kwargs éä¼ , æ¹æ³ç­¾åæé»è®¤å¼ååº.
     "memory_recall_stats": ("recall_stats", None),
-    # === [H-1 8/4] DESIGN §5.7 (3 L1 入口 + 1 stats 整合) ===
-    "memory_audit_list": ("list_audit", None),  # 不走 _handle_simple (有枚举过滤)
+    # === [Â§1.2 #5 P1 #92 fix] Æ¯è¦å± raw-SQL Éæ°æ ===
+    # Èp memory.list_entities / memory.search_relations (P1 #92 Éæ°æ Â· ä¸å _CUSTOM_HANDLERS raw SQL)
+    "memory_list_entities": ("list_entities", None),
+    "memory_search_relations": ("search_relations", None),
+    # === [H-1 8/4] DESIGN Â§5.7 (3 L1 å¥å£ + 1 stats æ´å) ===
+    "memory_audit_list": ("list_audit", None),  # ä¸èµ° _handle_simple (ææä¸¾è¿æ»¤)
     "memory_audit_undo": ("audit_undo", None),
-    "memory_maintenance": ("run_maintenance", None),  # 不走 _handle_simple (passes 列表)
-    # === [S1 8/5] TASKS_L2_SESSION_STATE §1.3A ===
-    "memory_get_digest": ("get_digest", None),  # 简单委托 — _handle_simple 直接走
+    "memory_maintenance": ("run_maintenance", None),  # ä¸èµ° _handle_simple (passes åè¡¨)
+    # === [S1 8/5] TASKS_L2_SESSION_STATE Â§1.3A ===
+    "memory_get_digest": ("get_digest", None),  # ç®åå§æ â _handle_simple ç´æ¥èµ°
 }
 
 
 def _call_tool(name: str, args: Dict) -> str:
-    """统一处理 10 个工具调用, 返回 JSON 字符串.
+    """ç»ä¸å¤ç 10 ä¸ªå·¥å·è°ç¨, è¿å JSON å­ç¬¦ä¸².
 
-    [7/19 P1-3] except 返回 type name + 简短 reason, 不带原始 str(e)
-    (避免泄露内部路径 / SQL 错误细节 / stack hint 给 MCP client).
-    logger.exception 仍保留全 traceback 给 operator (操作员查 ~/.hermes/logs/).
+    [7/19 P1-3] except è¿å type name + ç®ç­ reason, ä¸å¸¦åå§ str(e)
+    (é¿åæ³é²åé¨è·¯å¾ / SQL éè¯¯ç»è / stack hint ç» MCP client).
+    logger.exception ä»ä¿çå¨ traceback ç» operator (æä½åæ¥ ~/.hermes/logs/).
     """
-    # [7/19 P2-3] rate limit 在 dispatch 前, 防 owner infinite loop 拖死 MCP server
+    # [7/19 P2-3] rate limit å¨ dispatch å, é² owner infinite loop ææ­» MCP server
     try:
         _rate_limit_check(name)
     except ValidationError as ve:
@@ -146,14 +150,14 @@ def _call_tool(name: str, args: Dict) -> str:
         return json.dumps({"error": str(ve), "tool": name, "type": "rate_limit"}, ensure_ascii=False)
 
     # [8/15 E-3 audit fix Plan A3] hidden tool friendly error.
-    # 隐藏 tool (默认隐藏 l2/admin) 仍可隐式 call — 返 informative error 与解锁指示.
-    # 位于 _get_mem() 之前 — hidden tool 不应 trigger Memory init (避免 zvec LOCK 等资源浪费).
-    # 这不是安全叢道 — 是 “你可能不知道这个 tool 被隐藏了” 提示。
-    # 安全叡锁仍由 owner 控制 (flags 不启用 → 隐式 call 依然报错, 不是 silent).
+    # éè tool (é»è®¤éè l2/admin) ä»å¯éå¼ call â è¿ informative error ä¸è§£éæç¤º.
+    # ä½äº _get_mem() ä¹å â hidden tool ä¸åº trigger Memory init (é¿å zvec LOCK ç­èµæºæµªè´¹).
+    # è¿ä¸æ¯å®å¨å¢é â æ¯ âä½ å¯è½ä¸ç¥éè¿ä¸ª tool è¢«éèäºâ æç¤ºã
+    # å®å¨å¡éä»ç± owner æ§å¶ (flags ä¸å¯ç¨ â éå¼ call ä¾ç¶æ¥é, ä¸æ¯ silent).
     flags = _TOOL_VIS_FLAGS
     if is_tool_hidden(name, flags):
         tier = get_tool_tier(name)
-        # 在 audit-tools 未开时, l2_tools flag 无法解锁 admin tools
+        # å¨ audit-tools æªå¼æ¶, l2_tools flag æ æ³è§£é admin tools
         unlock_flag = "l2" if tier == "l2" else ("audit" if tier == "admin" else None)
         hint = f"--{unlock_flag}-tools" if unlock_flag else "N/A"
         logger.warning(f"call_tool {name} (tier={tier}) hidden by default. Hint: {hint}")
@@ -178,18 +182,18 @@ def _call_tool(name: str, args: Dict) -> str:
             return _handle_task_simple(mem, name, args)
         return json.dumps({"error": f"unknown tool: {name}"}, ensure_ascii=False)
     except ValidationError as ve:
-        # validation 错误是 user-facing 的, message 安全 (不带原始 input)
+        # validation éè¯¯æ¯ user-facing ç, message å®å¨ (ä¸å¸¦åå§ input)
         logger.warning(f"call_tool {name} validation: {ve.field}: {ve.reason}")
         return json.dumps({"error": str(ve), "tool": name, "type": "validation"}, ensure_ascii=False)
     except Exception as e:
         logger.exception(f"call_tool {name} failed")
-        # 只返 type name (e.g. "ValueError", "sqlite3.OperationalError"), 不带 str(e)
+        # åªè¿ type name (e.g. "ValueError", "sqlite3.OperationalError"), ä¸å¸¦ str(e)
         return json.dumps(
             {
                 "error": type(e).__name__,
                 "tool": name,
                 "type": "internal",
-                # 'detail' 字段只在调试模式 (MNELO_MEMORY_DEBUG=1) 暴露
+                # 'detail' å­æ®µåªå¨è°è¯æ¨¡å¼ (MNELO_MEMORY_DEBUG=1) æ´é²
                 "detail": str(e) if os.environ.get("MNELO_MEMORY_DEBUG") == "1" else None,
             },
             ensure_ascii=False,
@@ -226,14 +230,14 @@ from mcp_tool_handlers import (  # noqa: F401  cross-module
 )
 
 DEFAULT_SSE_HOST = "127.0.0.1"  # P2-1: loopback-only fallback
-DEFAULT_SSE_PORT = 8086  # SSE 默认端口 fallback (config 优先)
+DEFAULT_SSE_PORT = 8086  # SSE é»è®¤ç«¯å£ fallback (config ä¼å)
 
 if _MCP_AVAILABLE:
     server = Server("mnelo")
 
-    # MCP echo — visual marker (🌳) so agent + 主人 can distinguish mnelo
-    # operations from Hermes `memory` tool (🧠). Set MNELO_ECHO=0 to disable.
-    _ECHO = "🌳"
+    # MCP echo â visual marker (ð³) so agent + ä¸»äºº can distinguish mnelo
+    # operations from Hermes `memory` tool (ð§ ). Set MNELO_ECHO=0 to disable.
+    _ECHO = "ð³"
     _ECHO_LABEL = "mnelo"
 
     @server.list_tools()
@@ -250,7 +254,7 @@ if _MCP_AVAILABLE:
             Resource(
                 uri=AnyUrl(_DIGEST_URI),
                 name="Session digest",
-                description="Currently cached 常驻摘要 (memory_get_digest, ref=None).",
+                description="Currently cached å¸¸é©»æè¦ (memory_get_digest, ref=None).",
                 mimeType="text/plain",
             )
         ]
@@ -288,19 +292,19 @@ if _MCP_AVAILABLE:
         return server.request_handlers[ReadResourceRequest](req)
 
     def _build_echo(name: str, args: Dict, result_json: str) -> str:
-        """Render a one-line 🌳 summary from tool name + args + result.
+        """Render a one-line ð³ summary from tool name + args + result.
 
         Design: parse the JSON the handler returned (cheap, since handler just
         json.dump'd it), extract the most useful single fact, and emit a fixed-
-        width line. Errors get 🌳 too (with the type field) so the prefix is
+        width line. Errors get ð³ too (with the type field) so the prefix is
         consistent regardless of success/failure.
 
-        Format: 🌳 mnelo {verb} {key_fact}
+        Format: ð³ mnelo {verb} {key_fact}
         Examples:
-          🌳 mnelo    +chunk_20260720_xxx  (importance=0.7)
-          🌳 mnelo    ~5 hits  "query"  (top=vector rrf=0.0164)
-          🌳 mnelo    -chunk:chunk_xxx  (1 edge purged)
-          🌳 mnelo    stats: chunks=4156 entities=4394 vectors=4105
+          ð³ mnelo    +chunk_20260720_xxx  (importance=0.7)
+          ð³ mnelo    ~5 hits  "query"  (top=vector rrf=0.0164)
+          ð³ mnelo    -chunk:chunk_xxx  (1 edge purged)
+          ð³ mnelo    stats: chunks=4156 entities=4394 vectors=4105
         """
         if os.environ.get("MNELO_ECHO") == "0":
             return ""
@@ -313,7 +317,7 @@ if _MCP_AVAILABLE:
         # Error responses: show type, no decorative wrapper
         if isinstance(data, dict) and "error" in data:
             err_type = data.get("type", "error")
-            return f"{_ECHO} {_ECHO_LABEL}    ✗{err_type}: {name}"
+            return f"{_ECHO} {_ECHO_LABEL}    â{err_type}: {name}"
 
         # Per-tool compact echoes
         if name == "memory_remember":
@@ -345,19 +349,19 @@ if _MCP_AVAILABLE:
             # handler returns {new_chunk_id, status}
             new_cid = data.get("new_chunk_id", "?") if isinstance(data, dict) else "?"
             old = args.get("old_id", "?")
-            return f"{_ECHO} {_ECHO_LABEL}    ↻{new_cid}  (supersedes {old})"
+            return f"{_ECHO} {_ECHO_LABEL}    â»{new_cid}  (supersedes {old})"
         if name == "memory_relate":
             # handler returns {relation_id, status}
             src = args.get("source_id", "?")
             tgt = args.get("target_id", "?")
             rel = args.get("relation", "?")
-            return f"{_ECHO} {_ECHO_LABEL}    ⟶{src}→{tgt}  ({rel})"
+            return f"{_ECHO} {_ECHO_LABEL}    â¶{src}â{tgt}  ({rel})"
         if name == "memory_graph_query":
             # handler returns {nodes: [...], edges: [...], asof}
             nodes = data.get("nodes", []) if isinstance(data, dict) else []
             edges = data.get("edges", []) if isinstance(data, dict) else []
             start = args.get("start_node", "?")
-            return f"{_ECHO} {_ECHO_LABEL}    ⌘{start}  ({len(nodes)} nodes, {len(edges)} edges)"
+            return f"{_ECHO} {_ECHO_LABEL}    â{start}  ({len(nodes)} nodes, {len(edges)} edges)"
         if name == "memory_stats":
             # Compact: chunks=N entities=N vectors=N
             chunks = data.get("chunks", {}).get("active", "?") if isinstance(data.get("chunks"), dict) else "?"
@@ -368,17 +372,17 @@ if _MCP_AVAILABLE:
             # handler returns {candidates: [...], count: N}
             cands = data.get("candidates", []) if isinstance(data, dict) else []
             thresh = args.get("threshold", 0.85)
-            return f"{_ECHO} {_ECHO_LABEL}    ≡{len(cands)} dup candidates  (threshold={thresh})"
+            return f"{_ECHO} {_ECHO_LABEL}    â¡{len(cands)} dup candidates  (threshold={thresh})"
         if name == "memory_list_entities":
             # handler returns list of entities
             ents = data if isinstance(data, list) else (data.get("entities", []) if isinstance(data, dict) else [])
             kind = args.get("kind", "all")
-            return f"{_ECHO} {_ECHO_LABEL}    ⊃{len(ents)} entities  (kind={kind})"
+            return f"{_ECHO} {_ECHO_LABEL}    â{len(ents)} entities  (kind={kind})"
         if name == "memory_search_relations":
             # handler returns {relations: [...], count: N}
             rels = data.get("relations", []) if isinstance(data, dict) else []
             rel_type = args.get("relation", "all")
-            return f"{_ECHO} {_ECHO_LABEL}    ⇢{len(rels)} relations  (type={rel_type})"
+            return f"{_ECHO} {_ECHO_LABEL}    â¢{len(rels)} relations  (type={rel_type})"
 
         if name == "memory_task_create":
             # handler returns {task_id, current_state, status}
@@ -392,41 +396,41 @@ if _MCP_AVAILABLE:
             from_state = data.get("from_state", "?") if isinstance(data, dict) else "?"
             to_state = data.get("to_state", "?") if isinstance(data, dict) else "?"
             wid = data.get("window_id", "?") if isinstance(data, dict) else "?"
-            return f"{_ECHO} {_ECHO_LABEL}    {task_id}  {from_state}→{to_state}  (win={wid})"
+            return f"{_ECHO} {_ECHO_LABEL}    {task_id}  {from_state}â{to_state}  (win={wid})"
 
         if name == "memory_task_list":
             # handler returns {tasks: [...], count, truncated}
             tasks = data.get("tasks", []) if isinstance(data, dict) else []
             truncated = data.get("truncated", False) if isinstance(data, dict) else False
-            return f"{_ECHO} {_ECHO_LABEL}    ⊃{len(tasks)} tasks  (truncated={truncated})"
+            return f"{_ECHO} {_ECHO_LABEL}    â{len(tasks)} tasks  (truncated={truncated})"
 
         if name == "memory_task_replay":
             # handler returns {task_id, current_state, window_count, windows: [...]}
             wc = data.get("window_count", "?") if isinstance(data, dict) else "?"
             cs = data.get("current_state", "?") if isinstance(data, dict) else "?"
-            return f"{_ECHO} {_ECHO_LABEL}    ↻{data.get('task_id', '?') if isinstance(data, dict) else '?'}  ({wc} windows, current={cs})"
+            return f"{_ECHO} {_ECHO_LABEL}    â»{data.get('task_id', '?') if isinstance(data, dict) else '?'}  ({wc} windows, current={cs})"
 
         if name == "memory_loop_create":
             # handler returns {loop_id, enabled, interval_hours}
             lid = data.get("loop_id", "?") if isinstance(data, dict) else "?"
             ih = data.get("interval_hours", "?") if isinstance(data, dict) else "?"
-            return f"{_ECHO} {_ECHO_LABEL}    ⊕{lid}  (interval={ih}h)"
+            return f"{_ECHO} {_ECHO_LABEL}    â{lid}  (interval={ih}h)"
 
         if name == "memory_loop_tick":
             # handler returns {loop_id, verdict, ...}
             verdict = data.get("verdict", "?") if isinstance(data, dict) else "?"
-            return f"{_ECHO} {_ECHO_LABEL}    ⏱{data.get('loop_id', '?') if isinstance(data, dict) else '?'}  verdict={verdict}"
+            return f"{_ECHO} {_ECHO_LABEL}    â±{data.get('loop_id', '?') if isinstance(data, dict) else '?'}  verdict={verdict}"
 
         if name == "memory_loop_update":
             # handler returns {loop_id, changed: {...}, enabled, interval_hours}
             lid = data.get("loop_id", "?") if isinstance(data, dict) else "?"
             changed = data.get("changed", {}) if isinstance(data, dict) else {}
-            return f"{_ECHO} {_ECHO_LABEL}    ✎{lid}  changed={list(changed.keys())}"
+            return f"{_ECHO} {_ECHO_LABEL}    â{lid}  changed={list(changed.keys())}"
 
         if name == "memory_loop_list":
             # handler returns {loops: [...], count, truncated}
             loops = data.get("loops", []) if isinstance(data, dict) else []
-            return f"{_ECHO} {_ECHO_LABEL}    ⊃{len(loops)} loops"
+            return f"{_ECHO} {_ECHO_LABEL}    â{len(loops)} loops"
 
         # Fallback for unknown shape
         return f"{_ECHO} {_ECHO_LABEL}    {name}  (ok)"
@@ -442,4 +446,4 @@ if _MCP_AVAILABLE:
         return blocks
 
 
-# === 启动入口 ===
+# === å¯å¨å¥å£ ===

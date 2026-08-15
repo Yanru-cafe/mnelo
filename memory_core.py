@@ -899,6 +899,129 @@ class MemoryCore:
             "offset": offset,
         }
 
+    # === [§1.2 #5 P1 #92 fix] ============================================
+    # list_entities / search_relations 重构 raw-SQL handler (避免 mcp_tool_handlers.py
+    # 重复 raw SQL · 不走 Memory 类· 无 namespace guard + pagination)。
+    # ============================================================
+
+    # [§1.2 #5 P1 #92.1 fix] limit 上限 100 (防大查询 hang)· 调用方在 mcp_tool_dispatcher 可加输入 limit
+    _LIST_ENTITIES_LIMIT_MAX = 100
+
+    def list_entities(
+        self,
+        kind: Optional[str] = None,
+        min_importance: float = None,
+        limit: int = 50,
+        offset: int = 0,
+        user_id: str = None,
+        agent_id: str = None,
+    ) -> List[Dict]:
+        """[§1.2 #5 P1 #92 fix] List entities · 走 Memory 类 · 统一 namespace + pagination + filter.
+
+        不再是 raw SQL · 走 Memory.list_entities · 可在 mcp_tool_dispatcher 调用.
+        不再是 _CUSTOM_HANDLERS _handle_list_entities · 避免§1.2 #5 协议层 raw-SQL 旁路。
+
+        Args:
+            kind: filter by entity kind (如 'stock', 'identity_fact')。None = 不过滤
+            min_importance: 最低重要性阈值 [0.0, 1.0]。None = 不过滤
+            limit: 最大返回数 (default 50, 上限 100 · 防 hang)
+            offset: 分页 offset (default 0)
+            user_id: filter by metadata_json.user_id (Mem0 scope)
+            agent_id: filter by metadata_json.agent_id
+
+        Returns:
+            List[Dict] · each dict has id/kind/name/summary/importance
+        """
+        # limit cap (P1 #92.3)
+        limit = max(1, min(int(limit or 50), self._LIST_ENTITIES_LIMIT_MAX))
+        offset = max(0, int(offset or 0))
+
+        sql = "SELECT id, kind, name, summary, importance FROM entities WHERE valid_until IS NULL"
+        params = []
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if min_importance is not None:
+            sql += " AND importance >= ?"
+            params.append(float(min_importance))
+        if user_id:
+            sql += " AND json_extract(metadata_json, '$.user_id') = ?"
+            params.append(user_id)
+        if agent_id:
+            sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
+            params.append(agent_id)
+        sql += " ORDER BY importance DESC, valid_from DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        rows = self._conn.execute(sql, params).fetchall()
+        # 不走 _hit_dict (entity 走中 metadata · _hit_dict 是 chunks recall 用的)。
+        # 直接返回 entity dict (包含 id/kind/name/summary/importance · 不包含 timestamp 等)
+        return [
+            {
+                "id": r[0],
+                "kind": r[1],
+                "name": r[2],
+                "summary": r[3],
+                "importance": float(r[4] or 0.5),
+            }
+            for r in rows
+        ]
+
+    # [§1.2 #5 P1 #92.5 fix] search_relations 上限 100 (同 list_entities)
+    _SEARCH_RELATIONS_LIMIT_MAX = 100
+
+    def search_relations(
+        self,
+        relation: str,
+        asof: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """[§1.2 #5 P1 #92 fix] Search relations by type + time-as-of + pagination.
+
+        Args:
+            relation (required): relation type string (如 'owns', 'references')
+            asof: ISO 8601 timestamp, default = now()
+            limit: 最大返回数 (default 100, 上限 100)
+            offset: 分页 offset
+            source_id / target_id: 可选 filter
+
+        Returns:
+            List[Dict] · each has id/source_id/target_id/relation/weight/valid_from/valid_until
+        """
+        from memory import now as _now_helper  # lazy · P1 #63 避免 circular
+
+        limit = max(1, min(int(limit or 100), self._SEARCH_RELATIONS_LIMIT_MAX))
+        offset = max(0, int(offset or 0))
+        asof = asof or _now_helper()
+
+        sql = "SELECT id, source_id, target_id, relation, weight, valid_from, valid_until FROM relations WHERE relation = ? AND valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)"
+        params = [relation, asof, asof]
+        if source_id:
+            sql += " AND source_id = ?"
+            params.append(source_id)
+        if target_id:
+            sql += " AND target_id = ?"
+            params.append(target_id)
+        sql += " ORDER BY weight DESC, valid_from DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r[0],
+                "source_id": r[1],
+                "target_id": r[2],
+                "relation": r[3],
+                "weight": float(r[4] or 0.0),
+                "valid_from": r[5],
+                "valid_until": r[6],
+            }
+            for r in rows
+        ]
+
     def update(
         self,
         old_id: str,
