@@ -120,6 +120,15 @@ TOOLS = [
                 "valid_until": {"type": "string"},
                 "evidence_chunk_id": {"type": "string"},
                 "properties": {"type": "object"},
+                # === [8/15 E-B] 借鉴 Mem0 add_relations dedup 行为 ===
+                # dedup_check=True → 三元组 (source_id, target_id, relation)
+                # 重复时返已有 relation_id, 不创建新行 (no-op).
+                # DESIGN §3.7.1 落地. 主人 6/29 不抢决策: 默认 False (backward-compat).
+                "dedup_check": {
+                    "type": "boolean",
+                    "description": "默认 False. True → 三元组重复时返已有 relation_id, 不创建新 (Mem0 add_relations 行为借鉴).",
+                    "default": false,
+                },
             },
             "required": ["source_id", "target_id", "relation"],
         },

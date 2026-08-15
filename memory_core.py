@@ -534,36 +534,63 @@ class MemoryCore:
         valid_until: str = None,
         evidence_chunk_id: str = None,
         properties: Dict = None,
+        dedup_check: bool = False,
     ) -> int:
-        """新建一条关系."""
-        from memory import clamp01, now  # lazy import — avoid circular at module load
+        """新建一条关系.
+
+        [8/15 E-B] dedup_check 选项 (借鉴 Mem0 add_relations 行为 + DESIGN §3.7.1):
+        - dedup_check=False (默认) → 行为不变, 允许重复 (backward-compat).
+        - dedup_check=True → 三元组 (source_id, target_id, relation) 重复时
+          返已有 relation_id, 不创建新行 (no-op). 软删 (valid_until 非 NULL)
+          不算 dedup 命中 (历史已"消亡" — 允许重建).
+        主人 6/29 不抢决策: dedup 默认 False, 不破坏老 caller 行为.
+        """
+        from memory import _txn, clamp01, now  # lazy import — avoid circular
 
         # [7/19 P1-1] id 格式验证 (白名单正则)
         source_id = validate_id(source_id, "source_id")
         target_id = validate_id(target_id, "target_id")
         if evidence_chunk_id is not None:
             evidence_chunk_id = validate_id(evidence_chunk_id, "evidence_chunk_id")
-        cur = self._conn.execute(
-            """
-            INSERT INTO relations (source_id, target_id, relation, weight, properties_json,
-                                   valid_from, valid_until, source, confidence, evidence_chunk_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 1.0, ?)
-        """,
-            (
-                source_id,
-                target_id,
-                relation,
-                clamp01(weight, "weight"),
-                json.dumps(properties or {}, ensure_ascii=False),
-                valid_from or now(),
-                valid_until,
-                evidence_chunk_id,
-            ),
-        )
-        self._conn.commit()
+
+        # [8/15 E-B] dedup_check: 命中 (source_id, target_id, relation) 三元组
+        # + valid_until IS NULL (软删算历史, 允许重建)
+        if dedup_check:
+            existing = self._conn.execute(
+                """
+                SELECT id FROM relations
+                WHERE source_id = ? AND target_id = ? AND relation = ?
+                  AND valid_until IS NULL
+                LIMIT 1
+            """,
+                (source_id, target_id, relation),
+            ).fetchone()
+            if existing is not None:
+                # 命中 dedup → 返已有 id, 不创建新
+                return int(existing["id"])
+
+        with _txn(self._conn):
+            cur = self._conn.execute(
+                """
+                INSERT INTO relations (source_id, target_id, relation, weight, properties_json,
+                                       valid_from, valid_until, source, confidence, evidence_chunk_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', 1.0, ?)
+            """,
+                (
+                    source_id,
+                    target_id,
+                    relation,
+                    clamp01(weight, "weight"),
+                    json.dumps(properties or {}, ensure_ascii=False),
+                    valid_from or now(),
+                    valid_until,
+                    evidence_chunk_id,
+                ),
+            )
+            new_id = cur.lastrowid
         # [7/19 v0.5.3] metrics
         _metrics_registry().relate_total.inc()
-        return cur.lastrowid
+        return new_id
 
     def get_all(
         self,

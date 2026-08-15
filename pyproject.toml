@@ -81,6 +81,9 @@ ignore = [
     "W291",  # trailing whitespace (test data with trailing spaces)
     "B007",  # unused loop variable (intentional in some fixtures)
 ]
+# [8/15 E-A + E-B] mcp_tool_definitions.py 大量 JSON schema 字面量,
+# "false"/"true"/"null" 是 JSON boolean/null (不是 Python) → ruff F821 误报
+"mcp_tool_definitions.py" = ["F821"]
 
 [tool.ruff.format]
 # Match Black defaults so ruff format == black format (for back-compat)
