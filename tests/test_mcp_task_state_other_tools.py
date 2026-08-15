@@ -28,11 +28,12 @@ _load("search_index")
 _load("validation")
 _load("auth")
 mcp = _load("mcp_server")
-mcp_disp = _load("mcp_tool_dispatcher")
-
-# [8/15 E-3 fix] L2/admin tier tools 需 all_tools flag 启用.
-# _TOOL_VIS_FLAGS 在 mcp_tool_dispatcher module 上 (PEP 562 facade 不存储).
+# [8/15 E-3 fix P1 #89] mcp_tool_dispatcher._TOOL_VIS_FLAGS 要在真实的 mcp_server 引用的那个 module 上。
+# _load 走 _ilu.spec_from_file_location 重新加载 — mcp_server 的 top-level import 是原来的。
+# 两者是不同 module object. 直接设 sys.modules 上的那个:
+mcp_disp = sys.modules["mcp_tool_dispatcher"]
 mcp_disp._TOOL_VIS_FLAGS = {"audit_tools": True, "l2_tools": True, "all_tools": True}
+
 
 
 
