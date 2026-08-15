@@ -278,6 +278,17 @@ def cleanup_seed(memory, source_prefix: str) -> int:
             # vec0 虚拟表不存在 (sqlite-vec 不可用) — 跳过, 等 chunks 表删完自然 cascade.
             logger.debug(f"[8/10 benchmark cleanup] vectors 表缺失 (vec0 不可用), 跳过: {_e}")
     memory._conn.execute("DELETE FROM chunks WHERE source LIKE ?", (f"{source_prefix}%",))
+    # [8/15 E-2 P1 #77 fix] FTS5 同步清理. 不走 trigger (避免 P1 #75 FTS5 'delete' cmd SQL logic error).
+    # 主表 chunks.rowid INTEGER 同 rowid 在 DELETE 后可复用, FTS5 保留 stale rowid → 下次 INSERT 售 售 conflict.
+    # 如果服务器没有 FTS5 (e.g. vec0-only env), 跳过.
+    try:
+        memory._conn.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE source LIKE ?)",
+            (f"{source_prefix}%",),
+        )
+    except Exception:
+        # FTS5 不存在 (old schema) 或 另一个实例 — 跳过, 不影响 cleanup
+        pass
     memory._conn.execute("DELETE FROM entities WHERE id = 'benchmark_user'")
     memory._conn.commit()
     return len(rows)
