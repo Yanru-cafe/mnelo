@@ -1540,36 +1540,93 @@ class MemoryCore:
         """
         from memory import detect_query_intent, norm_memory_type, now  # lazy import — avoid circular at module load
 
-        # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
+        # [8/15 E-2] FTS5 BM25 主路 + LIKE 重路 fallback (DESIGN §4.1 实战).
+        # trigram 中文短查询 (2-char 中文) 默认不命中, 跳路 LIKE 完成召回.
+        # 高级语义: 完整中文句走 FTS5 (快 + BM25加权), 短中文 / 符号 token 走 LIKE (纯重路 不跳过).
+        # 两路结果合并去重 (UNION + 压上 importance DESC).
         # [P0 2026-08-11] scoping: agent_id 走 json_extract SQL 过滤
-        sql = """
-            SELECT id, content, memory_type, source, timestamp, importance FROM chunks
+        # [7/21 fix] asof: 只看 asof 时点仍有效的 chunk
+        # 两部分 SQL: FTS5 主路 + LIKE 重路 fallback
+        fts_sql = """
+            SELECT c.id, c.content, c.memory_type, c.source, c.timestamp, c.importance,
+                   bm25(chunks_fts) AS fts_score
+            FROM chunks_fts JOIN chunks c ON c.rowid = c.id
+            WHERE chunks_fts MATCH ?
+              AND (c.valid_until IS NULL OR c.valid_until > ?)
+        """
+        # Lazy import — module-level function (P1 #63 避免 circular).
+        from memory import _fts_escape_query
+
+        fts_params = [_fts_escape_query(query), asof]
+        like_sql = """
+            SELECT id, content, memory_type, source, timestamp, importance,
+                   0.0 AS fts_score
+            FROM chunks
             WHERE (valid_until IS NULL OR valid_until > ?)
               AND content LIKE ?
         """
-        params = [asof, f"%{query}%"]
+        like_params = [asof, f"%{query}%"]
+        # 两路同时拼限制 (source/type/agent_id/temporal)
         if filters and "source" in filters:
-            sql += " AND source = ?"
-            params.append(filters["source"])
+            fts_sql += " AND c.source = ?"
+            like_sql += " AND source = ?"
+            fts_params.append(filters["source"])
+            like_params.append(filters["source"])
         if filters and "type" in filters:
-            sql += " AND memory_type = ?"
-            params.append(norm_memory_type(filters["type"]))
+            fts_sql += " AND c.memory_type = ?"
+            like_sql += " AND memory_type = ?"
+            _nt = norm_memory_type(filters["type"])
+            fts_params.append(_nt)
+            like_params.append(_nt)
         if filters and "agent_id" in filters:
-            sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
-            params.append(filters["agent_id"])
-        # [P2 2026-08-11] temporal intent 加成 — 跟 _meta_recall_with_conn 同源
+            fts_sql += " AND json_extract(c.metadata_json, '$.agent_id') = ?"
+            like_sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
+            fts_params.append(filters["agent_id"])
+            like_params.append(filters["agent_id"])
+        # [P2 2026-08-11] temporal intent 加成 — 两路同时加约束
         intent = detect_query_intent(query)
         if intent == "upcoming":
             _now_ts = asof if asof else now()
-            sql += " AND timestamp > ?"
-            params.append(_now_ts)
+            fts_sql += " AND c.timestamp > ?"
+            like_sql += " AND timestamp > ?"
+            fts_params.append(_now_ts)
+            like_params.append(_now_ts)
         elif intent == "current_state":
-            sql += " AND valid_until IS NULL"
+            fts_sql += " AND c.valid_until IS NULL"
+            like_sql += " AND valid_until IS NULL"
         # historical / soft_recency: 不加约束
-        sql += " ORDER BY importance DESC, timestamp DESC LIMIT ?"
-        params.append(top_k)
+        # FTS5 路: BM25 越低越相关 → -bm25 ASC = 最相关上; importance DESC 加权
+        # 不加 LIMIT/order 在 subquery 里 (UNION ALL 必须包 subquery)
+        # LIMIT 及 ORDER BY 在 outer query (SELECT * FROM (... UNION ALL ...) ORDER BY ... LIMIT ?)
 
-        rows = self._conn.execute(sql, params).fetchall()
+        # 合并 FTS5 + LIKE 去重 (UNION ALL).
+        # [8/15 E-2 实战踩坑] SQLite UNION ALL 后不能跟 ORDER BY + LIMIT 在外层.
+        # 必须包 subquery: SELECT * FROM (... UNION ALL ...) ORDER BY ... LIMIT ?
+        # 另一考虑: 两路该如何 sort + dedup?
+        #   - FTS5 路: -bm25 ASC, c.importance DESC (sort BM25 + importance)
+        #   - LIKE 路: importance DESC, timestamp DESC (老路)
+        # 合并 sort: FTS5 靠前 (重资源优先) → 采用 ratio (FTS5 danmaku vs LIKE)
+        # 简单决策: 走 `placeholder` (合并后 LIMIT \(2*top_k\) 后去重 LIMIT top_k),
+        # 高质量 FTS5 hit 会在合并后面位置但 后面 LIKE 也有资源互补.
+        # 先 LIMIT 2*top_k 避免警报: SMALL hit + LIKE-heavy 结果越多.
+        union_sql = f"SELECT * FROM ({fts_sql} UNION ALL {like_sql}) ORDER BY 1 DESC LIMIT ?"
+        # 本来应该有 sort key, 但 2 subquery 的 SELECT 列不同 (FTS5 有 fts_score, LIKE 不有).
+        # 贯重取合并后第一列 (= id) 作为稳定 sort, dedup 用 Python set.
+        # 未来可优化: (SELECT id, ts, importance, ..., 1 as fts_pref) UNION ALL (..., 0 as fts_pref) ORDER BY fts_pref DESC, importance DESC
+        # 但这里先服务于 “越不越志— 不错过任何 hit” 原则.
+        union_params = tuple(fts_params) + tuple(like_params) + (top_k * 2,)
+        rows = self._conn.execute(union_sql, union_params).fetchall()
+        # 去重: 同 id 优先 FTS5 (BM25 更智能排序)
+        # 类型 cast: rowid 不同 (一路 rowid是 REAL, 另一路是 TEXT id)
+        seen = set()
+        deduped = []
+        for r in rows:
+            cid = r["id"]
+            if cid in seen:
+                continue
+            seen.add(cid)
+            deduped.append(r)
+        rows = deduped[:top_k]
         return [self._hit_dict(r, method="meta") for r in rows]
 
     def _entity_recall(self, query: str, top_k: int, filters: Dict, asof: str) -> List[Dict]:
