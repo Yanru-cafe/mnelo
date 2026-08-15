@@ -119,7 +119,44 @@ def main():
         default=None,
         help="Path to file containing Bearer token (default: $MNELO_AUTH_TOKEN or ~/.config/mnelo/auth_token)",
     )
+    # [8/15 E-3 audit fix Plan A3] tool visibility flags.
+    # 默认仅暴露 13 tools (7 core + 4 audit + 2 advanced).
+    # --audit-tools 启用后额外暴露 3 admin tools (memory_audit_* / memory_maintenance)
+    # --l2-tools 启用后额外暴露 8 l2 tools (memory_task_* / memory_loop_*)
+    # --all-tools 启用后暴露所有 24 tools (调试送口)
+    # Hidden tools 仍可隐式 call (返 informative error, Plan A2 hybrid).
+    ap.add_argument(
+        "--audit-tools",
+        action="store_true",
+        help="Expose admin tier tools (memory_audit_undo, memory_audit_list, memory_maintenance). Hidden by default for safety.",
+    )
+    ap.add_argument(
+        "--l2-tools",
+        action="store_true",
+        help="Expose L2 TASK/LOOP tools (memory_task_*, memory_loop_*). Hidden by default — production typically uses core only.",
+    )
+    ap.add_argument(
+        "--all-tools",
+        action="store_true",
+        help="Expose all 24 tools (escape hatch for full debugging).",
+    )
     args = ap.parse_args()
+
+    # [8/15 E-3] Validate flags
+    if args.audit_tools and args.all_tools:
+        # 不严谨，但 all_tools 包含 audit, 只订一个提示
+        sys.stderr.write("[mcp_server] --all-tools supersedes --audit-tools.\n")
+    if args.l2_tools and args.all_tools:
+        sys.stderr.write("[mcp_server] --all-tools supersedes --l2-tools.\n")
+
+    # [8/15 E-3] Store flags 于 mcp_tool_dispatcher module (PEP 562 setattr NOT work)
+    flags = {
+        "audit_tools": args.audit_tools or args.all_tools,
+        "l2_tools": args.l2_tools or args.all_tools,
+        "all_tools": args.all_tools,
+    }
+    # Direct module-level set — facade PEP 562 __setattr__ does NOT work on C-level module
+    mcp_tool_dispatcher._TOOL_VIS_FLAGS = flags
 
     # Direct sub-module access (function scope): PEP 562 forwarding does NOT
     # fire on rebinding locals. To mock these in tests, patch the sub-module

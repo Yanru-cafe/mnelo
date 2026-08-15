@@ -96,6 +96,16 @@ def _rate_limit_check(tool_name: str) -> None:
 
 _RATE_BUCKETS: Dict[str, list] = {}
 
+# [8/15 E-3] Default tool visibility flags — 默认仅暴露 core+audit+advanced.
+# mcp_server.py 启动时根据 --audit-tools/--l2-tools/--all-tools 覆盖.
+# [P1 #83 fix] 本类资源仅在 mcp_server 主路径设置; 本地 import 不暴露 l2/admin.
+_DEFAULT_TOOL_VIS_FLAGS = {
+    "audit_tools": False,
+    "l2_tools": False,
+    "all_tools": False,
+}
+_TOOL_VIS_FLAGS = _DEFAULT_TOOL_VIS_FLAGS  # 可被 mcp_server 动态覆盖
+
 _TOOL_REGISTRY = {
     # name -> (mem method attr, response id field name or None)
     "memory_remember": ("remember", "chunk_id"),
@@ -128,13 +138,37 @@ def _call_tool(name: str, args: Dict) -> str:
     (避免泄露内部路径 / SQL 错误细节 / stack hint 给 MCP client).
     logger.exception 仍保留全 traceback 给 operator (操作员查 ~/.hermes/logs/).
     """
-    mem = _get_mem()
     # [7/19 P2-3] rate limit 在 dispatch 前, 防 owner infinite loop 拖死 MCP server
     try:
         _rate_limit_check(name)
     except ValidationError as ve:
         logger.warning(f"call_tool {name} rate-limited")
         return json.dumps({"error": str(ve), "tool": name, "type": "rate_limit"}, ensure_ascii=False)
+
+    # [8/15 E-3 audit fix Plan A3] hidden tool friendly error.
+    # 隐藏 tool (默认隐藏 l2/admin) 仍可隐式 call — 返 informative error 与解锁指示.
+    # 位于 _get_mem() 之前 — hidden tool 不应 trigger Memory init (避免 zvec LOCK 等资源浪费).
+    # 这不是安全叢道 — 是 “你可能不知道这个 tool 被隐藏了” 提示。
+    # 安全叡锁仍由 owner 控制 (flags 不启用 → 隐式 call 依然报错, 不是 silent).
+    flags = _TOOL_VIS_FLAGS
+    if is_tool_hidden(name, flags):
+        tier = get_tool_tier(name)
+        # 在 audit-tools 未开时, l2_tools flag 无法解锁 admin tools
+        unlock_flag = "l2" if tier == "l2" else ("audit" if tier == "admin" else None)
+        hint = f"--{unlock_flag}-tools" if unlock_flag else "N/A"
+        logger.warning(f"call_tool {name} (tier={tier}) hidden by default. Hint: {hint}")
+        return json.dumps(
+            {
+                "error": f"Tool '{name}' is hidden by default (tier={tier}).",
+                "tool": name,
+                "type": "hidden_tool",
+                "hint": f"Restart mcp_server with --{unlock_flag}-tools flag, or use --all-tools for full debugging.",
+                "tier": tier,
+            },
+            ensure_ascii=False,
+        )
+
+    mem = _get_mem()
     try:
         if name in _TOOL_REGISTRY:
             return _handle_simple(mem, name, args)
@@ -177,8 +211,14 @@ from mcp_guard import (
 )  # guarded imports
 
 # [refactor 2026-08-12] cross-module: handlers + definitions
-from mcp_tool_definitions import TOOLS  # noqa: F401  cross-module
-from mcp_tool_handlers import (
+from mcp_tool_definitions import (  # noqa: F401  cross-module
+    TOOL_METADATA,
+    TOOLS,
+    get_exposed_tools,
+    get_tool_tier,
+    is_tool_hidden,
+)
+from mcp_tool_handlers import (  # noqa: F401  cross-module
     _CUSTOM_HANDLERS,
     _TASK_TOOL_REGISTRY,
     _handle_simple,

@@ -516,3 +516,109 @@ def as_tools():
     from mcp_guard import Tool  # noqa: F401  lazy import
 
     return [Tool(**t) for t in TOOLS]
+
+
+"""Step 1: \u6dfb TOOL_METADATA dict + get_exposed_tools() helper.
+
+[8/15 E-3 audit fix] Plan A3 \u5b9e\u65bd.
+- TOOL_METADATA: tier + hidden + destructive \u4e09\u5217\u8bb0\u5f55
+- get_exposed_tools(flags) \u6839\u636e flag \u8fc7\u6ee4\u5e76\u8fd4\u56de exposed tools
+
+Tier \u5b9a\u4e49:
+- core (\u9ed8\u8ba4\u66b4\u9732): remember/recall/relate/get_all/update/get_digest/forget (7)
+- audit (\u9ed8\u8ba4\u66b4\u9732): recall_stats/list_entities/search_relations/entity_resolve (4)
+- advanced (\u9ed8\u8ba4\u66b4\u9732): graph_query/stats (2)
+- l2 (\u9ed8\u8ba4\u9690\u85cf, --l2-tools \u66b4\u9732): task_* + loop_* (7)
+- admin (\u9ed8\u8ba4\u9690\u85cf, --audit-tools \u66b4\u9732): audit_list/audit_undo/maintenance (3)
+
+\u603b\u8ba1 7 + 4 + 2 + 7 + 3 = 23 tools \u2014 \u4e0d\u662f 24 (\u53e6\u6709 1 \u4e2a schema param "memory_type" \u88ab \u8bef\u8ba1).
+"""
+
+TOOL_METADATA = {
+    # === core (default exposed, \u4e3b\u5165\u53e3 \u4e0d\u80fd\u9690\u85cf) ===
+    "memory_remember": {"tier": "core", "hidden_by_default": False},
+    "memory_recall": {"tier": "core", "hidden_by_default": False},
+    "memory_relate": {"tier": "core", "hidden_by_default": False},
+    "memory_get_all": {"tier": "core", "hidden_by_default": False},
+    "memory_update": {"tier": "core", "hidden_by_default": False},
+    "memory_get_digest": {"tier": "core", "hidden_by_default": False},
+    "memory_forget": {"tier": "core", "hidden_by_default": False},
+    # === audit (default exposed, \u8c03\u8bd5 + \u5ba1\u8ba1) ===
+    "memory_recall_stats": {"tier": "audit", "hidden_by_default": False},
+    "memory_list_entities": {"tier": "audit", "hidden_by_default": False},
+    "memory_search_relations": {"tier": "audit", "hidden_by_default": False},
+    "memory_entity_resolve": {"tier": "audit", "hidden_by_default": False},
+    # === advanced (default exposed, \u9ad8\u7ea7 query / stats) ===
+    "memory_graph_query": {"tier": "advanced", "hidden_by_default": False},
+    "memory_stats": {"tier": "advanced", "hidden_by_default": False},
+    # === l2 (default hidden, --l2-tools \u66b4\u9732) ===
+    "memory_task_create": {"tier": "l2", "hidden_by_default": True},
+    "memory_task_transition": {"tier": "l2", "hidden_by_default": True},
+    "memory_task_list": {"tier": "l2", "hidden_by_default": True},
+    "memory_task_replay": {"tier": "l2", "hidden_by_default": True},
+    "memory_loop_create": {"tier": "l2", "hidden_by_default": True},
+    "memory_loop_tick": {"tier": "l2", "hidden_by_default": True},
+    "memory_loop_update": {"tier": "l2", "hidden_by_default": True},
+    "memory_loop_list": {"tier": "l2", "hidden_by_default": True},
+    # === admin (default hidden, --audit-tools \u66b4\u9732) ===
+    # destructive: \u5b9e\u9645\u4f1a\u6539\u53d8\u6570\u636e (\u5378\u8f7d audit record)
+    "memory_audit_list": {"tier": "admin", "hidden_by_default": True, "destructive": False},
+    "memory_audit_undo": {"tier": "admin", "hidden_by_default": True, "destructive": True},
+    "memory_maintenance": {"tier": "admin", "hidden_by_default": True, "destructive": False, "long_running": True},
+}
+
+
+def get_exposed_tools(flags):
+    """\u6839\u636e \u542f\u52a8 flags \u8fc7\u6ee4 exposed tool \u5217\u8868.
+
+    Args:
+        flags: dict \u542b\u5b57\u6bb5
+            - audit_tools: bool \u2014 \u542f\u7528\u540e \u66b4\u9732 admin tier
+            - l2_tools: bool \u2014 \u542f\u7528\u540e \u66b4\u9732 l2 tier
+            - all_tools: bool \u2014 \u6240\u6709 24 tools \u90fd\u66b4\u9732 (\u8c03\u8bd5\u9001\u53e3)
+
+    Returns:
+        List[Dict] \u2014 \u8fc7\u6ee4\u540e\u7684 tool schema \u5217\u8868\uff08\u4f9b MCP protocol ListTools \u4f7f\u7528\uff09
+
+    Note:
+        \u672c\u51fd\u6570\u4ec5\u8fc7\u6ee4 schema (\u51fa\u73b0\u5728 tools/list),\u4e0d\u963b\u65ad\u9690\u85cf tool \u7684\u9690\u5f0f call \u2014
+        \u9690\u5f0f call \u7531 dispatcher.py \u7684 _call_tool \u5904\u7406\u8d70 informative error (\u8be6\u89c1 Plan A2 hybrid).
+    """
+    from mcp_tool_definitions import TOOLS  # \u907f\u514d\u5faa\u73af import
+
+    if flags.get("all_tools", False):
+        return TOOLS
+
+    def _should_expose(meta):
+        tier = meta.get("tier", "core")
+        hidden = meta.get("hidden_by_default", False)
+        if not hidden:
+            return True  # core/audit/advanced \u9ed8\u8ba4\u66b4\u9732
+        if tier == "l2" and flags.get("l2_tools", False):
+            return True
+        if tier == "admin" and flags.get("audit_tools", False):
+            return True
+        return False
+
+    return [t for t in TOOLS if _should_expose(TOOL_METADATA.get(t["name"], {}))]
+
+
+def get_tool_tier(name):
+    """\u8fd4\u56de tool \u7684 tier (\u8c03\u8bd5 / hidden error \u4f7f\u7528)."""
+    return TOOL_METADATA.get(name, {}).get("tier", "core")
+
+
+def is_tool_hidden(name, flags):
+    """\u68c0\u67e5 tool \u5728\u5f53\u524d flag \u4e0b\u662f\u5426\u9690\u85cf."""
+    if flags.get("all_tools", False):
+        return False
+    meta = TOOL_METADATA.get(name, {})
+    tier = meta.get("tier", "core")
+    hidden = meta.get("hidden_by_default", False)
+    if not hidden:
+        return False
+    if tier == "l2" and flags.get("l2_tools", False):
+        return False
+    if tier == "admin" and flags.get("audit_tools", False):
+        return False
+    return True
