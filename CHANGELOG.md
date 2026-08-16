@@ -1310,6 +1310,57 @@ feat(quality): 2-round quality audit + coverage upgrade (memory 89% / mcp_server
 
 ---
 
+## v1.1.2 — 2026-08-16
+
+fix(mcp): 修真 #2 — ipfilter_cidrs CIDR allowlist middleware 落地 (security defense-in-depth)
+
+**Why**: `mcp_transports.py` documented `ipfilter_cidrs` at line 218 ("建议: ipfilter_cidrs")
+but NEVER implemented it (warn-only). Without ipfilter, bind=0.0.0.0 → Bearer token is
+the ONLY defense line (single point of failure).
+
+**What changes**:
+
+- `mcp_transports.py` — 3 new functions:
+  - `_parse_ipfilter_cidrs(cidr_strings)` — parse string list → `ipaddress.ip_network` list.
+    Empty input = empty list (middleware inactive). Invalid CIDR = ValueError (fail loud).
+  - `_ipfilter_middleware(scope, receive, send, app, allowed_ips)` — pure ASGI middleware
+    (跟 SSE auth 同款 — BaseHTTPMiddleware 跟 SSE body_stream 不兼容, mcp_transports.py:319).
+    Checks `scope["client"][0]` against allowlist. Non-match → 403 Forbidden.
+    IPv4-mapped IPv6 (`::ffff:127.0.0.1`) auto-unwrap before matching.
+  - `_build_ipfilter_wrapper(app, allowed_ips)` — wrap Starlette app. Empty allowlist →
+    returns app unchanged (no wrapping).
+  - Wired into all 3 `uvicorn.run` entry points (SSE / streamable-http / dual transports).
+
+- `config.py` — new `server_ipfilter_cidrs` field. Reads from:
+  1. env `MNELO_MEMORY_SERVER_IPFILTER` (comma-separated, ops override)
+  2. config.toml `[server].ipfilter_cidrs` (list)
+  3. fallback `[]` (backward compat, no filtering)
+
+- `config.toml` — new `[server]` section with `ipfilter_cidrs = []` (default empty).
+
+**Usage** (主人 config.toml):
+```toml
+[server]
+host = "0.0.0.0"          # bind-any
+ipfilter_cidrs = ['100.64.0.0/10']   # only Tailscale mesh sources
+```
+
+Or env override:
+```bash
+export MNELO_MEMORY_SERVER_IPFILTER="100.64.0.0/10,127.0.0.0/8"
+```
+
+**15 new tests** (`test_audit_ipfilter_middleware_p1_2026_08_16.py` + `test_audit_ipfilter_config_p1_2026_08_16.py`):
+- CIDR parse + IPv4/IPv6/multi/IPv4-mapped-IPv6 match
+- middleware pass/block/empty-inactive (3 case)
+- invalid CIDR raises
+- config: env > cfg, invalid type warn + ignore
+- integration: wrapper returns same app when empty
+
+**Tests**: 121/122 audit-relevant pass. 1 pre-existing test fail unrelated.
+
+---
+
 ## Earlier versions
 
 - **v0.2.2** — P0-2 SSE auth (Bearer token, 401 on missing)
