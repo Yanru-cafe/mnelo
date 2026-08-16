@@ -1354,6 +1354,42 @@ conn_id from `_txn_depth_by_id` to avoid id() reuse pollution.
 
 ---
 
+## v1.1.4 — 2026-08-16
+
+fix(recall): 修真 C1 — _fts_escape_query strip ALL FTS5 special chars
+
+**Why**: Pre-fix `_fts_escape_query` only escaped `"` (double-quote). Other
+FTS5 syntax-significant chars (`*`, `(`, `)`, `:`, `^`, `+`, `-`, `,`) caused
+`sqlite3.OperationalError("fts5: syntax error")` in MATCH clause. The caller
+(`memory_core.py:1871`) catches the error silently and falls back to
+LIKE-only — **losing BM25 ranking**. Affected common queries like
+`Python (async)`, `file*.py`, `title:Python`.
+
+**What changes**:
+
+`memory.py _fts_escape_query` — strip ALL FTS5 special chars per
+[SQLite FTS5 docs](https://www.sqlite.org/fts5.html#fts5_strings). Keep word
+tokens + Chinese chars (unicode61 tokenizer handles natively). Use
+`str.maketrans` (O(n) replace).
+
+Examples:
+- `Python (async)` → `Python async`
+- `file*.py` → `file.py`
+- `title:Python` → `title Python`
+- `"hello world"` → `hello world`
+
+**11 new tests** (`test_audit_fts5_escape_p1_2026_08_16.py`):
+- Strip all FTS5 special chars (asterisk, parens, colon, caret, etc.)
+- Preserves Chinese chars (unicode61 tokenizer)
+- Strips double-quote (post-fix behavior)
+- End-to-end: recall with special chars does NOT raise FTS5 error
+- Strict MATCH test on in-memory FTS5 table
+- Empty/None query edge cases
+
+**Tests**: 170/170 audit-relevant pass (0 regressions).
+
+---
+
 ## v1.1.2 — 2026-08-16
 
 fix(mcp): 修真 #2 — ipfilter_cidrs CIDR allowlist middleware 落地 (security defense-in-depth)
