@@ -1,6 +1,6 @@
 """[audit fix 4.1 2026-08-16] graph_query BFS N+1 → batch IN.
 
-Owner 修真 priority #4 (perf hit, ~4.6s/day wasted on N+1).
+Owner fix priority #4 (perf hit, ~4.6s/day wasted on N+1).
 Original: per-hop × per-frontier-node SELECT (60 round-trip for 3-hop frontier=20).
 Fix: per-hop batch IN(...) (3 round-trip total).
 """

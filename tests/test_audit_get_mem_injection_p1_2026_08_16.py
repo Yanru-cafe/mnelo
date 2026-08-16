@@ -1,6 +1,6 @@
 """[audit fix 6.1 + 6.2 2026-08-16] _get_mem db_path injection + reset helper.
 
-Owner 修真 priority #5 (test isolation).
+Owner fix priority #5 (test isolation).
 Original _get_mem hardcoded DB_PATH — tests couldn't isolate.
 Fix: accept optional db_path, add _reset_mem_for_test() helper.
 """

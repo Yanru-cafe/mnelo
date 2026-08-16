@@ -121,7 +121,7 @@ def _handle_task_simple(mem, name: str, args: Dict) -> str:
 # [audit fix 1.1 2026-08-16] Dead code removed — DEFAULT_SSE_HOST/PORT, _resolve_server_defaults,
 # _rate_limit_check, _RATE_BUCKETS. These were duplicated from mcp_tool_dispatcher.py but
 # NEVER CALLED inside this file. The dispatcher owns the canonical implementation.
-# (Owner's #1.1 audit 修真: 修真 = 修真, 100+ 行 dead code gone.)
+# (Owner's #1.1 audit fix: fix = fix, 100+ 行 dead code gone.)
 
 _TOOL_REGISTRY = {
     # name -> (mem method attr, response id field name or None)

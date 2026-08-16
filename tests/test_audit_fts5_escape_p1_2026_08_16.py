@@ -10,7 +10,7 @@ FTS5 has many syntax-significant characters beyond just `"`:
   - NEAR, AND, OR, NOT keywords
 
 Current code only escapes `"` → FTS5 syntax error on these chars → fallback
-to LIKE-only (no BM25 ranking). Owner 修真 priority: ensure all FTS5 special
+to LIKE-only (no BM25 ranking). Owner fix priority: ensure all FTS5 special
 chars are safely escaped (or stripped to plain word tokens).
 
 Test verifies: query with FTS5 special chars does NOT raise FTS5 syntax error.

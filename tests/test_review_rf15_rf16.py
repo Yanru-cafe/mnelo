@@ -38,7 +38,7 @@ mcp_server_path = _REPO / "mcp_server.py"
 def test_rf15_real_mcp_wiring_in_source():
     """[RF15 8/6] 静态契约验证 mcp_server 含正确 rollback wiring.
 
-    修真测走 subprocess 隔离避开 _ilu 问题, 但本静态测试作为 RF15 第一道防线.
+    fix测走 subprocess 隔离避开 _ilu 问题, 但本静态测试作为 RF15 第一道防线.
 
     [8/14 P1 fix] 8/12 refactor (506d5bc) 把 mcp_server 1614 行拆为 facade + 5 modules,
     老 except TaskLoopError / rollback / commit / logger.exception 整段搬到 mcp_tool_handlers.py

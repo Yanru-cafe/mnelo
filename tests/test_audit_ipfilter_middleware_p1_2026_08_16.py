@@ -1,6 +1,6 @@
 """[audit fix #2 2026-08-16] ipfilter_cidrs enforcement via ASGI middleware.
 
-Owner 修真 priority #13 (security defense-in-depth, public exposure mitigation).
+Owner fix priority #13 (security defense-in-depth, public exposure mitigation).
 Documented in mcp_transports.py:218 '建议: ipfilter_cidrs', but never implemented.
 Without ipfilter: bind=0.0.0.0 → Bearer token is the ONLY defense line.
 

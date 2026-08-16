@@ -58,7 +58,7 @@ def _get_mem(db_path=None) -> Any:
         from memory import Memory
 
         effective_db_path = db_path if db_path is not None else _DB_PATH
-        # [audit fix 6.1] 修真: 即使 Memory() 抛异常, 也保留为 None 让下次重试
+        # [audit fix 6.1] fix: 即使 Memory() 抛异常, 也保留为 None 让下次重试
         # (旧版 _get_mem 直接抛 — 单例失败后永远 stuck None, 但表现一致.
         # 新版行为: raise 让 caller 看见 — caller (test fixture) 可决定 retry 还是 skip)
         _mem_instance = Memory(db_path=effective_db_path) if db_path is not None else Memory()

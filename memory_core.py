@@ -1490,7 +1490,7 @@ class MemoryCore:
 
         # [P0 2026-08-11] scoping IDs: 一次 SQL 把 chunk 元数据 + agent_id 拿回来.
         # 在 Python 侧过滤 agent_id (避免每行一次 json_extract SQL).
-        # [audit 修真 #7 2026-08-16] user_id / run_id filter recall 也走 Python 侧
+        # [audit fix #7 2026-08-16] user_id / run_id filter recall 也走 Python 侧
         # post-filter (跟 agent_id 同款 — json_extract NULL 兼容旧数据).
         agent_id_filter = (filters or {}).get("agent_id")
         agent_id_filter_norm = agent_id_filter if agent_id_filter is not None else _MISSING
@@ -1534,7 +1534,7 @@ class MemoryCore:
                     continue
                 # [P0 2026-08-11] agent_id filter — 旧数据 metadata_json=NULL
                 # 或不含 agent_id → JSON 解出 None → 不等于 filter, 保留.
-                # [audit 修真 #7 2026-08-16] 同款 pattern 扩 user_id / run_id.
+                # [audit fix #7 2026-08-16] 同款 pattern 扩 user_id / run_id.
                 if _scope_active:
                     raw = chunk["metadata_json"]
                     if raw is None or raw == "":
@@ -1586,7 +1586,7 @@ class MemoryCore:
             # 这天然保证旧数据兼容.
             sql += " AND json_extract(metadata_json, '$.agent_id') = ?"
             params.append(filters["agent_id"])
-        # [audit 修真 #7 2026-08-16] user_id / run_id 同款 json_extract SQL filter
+        # [audit fix #7 2026-08-16] user_id / run_id 同款 json_extract SQL filter
         if filters and "user_id" in filters:
             sql += " AND json_extract(metadata_json, '$.user_id') = ?"
             params.append(filters["user_id"])
@@ -1657,7 +1657,7 @@ class MemoryCore:
             params.append(top_k)
             rows = conn.execute(sql, params).fetchall()
             # [P0 2026-08-11] agent_id post-filter (SQL LEFT JOIN 后 Python 侧 filter)
-            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            # [audit fix #7 2026-08-16] user_id / run_id 同款 post-filter
             _entity_scope_filters = (
                 ("agent_id", (filters or {}).get("agent_id")),
                 ("user_id", (filters or {}).get("user_id")),
@@ -1987,7 +1987,7 @@ class MemoryCore:
             # [P0 2026-08-11] agent_id filter — SQL 已经 LEFT JOIN chunks,
             # 但 chunk 可能不存在 (老 entity); 改为 Python 侧 post-filter.
             # NULL metadata_json / 缺 agent_id 的 chunk 保留 (旧数据兼容).
-            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            # [audit fix #7 2026-08-16] user_id / run_id 同款 post-filter
             _ent_scope_filters_1 = (
                 ("agent_id", (filters or {}).get("agent_id")),
                 ("user_id", (filters or {}).get("user_id")),
@@ -2027,7 +2027,7 @@ class MemoryCore:
                 )
 
         # === 第二阶段: 通用 token LIKE (高优先级 → 补 concept) ===
-        # [audit 修真 #7 2026-08-16] rows 在 phase 1 (identity_query) 内才定义,
+        # [audit fix #7 2026-08-16] rows 在 phase 1 (identity_query) 内才定义,
         # phase 2 独立跑 (is_identity_query=False) 时必须初始化否则 UnboundLocalError.
         if not is_identity_query:
             rows = []
@@ -2079,7 +2079,7 @@ class MemoryCore:
                 cur_params.append(norm_memory_type(filters["type"]))
             # [P0 2026-08-11] agent_id filter — SQL 不直接 json_extract (entity
             # 可能没关联 chunk); 改 Python 侧 post-filter 同第一阶段.
-            # [audit 修真 #7 2026-08-16] user_id / run_id 同款 post-filter
+            # [audit fix #7 2026-08-16] user_id / run_id 同款 post-filter
             _ent_scope_filters_2 = (
                 ("agent_id", (filters or {}).get("agent_id")),
                 ("user_id", (filters or {}).get("user_id")),

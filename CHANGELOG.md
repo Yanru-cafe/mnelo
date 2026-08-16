@@ -2,7 +2,7 @@
 
 ## v1.1.1 — 2026-08-16
 
-fix: audit-driven修真 pain-point sweep (10 P1 fixes, 0 regressions)
+fix: audit-drivenfix pain-point sweep (10 P1 fixes, 0 regressions)
 
 Replaces redundant fixes already in remote (P1 #84 forget _txn, P1 #91 user_id SQL filter,
 E-B _txn SAVEPOINT). Kept unique audit fixes: 4.1/4.2/4.3 N+1 perf, 1.1/1.2 dead code, 6.1/6.2 test isolation, 2.1/2.2 echo dispatcher refactor.
@@ -1312,7 +1312,7 @@ feat(quality): 2-round quality audit + coverage upgrade (memory 89% / mcp_server
 
 ## v1.1.3 — 2026-08-16
 
-fix: 修真 4 P1 bugs from independent audit (B1+B2+B3+B4)
+fix: fix 4 P1 bugs from independent audit (B1+B2+B3+B4)
 
 **Why**: Independent subagent audit (`delegate_task` bug-hunting) found 4 P1 bugs
 in audit-driven fixes shipped in v1.1.1/v1.1.2.
@@ -1356,7 +1356,7 @@ conn_id from `_txn_depth_by_id` to avoid id() reuse pollution.
 
 ## v1.1.4 — 2026-08-16
 
-fix(recall): 修真 C1 — _fts_escape_query strip ALL FTS5 special chars
+fix(recall): fix C1 — _fts_escape_query strip ALL FTS5 special chars
 
 **Why**: Pre-fix `_fts_escape_query` only escaped `"` (double-quote). Other
 FTS5 syntax-significant chars (`*`, `(`, `)`, `:`, `^`, `+`, `-`, `,`) caused
@@ -1392,7 +1392,7 @@ Examples:
 
 ## v1.1.2 — 2026-08-16
 
-fix(mcp): 修真 #2 — ipfilter_cidrs CIDR allowlist middleware 落地 (security defense-in-depth)
+fix(mcp): fix #2 — ipfilter_cidrs CIDR allowlist middleware 落地 (security defense-in-depth)
 
 **Why**: `mcp_transports.py` documented `ipfilter_cidrs` at line 218 ("建议: ipfilter_cidrs")
 but NEVER implemented it (warn-only). Without ipfilter, bind=0.0.0.0 → Bearer token is

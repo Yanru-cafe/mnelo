@@ -1,6 +1,6 @@
 """[audit fix #9 2026-08-16] _txn() nested SAVEPOINT.
 
-Owner 修真 priority #3 (race P1, P1 #62 same source).
+Owner fix priority #3 (race P1, P1 #62 same source).
 Original _txn uses BEGIN, so nested _txn(_txn) crashes with
 OperationalError "within a transaction" / "no transaction is active".
 Need: detect outer active txn → SAVEPOINT, else BEGIN.
