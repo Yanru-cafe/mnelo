@@ -46,8 +46,12 @@ if not logger.handlers:
 _mem_instance: Optional[Any] = None
 
 
-def _get_mem() -> Any:
-    """åä¾ Memory."""
+def _get_mem(db_path=None) -> Any:
+    """[audit fix 6.1 2026-08-16] singleton Memory w/ optional db_path injection.
+
+    Args:
+        db_path: optional injection for test isolation (default: module DB_PATH).
+    """
     global _mem_instance
     if _mem_instance is None:
         from memory import DB_PATH as _DB_PATH
