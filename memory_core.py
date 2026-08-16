@@ -1377,25 +1377,34 @@ class MemoryCore:
                 c.row_factory = sqlite3.Row
 
             # [7/19 v0.5.3] Per-lane timing for metrics (vector first, parallel meta/entity/graph)
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                t_vec_0 = time.time()
-                f_vec = ex.submit(self._vector_recall_with_conn, recall_conns[0], query, top_k * 2, filters, asof)
-                f_meta = ex.submit(self._meta_recall_with_conn, recall_conns[1], query, top_k * 2, filters, asof)
-                f_entity = ex.submit(self._entity_recall_with_conn, recall_conns[2], query, top_k * 2, filters, asof)
+            # [bug fix D2 2026-08-16] Use try/finally to close recall_conns even if
+            # any f.result() raises. Pre-fix: close loop was AFTER the futures
+            # joined — worker exception skipped close, leaking 4 SQLite connections
+            # + vec0 module registrations per failed recall. Sustained load →
+            # fd exhaustion.
+            try:
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    t_vec_0 = time.time()
+                    f_vec = ex.submit(self._vector_recall_with_conn, recall_conns[0], query, top_k * 2, filters, asof)
+                    f_meta = ex.submit(self._meta_recall_with_conn, recall_conns[1], query, top_k * 2, filters, asof)
+                    f_entity = ex.submit(self._entity_recall_with_conn, recall_conns[2], query, top_k * 2, filters, asof)
 
-                vector_hits = f_vec.result()
-                vec_ms = (time.time() - t_vec_0) * 1000
-                # graph 等 vector 完成再开始 (graph 依赖 vector_hits 作为 seed)
-                t_graph_0 = time.time()
-                f_graph = ex.submit(self._graph_recall, vector_hits, graph_hops, asof)
-                meta_hits = f_meta.result()
-                entity_hits = f_entity.result()
-                graph_hits = f_graph.result()
-                graph_ms = (time.time() - t_graph_0) * 1000
-
-            # 关独立连接
-            for c in recall_conns:
-                c.close()
+                    vector_hits = f_vec.result()
+                    vec_ms = (time.time() - t_vec_0) * 1000
+                    # graph 等 vector 完成再开始 (graph 依赖 vector_hits 作为 seed)
+                    t_graph_0 = time.time()
+                    f_graph = ex.submit(self._graph_recall, vector_hits, graph_hops, asof)
+                    meta_hits = f_meta.result()
+                    entity_hits = f_entity.result()
+                    graph_hits = f_graph.result()
+                    graph_ms = (time.time() - t_graph_0) * 1000
+            finally:
+                # 关独立连接 — finally ensures close even on worker exception
+                for c in recall_conns:
+                    try:
+                        c.close()
+                    except Exception:
+                        pass  # defensive — best-effort close on shutdown
 
             results = self._rrf_fuse([vector_hits, graph_hits, meta_hits, entity_hits], top_k)
             # meta/entity roughly parallel (no separate timers; record 0 to skip metric)
@@ -2536,8 +2545,13 @@ class MemoryCore:
         # 选 done=0 AND purged_at < today 的 target_id, 物理删 + set done=1
         # 注意: 一次 batch_size 限制, 避免大批量 delete 阻塞
         for kind, table in [("chunk", "chunks"), ("entity", "entities"), ("relation", "relations")]:
+            # [bug fix D3+ 2026-08-16] SELECT target_id, not id! purged_queue.id is
+            # autoincrement (not the chunk/entity/relation id). Pre-fix: due_ids
+            # held autoincrement ids → DELETE FROM chunks WHERE id IN (autoinc)
+            # matched 0 rows → no physical delete ever happened. Plus done=1
+            # never got set.
             due_sql = """
-                SELECT id FROM purged_queue
+                SELECT target_id FROM purged_queue
                 WHERE done = 0
                   AND target_kind = ?
                   AND purged_at < ?
@@ -2550,13 +2564,32 @@ class MemoryCore:
 
             # 物理删 (从主表) — 用 cursor 拿 rowcount
             ph = ",".join("?" * len(due_ids))
+            # [bug fix D3 2026-08-16] FTS5 sync delete BEFORE physical DELETE.
+            # Pre-fix: chunks_fts rows orphaned forever (no caller of _fts_sync_delete
+            # or _fts_sync_cleanup_stale in the codebase). FTS5 bloat, wasted search.
+            # For 'chunk' kind, look up rowids FIRST, then DELETE from chunks_fts.
+            if kind == "chunk":
+                try:
+                    fts_rowids = [
+                        r[0] for r in self._conn.execute(
+                            f"SELECT rowid FROM chunks WHERE id IN ({ph})", due_ids
+                        ).fetchall()
+                    ]
+                    if fts_rowids:
+                        fts_ph = ",".join("?" * len(fts_rowids))
+                        self._conn.execute(
+                            f"DELETE FROM chunks_fts WHERE rowid IN ({fts_ph})",
+                            fts_rowids,
+                        )
+                except Exception as e:
+                    logger.warning(f"[purge_worker D3] chunks_fts cleanup failed: {e}")
             cur = self._conn.execute(f"DELETE FROM {table} WHERE id IN ({ph})", due_ids)
             deleted = cur.rowcount
             stats[f"{table}_physically_deleted"] = deleted
 
-            # set done=1
+            # set done=1 — must use target_id (the actual chunk/entity/relation id)
             cur = self._conn.execute(
-                f"UPDATE purged_queue SET done = 1 WHERE target_kind = ? AND id IN ({ph})",
+                f"UPDATE purged_queue SET done = 1 WHERE target_kind = ? AND target_id IN ({ph})",
                 [kind, *due_ids],
             )
             updated = cur.rowcount

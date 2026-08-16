@@ -126,29 +126,46 @@ class AuditMixin:
         return result
 
     def audit_undo(self, audit_id: int) -> Dict[str, Any]:
-        """Undo one applied audit record using its trusted, stored revert script."""
-        row = self._conn.execute("SELECT * FROM audit_log WHERE id = ?", (audit_id,)).fetchone()
-        if not row:
-            raise ValueError(f"audit record {audit_id} not found")
-        if row["status"] != "applied":
-            raise ValueError(f"audit record {audit_id} is not applied")
-        revert_sql = row["revert_sql"]
-        if not revert_sql:
-            raise ValueError(f"audit record {audit_id} has no revert_sql")
-        # executescript is intentional: TTL undo stores UPDATE + DELETE.
-        self._conn.executescript(revert_sql)
-        from memory import now  # lazy import — avoid circular at module load
+        """Undo one applied audit record using its trusted, stored revert script.
 
-        ts = now()
-        self._conn.execute(
-            """INSERT INTO audit_log
-               (run_id, pass_name, action_type, ref_type, ref_id,
-                before_json, after_json, confidence, llm_used, status,
-                created_at, revert_sql)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reverted', ?, NULL)""",
-            (row["run_id"], row["pass_name"], row["action_type"], row["ref_type"], row["ref_id"], row["after_json"], row["before_json"], row["confidence"], row["llm_used"], ts),
-        )
-        self._conn.commit()
+        [bug fix D4 2026-08-16] Atomicity + idempotency:
+        - Wrap in _txn() so revert_sql + audit_log INSERT commit/rollback together.
+          Pre-fix: if INSERT collides with audit_log UNIQUE constraint (e.g. on
+          double-undo), revert_sql had already executed, leaving data undone
+          but no audit trail of the undo.
+        - Idempotency check: skip if status != 'applied'. Pre-fix: double-undo
+          re-applied the original effect (revert_sql has no WHERE status clause
+          to make it idempotent).
+        """
+        from memory import _txn, now  # lazy import — avoid circular at module load
+
+        with _txn(self._conn):
+            row = self._conn.execute("SELECT * FROM audit_log WHERE id = ?", (audit_id,)).fetchone()
+            if not row:
+                raise ValueError(f"audit record {audit_id} not found")
+            if row["status"] != "applied":
+                # Idempotent: already undone (or never applied) — no-op
+                return {
+                    "audit_id": audit_id,
+                    "status": row["status"],
+                    "ref_id": row["ref_id"],
+                    "noop": True,
+                }
+            revert_sql = row["revert_sql"]
+            if not revert_sql:
+                raise ValueError(f"audit record {audit_id} has no revert_sql")
+            # executescript is intentional: TTL undo stores UPDATE + DELETE.
+            # Now inside _txn — partial commit on INSERT failure rolls back revert_sql too.
+            self._conn.executescript(revert_sql)
+            ts = now()
+            self._conn.execute(
+                """INSERT INTO audit_log
+                   (run_id, pass_name, action_type, ref_type, ref_id,
+                    before_json, after_json, confidence, llm_used, status,
+                    created_at, revert_sql)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reverted', ?, NULL)""",
+                (row["run_id"], row["pass_name"], row["action_type"], row["ref_type"], row["ref_id"], row["after_json"], row["before_json"], row["confidence"], row["llm_used"], ts),
+            )
         return {"audit_id": audit_id, "status": "reverted", "ref_id": row["ref_id"]}
 
     def _run_audit_gc(self, dry_run: bool = False) -> Dict[str, int]:

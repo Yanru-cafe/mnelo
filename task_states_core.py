@@ -473,11 +473,23 @@ def replay_task(
         params,
     ).fetchall()
 
-    cur = conn.execute(
-        "SELECT state FROM task_states WHERE task_id=? AND valid_until IS NULL",
-        (task_id,),
-    ).fetchone()
-    current_state = cur[0] if cur else None
+    # [bug fix D5 2026-08-16] current_state must respect asof, not always real-time.
+    # Pre-fix: queried WHERE valid_until IS NULL (the current active window right
+    # now) regardless of asof — so asof='2020-01-01' could return current_state='open'
+    # (from 2026 re-open) while windows=[] (no 2020 state) — incoherent time-travel.
+    # Fix: derive current_state from the last window in `rows` (the one whose
+    # valid_until IS NULL among the asof-filtered set, or the most recent one
+    # if none are currently open).
+    current_state = None
+    if rows:
+        # Prefer the open window (valid_until IS NULL) if present in filtered set
+        for r in rows:
+            if r[2] is None:  # valid_until is None
+                current_state = r[0]
+                break
+        # Fallback: last window in chronological order
+        if current_state is None:
+            current_state = rows[-1][0]
 
     windows = [
         {
