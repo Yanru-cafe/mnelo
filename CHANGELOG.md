@@ -1310,6 +1310,50 @@ feat(quality): 2-round quality audit + coverage upgrade (memory 89% / mcp_server
 
 ---
 
+## v1.1.3 — 2026-08-16
+
+fix: 修真 4 P1 bugs from independent audit (B1+B2+B3+B4)
+
+**Why**: Independent subagent audit (`delegate_task` bug-hunting) found 4 P1 bugs
+in audit-driven fixes shipped in v1.1.1/v1.1.2.
+
+**What changes (1 commit, 5 files, +372 lines, 9 new tests)**:
+
+🛡️ **B4 (HIGH, security)**: `getattr(config, 'server_ipfilter_cidrs', [])` bug.
+'config' was the MODULE, not the singleton. `server_ipfilter_cidrs` is set in
+`Config.__init__()` → module never has it → getattr always returned `[]`.
+**ipfilter was silently NEVER enforced even when configured** (critical).
+Fix: helper `_resolve_ipfilter_from_config()` reads `config.config` (singleton).
+
+🛡️ **B3 (HIGH, security)**: ipfilter X-Forwarded-For bypass.
+Middleware reads `scope['client']` (TCP peer). Behind any reverse proxy, peer is
+proxy IP (always in `ipfilter_cidrs` if proxy allowed) → any client bypasses.
+Fix: opt-in `trust_xff` flag. When True, parse leftmost XFF IP. Default False
+(safer — anyone can spoof XFF without a trusted proxy chain).
+Config: `server_trust_xff` / `MNELO_MEMORY_SERVER_TRUST_XFF=1`.
+
+⚙️ **B2 (MEDIUM, resource)**: `Memory.close()` leaks sqlite if index close raises.
+Original: bare except around `index.close()`, `conn.close()` unguarded.
+If `index.close()` raised, `conn.close()` never ran → file handle + WAL lock leak.
+Fix: `try/finally` wraps both, `conn.close()` in own `try/except`.
+
+⚙️ **B1 (MEDIUM, logic)**: `_txn` depth counter leaks on exception path.
+Depth counter decremented only in success-branch finally → repeated failed
+nested `_txn` calls grow depth monotonically → id() reuse pollution.
+Fix: decrement on BOTH success and exception paths. `Memory.close()` purges
+conn_id from `_txn_depth_by_id` to avoid id() reuse pollution.
+
+**9 new tests** (`test_audit_bug_fixes_p1_2026_08_16.py`):
+- B1: depth counter doesn't leak on exception + close() purges dict
+- B2: close() runs conn.close() even if index.close() raises; swallows conn errors
+- B3: XFF parsing + trust_xff True/False behavior + leftmost IP
+- B4: singleton access returns configured CIDRs (the critical fix)
+
+**Tests**: 161/162 audit-relevant pass (1 pre-existing rf15 fail = baseline
+4-leak test, B1 fix actually improves n_first 4 → 3 — fewer leaked entities).
+
+---
+
 ## v1.1.2 — 2026-08-16
 
 fix(mcp): 修真 #2 — ipfilter_cidrs CIDR allowlist middleware 落地 (security defense-in-depth)
