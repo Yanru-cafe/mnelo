@@ -509,6 +509,11 @@ def _txn(conn):
                 conn.execute("ROLLBACK")
         except Exception as rb_err:  # noqa: BLE001
             logging.getLogger("mnelo").warning(f"[txn] ROLLBACK failed: {rb_err}")
+        # [bug fix B1 2026-08-16] decrement depth on EXCEPTION path too.
+        # 原版只在 success branch 的 finally (line 519-521) 减, nested fail 不减
+        # → counter 单调增长, Memory.close() 不清 dict → id() 复用时新 conn 继承脏 depth.
+        if nested:
+            _txn_depth_by_id[conn_id] = max(0, _txn_depth_by_id.get(conn_id, 1) - 1)
         raise
     else:
         try:
@@ -518,7 +523,7 @@ def _txn(conn):
                 conn.execute("COMMIT")
         finally:
             if nested:
-                _txn_depth_by_id[conn_id] = max(0, _txn_depth_by_id[conn_id] - 1)
+                _txn_depth_by_id[conn_id] = max(0, _txn_depth_by_id.get(conn_id, 1) - 1)
 
 
 # [8/15 E-B fix] module-level dict 存嵌套深度 (sqlite3.Connection 不接受 attr)

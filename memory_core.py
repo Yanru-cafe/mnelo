@@ -327,13 +327,36 @@ class MemoryCore:
         self._conn.commit()
 
     def close(self) -> None:
-        """Close the underlying SQLite connection + search index."""
+        """Close the underlying SQLite connection + search index.
 
+        [bug fix B1+B2 2026-08-16]
+        - B2: wrap conn close in try/finally so it always runs even if index
+          close raises. Previously, an index.close() raise would skip conn.close()
+          and leak the file handle + WAL lock.
+        - B2: wrap conn close in try/except so a sqlite close failure doesn't
+          propagate to caller (we're best-effort during shutdown).
+        - B1: purge self._conn from _txn_depth_by_id so id() reuse doesn't
+          inherit stale depth state on the next Memory() instance.
+        """
+        # [bug fix B1 2026-08-16] track conn_id for dict cleanup
+        conn_id = id(self._conn)
         try:
-            self._index.close()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"[memory.close] index close failed: {e}")
-        self._conn.close()
+            try:
+                self._index.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[memory.close] index close failed: {e}")
+            # [bug fix B2 2026-08-16] ensure conn close runs even if index raised
+        finally:
+            try:
+                self._conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[memory.close] conn close failed: {e}")
+            # [bug fix B1 2026-08-16] purge txn-depth dict (avoids id() reuse pollution)
+            try:
+                from memory import _txn_depth_by_id
+                _txn_depth_by_id.pop(conn_id, None)
+            except ImportError:
+                pass  # memory module not imported (shouldn't happen in normal flow)
 
     def __enter__(self) -> "Memory":  # noqa: F821  forward ref to composed class
         """Support `with Memory() as m:` — returns self."""

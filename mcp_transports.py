@@ -210,7 +210,43 @@ def _parse_ipfilter_cidrs(cidr_strings) -> list:
     return [_ip.ip_network(str(c), strict=False) for c in cidr_strings]
 
 
-async def _ipfilter_middleware(scope, receive, send, app, allowed_ips) -> None:
+def _resolve_ipfilter_from_config() -> tuple[list, bool]:
+    """[bug fix B4 2026-08-16] Read ipfilter_cidrs + trust_xff from singleton.
+
+    The previous `getattr(config, 'server_ipfilter_cidrs', [])` looked at the
+    **module** (config.py), not the **singleton instance** (config.config). Since
+    `server_ipfilter_cidrs` is set in `Config.__init__`, the module never has it
+    → getattr always returned [] → ipfilter was silently NEVER enforced.
+
+    Fix: access `config.config` (singleton) directly.
+
+    Returns (cidr_list, trust_xff). trust_xff is False by default — operators
+    must opt in (any client can spoof XFF without a trusted proxy chain).
+    """
+    import config
+    cidrs = getattr(config.config, "server_ipfilter_cidrs", []) or []
+    trust_xff = bool(getattr(config.config, "server_trust_xff", False))
+    return cidrs, trust_xff
+
+
+def _parse_xff_first_ip(header_value: bytes) -> "str | None":
+    """[bug fix B3 2026-08-16] Extract leftmost IP from X-Forwarded-For header.
+
+    XFF format: "client, proxy1, proxy2" (comma-separated, optionally with spaces).
+    Leftmost is the original client; rightmost is the most recent proxy.
+    Returns None on empty/invalid input.
+    """
+    if not header_value:
+        return None
+    try:
+        decoded = header_value.decode("latin-1")  # ASCII-safe, no errors
+    except (UnicodeDecodeError, AttributeError):
+        return None
+    parts = [p.strip() for p in decoded.split(",")]
+    return parts[0] if parts and parts[0] else None
+
+
+async def _ipfilter_middleware(scope, receive, send, app, allowed_ips, trust_xff: bool = False) -> None:
     """[audit fix #2 2026-08-16] Pure ASGI ipfilter middleware (no BaseHTTPMiddleware).
 
     Why pure ASGI (跟 SSE auth 同款, mcp_transports.py:319):
@@ -224,12 +260,16 @@ async def _ipfilter_middleware(scope, receive, send, app, allowed_ips) -> None:
 
     Handles IPv4-mapped IPv6 (::ffff:127.0.0.1) by unwrapping before matching.
 
+    [bug fix B3 2026-08-16] trust_xff: when True, prefer X-Forwarded-For leftmost
+    IP over TCP peer. Default False (safer — anyone can spoof XFF).
+
     Args:
         scope: ASGI scope dict
         receive: ASGI receive callable
         send: ASGI send callable
         app: downstream ASGI app to call on pass
         allowed_ips: list of ipaddress.ip_network objects (from _parse_ipfilter_cidrs)
+        trust_xff: prefer X-Forwarded-For leftmost IP (only when behind trusted proxy)
     """
     import ipaddress as _ip
 
@@ -244,7 +284,21 @@ async def _ipfilter_middleware(scope, receive, send, app, allowed_ips) -> None:
         await app(scope, receive, send)
         return
 
-    raw_ip = client[0]
+    # [bug fix B3 2026-08-16] prefer X-Forwarded-For when behind trusted proxy
+    # Default trust_xff=False: safer — only TCP peer counts. This avoids the
+    # classic "anyone can spoof XFF" bypass. Operators must opt in (config).
+    raw_ip = None
+    if trust_xff:
+        # Parse XFF header (leftmost = original client)
+        for name, value in scope.get("headers", []):
+            if name == b"x-forwarded-for":
+                xff = _parse_xff_first_ip(value)
+                if xff:
+                    raw_ip = xff
+                    break
+    if raw_ip is None:
+        # Fallback to TCP peer (ASGI spec)
+        raw_ip = client[0]
     try:
         ip = _ip.ip_address(raw_ip)
     except ValueError:
@@ -281,21 +335,24 @@ async def _ipfilter_middleware(scope, receive, send, app, allowed_ips) -> None:
     })
 
 
-def _build_ipfilter_wrapper(app, allowed_ips):
+def _build_ipfilter_wrapper(app, allowed_ips, trust_xff: bool = False):
     """[audit fix #2 2026-08-16] Wrap Starlette app with ipfilter middleware.
 
     Returns a new ASGI app that calls _ipfilter_middleware before the inner app.
     Empty allowed_ips → returns app unchanged (no wrapping).
 
+    [bug fix B3 2026-08-16] trust_xff: when True, middleware uses X-Forwarded-For
+    leftmost IP instead of TCP peer. Default False (any client can spoof XFF).
+
     Usage:
-        wrapped_app = _build_ipfilter_wrapper(starlette_app, allowed_ips)
+        wrapped_app = _build_ipfilter_wrapper(starlette_app, allowed_ips, trust_xff=False)
         uvicorn.run(wrapped_app, host=..., port=...)
     """
     if not allowed_ips:
         return app
 
     async def wrapped_app(scope, receive, send):
-        await _ipfilter_middleware(scope, receive, send, app, allowed_ips)
+        await _ipfilter_middleware(scope, receive, send, app, allowed_ips, trust_xff=trust_xff)
     return wrapped_app
 
 
@@ -573,10 +630,11 @@ def run_streamable_http(host: Optional[str] = None, port: Optional[int] = None, 
 
     app = _build_streamable_app(auth_token)
     logger.info(f"mnelo MCP streamable-http listening on http://{host}:{port}/mcp (Bearer auth ON)")
-    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    # [bug fix B4 2026-08-16] use singleton access; pass trust_xff into wrapper.
+    _ipfilter_cidrs, _trust_xff = _resolve_ipfilter_from_config()
     if _ipfilter_cidrs:
-        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
-        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs, trust_xff=_trust_xff)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)} (trust_xff={_trust_xff})")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -722,10 +780,11 @@ def run_dual(host: Optional[str] = None, port: Optional[int] = None, auth_token:
 
     app = _build_dual_app(auth_token)
     logger.info(f"mnelo MCP DUAL listening on http://{host}:{port} (SSE=/sse+/messages/, streamable-http=/mcp, /health, /metrics; Bearer auth ON)")
-    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    # [bug fix B4 2026-08-16] use singleton access; pass trust_xff into wrapper.
+    _ipfilter_cidrs, _trust_xff = _resolve_ipfilter_from_config()
     if _ipfilter_cidrs:
-        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
-        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs, trust_xff=_trust_xff)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)} (trust_xff={_trust_xff})")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -774,10 +833,11 @@ def run_sse(host: Optional[str] = None, port: Optional[int] = None, auth_token: 
     # 4. build app + run
     app = _build_sse_app(auth_token)
     logger.info(f"mnelo MCP SSE listening on http://{host}:{port}/sse (Bearer auth ON)")
-    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    # [bug fix B4 2026-08-16] use singleton access; pass trust_xff into wrapper.
+    _ipfilter_cidrs, _trust_xff = _resolve_ipfilter_from_config()
     if _ipfilter_cidrs:
-        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
-        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs, trust_xff=_trust_xff)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)} (trust_xff={_trust_xff})")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
