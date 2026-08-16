@@ -69,9 +69,20 @@ ALL_STATES = TASK_STATES | LOOP_STATES
 
 
 def _default_now() -> str:
-    # [review-pass RF1] 毫秒级精度, 避免同秒双 transfer 产生零长状态窗
-    # (asof 回放中途态会丢). 8/6 ship.
-    return datetime.now().isoformat(timespec="milliseconds")
+    # [bug fix D1 2026-08-16] Use memory.now() (second precision, T-sep) for
+    # consistency with the rest of the codebase. Pre-fix: this returned
+    # millisecond precision ('2026-08-16T10:30:00.123') which broke lex
+    # comparisons with second-precision timestamps from memory.now() —
+    # SQLite treats '2026-08-16T10:30:00' < '2026-08-16T10:30:00.500'
+    # (shorter string sorts first) silently corrupting asof / valid_until
+    # / supersede cascade queries.
+    #
+    # The original "milliseconds to avoid zero-length windows" rationale
+    # is preserved: callers that need sub-second precision can pass
+    # explicit `now=...` parameter (e.g. line 278: +1ms offset for
+    # back-to-back transitions).
+    from memory import now as _memory_now  # lazy import — avoid circular
+    return _memory_now()
 
 
 def _slugify(name: str) -> str:
