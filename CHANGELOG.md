@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.1 — 2026-08-16
+
+fix: audit-driven修真 pain-point sweep (10 P1 fixes, 0 regressions)
+
+Replaces redundant fixes already in remote (P1 #84 forget _txn, P1 #91 user_id SQL filter,
+E-B _txn SAVEPOINT). Kept unique audit fixes: 4.1/4.2/4.3 N+1 perf, 1.1/1.2 dead code, 6.1/6.2 test isolation, 2.1/2.2 echo dispatcher refactor.
+
+10 commits, 0 regressions across 136 audit-relevant tests.
+
 ## v1.6.0 — 2026-08-16
 
 feat(memory): meta 路集成 FTS5 BM25 + LIKE fallback · non-trigger 模式 (E-2 重启实战)
