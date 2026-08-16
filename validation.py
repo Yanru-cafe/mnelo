@@ -55,7 +55,14 @@ _BIDI_ZERO_WIDTH = "".join(
 _BIDI_ZW_RE = re.compile(f"[{re.escape(_BIDI_ZERO_WIDTH)}]")
 
 # ID whitelist: 字母/数字/_/:/./- (覆盖 chunk_id, entity_id, relation id 全场景)
-_ID_RE = re.compile(r"^[a-zA-Z0-9_:\.\-]{1," + str(MAX_ID_LEN) + r"}$")
+# [8/16 patch] 扩到支持 unicode (中日韩) + / + 空格 — 主人清理 137 个 test fixture 时,
+# 4 个 entity 撞限制 (主人 / user 2026-07-01... / comfyanonymous/ComfyUI / ltdrdata/...).
+# 仍拒: 反斜杠 \\ 单引号 ' 双引号 " 分号 ; 反引号 ` NUL \n \r \t (SQL/shell injection + HTTP injection).
+_ID_RE = re.compile(
+    r"^[\w \u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af/.\-:]{1,"
+    + str(MAX_ID_LEN)
+    + r"}$"
+)
 
 
 class ValidationError(ValueError):
