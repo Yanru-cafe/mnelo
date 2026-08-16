@@ -47,3 +47,16 @@ stale_days_threshold = 7
 # 跨 VPS mnelo 调用默认 host. 默认 Tailscale Service 域名 (mesh 内 forward 到 macbook 127.0.0.1:8086).
 # env 覆盖: MNELO_MEMORY_CLIENT_TAILSCALE_HOST
 tailscale_host = "mnelo.tail6a710.ts.net"
+
+[server]
+# [8/9 review B6] host 接受 loopback (127.x) 或 Tailscale CGNAT (100.64.0.0/10)
+# 或 0.0.0.0 (bind-any) + ipfilter_cidrs 限制来源.
+# env 覆盖: MNELO_MEMORY_SERVER_HOST / MNELO_MEMORY_SERVER_PORT
+host = "127.0.0.1"
+port = 8086
+# [audit fix #2 2026-08-16] ipfilter_cidrs: 可选 CIDR allowlist (bind=0.0.0.0 时强制).
+# 空 list = 无 ipfilter (loopback 也算安全). 配置时: 仅允许的 source IP CIDR.
+# 例: 仅 Tailscale mesh 来源 → ["100.64.0.0/10"]
+#     仅 LAN 来源 → ["192.168.0.0/16", "10.0.0.0/8"]
+# env 覆盖: MNELO_MEMORY_SERVER_IPFILTER (逗号分隔 CIDR list)
+ipfilter_cidrs = []   # default: empty (no ipfilter, backward compat)

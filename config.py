@@ -159,6 +159,18 @@ class Config:
             print(f'[config] WARN: server.port "{port_str}" invalid ({e}); 回落 8086', file=sys.stderr)
             port = 8086
         self.server_port = port
+        # [audit fix #2 2026-08-16] ipfilter_cidrs: optional list of CIDRs to allow
+        # when binding 0.0.0.0 / :: (any-interface) for LAN/Tailscale/public exposure.
+        # Default empty list = no filter (current behavior). When bind=0.0.0.0, ipfilter
+        # enforcement kicks in (warn → enforce). env var MNELO_MEMORY_SERVER_IPFILTER
+        # (comma-separated) for ops override.
+        env_ipfilter = os.environ.get("MNELO_MEMORY_SERVER_IPFILTER", "").strip()
+        ipfilter_from_env = [c.strip() for c in env_ipfilter.split(",") if c.strip()] if env_ipfilter else []
+        ipfilter_from_cfg = server_section.get("ipfilter_cidrs") or []
+        if not isinstance(ipfilter_from_cfg, list):
+            print(f'[config] WARN: server.ipfilter_cidrs must be list, got {type(ipfilter_from_cfg).__name__}; ignore', file=sys.stderr)
+            ipfilter_from_cfg = []
+        self.server_ipfilter_cidrs = ipfilter_from_env if ipfilter_from_env else ipfilter_from_cfg
 
         # [7/21 fix] Storage location: env MNELO_MEMORY_DIR/MNELO_MEMORY_DB_PATH
         # > config.toml [storage].dir > ~/.hermes/memory (backward compatible).

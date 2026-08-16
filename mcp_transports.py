@@ -196,6 +196,116 @@ def _ip_in_tailscale_cgnat(ip_str: str) -> bool:
     return ip in ipaddress.ip_network("100.64.0.0/10")
 
 
+def _parse_ipfilter_cidrs(cidr_strings) -> list:
+    """[audit fix #2 2026-08-16] Parse config.toml ipfilter_cidrs strings → ip_network list.
+
+    Returns empty list if cidr_strings is None or empty (backward compat — middleware
+    inactive = no filtering = current behavior).
+
+    Raises ValueError on invalid CIDR (fail loud — silent accept-all is dangerous).
+    """
+    import ipaddress as _ip
+    if not cidr_strings:
+        return []
+    return [_ip.ip_network(str(c), strict=False) for c in cidr_strings]
+
+
+async def _ipfilter_middleware(scope, receive, send, app, allowed_ips) -> None:
+    """[audit fix #2 2026-08-16] Pure ASGI ipfilter middleware (no BaseHTTPMiddleware).
+
+    Why pure ASGI (跟 SSE auth 同款, mcp_transports.py:319):
+      - BaseHTTPMiddleware 跟 SSE body_stream 不兼容 (断开时断言崩)
+      - 纯 ASGI middleware 在所有 transport (SSE / streamable-http / dual) 通用
+
+    Behavior:
+      - empty allowed_ips → middleware inactive (no rejection, pass through)
+      - non-empty allowed_ips + client IP in any CIDR → pass through
+      - non-empty allowed_ips + client IP NOT in any CIDR → 403 Forbidden
+
+    Handles IPv4-mapped IPv6 (::ffff:127.0.0.1) by unwrapping before matching.
+
+    Args:
+        scope: ASGI scope dict
+        receive: ASGI receive callable
+        send: ASGI send callable
+        app: downstream ASGI app to call on pass
+        allowed_ips: list of ipaddress.ip_network objects (from _parse_ipfilter_cidrs)
+    """
+    import ipaddress as _ip
+
+    # Empty allowlist = middleware inactive (backward compat)
+    if not allowed_ips:
+        await app(scope, receive, send)
+        return
+
+    client = scope.get("client")
+    if client is None:
+        # No client info (e.g. unix socket test) → pass through, can't determine IP
+        await app(scope, receive, send)
+        return
+
+    raw_ip = client[0]
+    try:
+        ip = _ip.ip_address(raw_ip)
+    except ValueError:
+        # Unparseable IP → pass through (fail open for safety; logged via outer middleware)
+        await app(scope, receive, send)
+        return
+
+    # IPv4-mapped IPv6 → unwrap (e.g. ::ffff:127.0.0.1 → 127.0.0.1)
+    if isinstance(ip, _ip.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+
+    # Check allowlist
+    if any(ip in net for net in allowed_ips):
+        await app(scope, receive, send)
+        return
+
+    # Block: 403 Forbidden
+    logger.warning(
+        f"[ipfilter] blocked {raw_ip} (not in ipfilter_cidrs {allowed_ips}); "
+        f"path={scope.get('path', '?')} method={scope.get('method', '?')}"
+    )
+    response_body = (
+        f"403 Forbidden: ip {raw_ip} not in ipfilter_cidrs allowlist. "
+        f"Contact admin to add your IP CIDR."
+    ).encode("utf-8")
+    await send({
+        "type": "http.response.start",
+        "status": 403,
+        "headers": [(b"content-type", b"text/plain; charset=utf-8")],
+    })
+    await send({
+        "type": "http.response.body",
+        "body": response_body,
+    })
+
+
+def _build_ipfilter_wrapper(app, allowed_ips):
+    """[audit fix #2 2026-08-16] Wrap Starlette app with ipfilter middleware.
+
+    Returns a new ASGI app that calls _ipfilter_middleware before the inner app.
+    Empty allowed_ips → returns app unchanged (no wrapping).
+
+    Usage:
+        wrapped_app = _build_ipfilter_wrapper(starlette_app, allowed_ips)
+        uvicorn.run(wrapped_app, host=..., port=...)
+    """
+    if not allowed_ips:
+        return app
+
+    async def wrapped_app(scope, receive, send):
+        await _ipfilter_middleware(scope, receive, send, app, allowed_ips)
+    return wrapped_app
+
+
+
+
+def _len_cidrs_msg(cidrs) -> str:
+    """[audit fix #2 2026-08-16] Format CIDR list for human-readable warn message."""
+    return f"{len(cidrs)} CIDR(s): {', '.join(str(c) for c in cidrs)}"
+
+
 def _validate_loopback_host(host: str) -> None:
     """[8/8 Tailscale multi-agent] host 白名单 — 接受 loopback + Tailscale CGNAT.
 
@@ -463,6 +573,10 @@ def run_streamable_http(host: Optional[str] = None, port: Optional[int] = None, 
 
     app = _build_streamable_app(auth_token)
     logger.info(f"mnelo MCP streamable-http listening on http://{host}:{port}/mcp (Bearer auth ON)")
+    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    if _ipfilter_cidrs:
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -608,6 +722,10 @@ def run_dual(host: Optional[str] = None, port: Optional[int] = None, auth_token:
 
     app = _build_dual_app(auth_token)
     logger.info(f"mnelo MCP DUAL listening on http://{host}:{port} (SSE=/sse+/messages/, streamable-http=/mcp, /health, /metrics; Bearer auth ON)")
+    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    if _ipfilter_cidrs:
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
@@ -656,6 +774,10 @@ def run_sse(host: Optional[str] = None, port: Optional[int] = None, auth_token: 
     # 4. build app + run
     app = _build_sse_app(auth_token)
     logger.info(f"mnelo MCP SSE listening on http://{host}:{port}/sse (Bearer auth ON)")
+    _ipfilter_cidrs = _parse_ipfilter_cidrs(getattr(config, "server_ipfilter_cidrs", []))
+    if _ipfilter_cidrs:
+        app = _build_ipfilter_wrapper(app, _ipfilter_cidrs)
+        logger.info(f"[ipfilter] ENFORCED — {_len_cidrs_msg(_ipfilter_cidrs)}")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
