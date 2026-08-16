@@ -14,8 +14,8 @@ CREATE TABLE entities (
     summary TEXT,
     properties_json TEXT,
     aliases_json TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT NOT NULL DEFAULT (iso_now()),
+    updated_at TEXT NOT NULL DEFAULT (iso_now()),
     valid_from TEXT,
     valid_until TEXT,
     superseded_by TEXT,
@@ -41,14 +41,14 @@ CREATE TABLE chunks (
     memory_type TEXT DEFAULT 'fact',        -- [P0 §3.0] fact / preference / episode / decision / procedure / ephemeral
     source TEXT,
     session_id TEXT DEFAULT 'default',
-    timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    timestamp TEXT NOT NULL DEFAULT (iso_now()),
     importance REAL DEFAULT 0.5,            -- 0.0-1.0, 排序 (entities 表也有, 冗余存方便排序)
     metadata_json TEXT,
     superseded_by TEXT,
     valid_until TEXT,
     recall_count INTEGER DEFAULT 0,
     last_recalled TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT NOT NULL DEFAULT (iso_now()),
     processed_at TEXT                              -- [H-1 §2] NULL=未跑过 L2; TASKS H5 watermark 候选
 );
 CREATE INDEX idx_chunks_timestamp ON chunks(timestamp);
@@ -68,7 +68,7 @@ CREATE TABLE relations (
     properties_json TEXT,
     valid_from TEXT,
     valid_until TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    created_at TEXT NOT NULL DEFAULT (iso_now()),
     source TEXT,
     confidence REAL DEFAULT 1.0,
     evidence_chunk_id TEXT
@@ -90,7 +90,7 @@ CREATE VIRTUAL TABLE vectors USING vec0(
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    updated_at TEXT NOT NULL DEFAULT (iso_now())
 );
 
 -- 6. RECALL_LOG (召回审计) ----------------------------
@@ -102,7 +102,7 @@ CREATE TABLE recall_log (
     graph_hops INTEGER,
     latency_ms REAL,
     recall_details_json TEXT,   -- [P2+ #3 7/18 patch]  feedback loop: top-5 ranks + method + distance/rrf_score + importance
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    created_at TEXT NOT NULL DEFAULT (iso_now())
 );
 CREATE INDEX idx_recall_query ON recall_log(query);
 CREATE INDEX idx_recall_created ON recall_log(created_at);
@@ -112,7 +112,7 @@ CREATE TABLE purged_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     target_id TEXT NOT NULL,
     target_kind TEXT NOT NULL,
-    purged_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    purged_at TEXT NOT NULL DEFAULT (iso_now()),
     done INTEGER DEFAULT 0
 );
 CREATE INDEX idx_purged_done ON purged_queue(done);
@@ -222,7 +222,7 @@ INSERT OR IGNORE INTO state_transitions (scope, from_state, to_state) VALUES
 
 -- 8.1 维护 updated_at
 CREATE TRIGGER trg_entities_updated AFTER UPDATE ON entities
-BEGIN UPDATE entities SET updated_at = datetime('now', 'localtime') WHERE id = NEW.id; END;
+BEGIN UPDATE entities SET updated_at = iso_now() WHERE id = NEW.id; END;
 
 CREATE TRIGGER trg_chunks_updated AFTER UPDATE OF superseded_by, valid_until ON chunks
 BEGIN UPDATE chunks SET created_at = created_at WHERE id = NEW.id; END;
@@ -233,7 +233,7 @@ CREATE TRIGGER trg_entities_supersede AFTER UPDATE OF superseded_by ON entities
 WHEN NEW.superseded_by IS NOT NULL AND OLD.superseded_by IS NULL
 BEGIN
     UPDATE relations
-    SET valid_until = datetime('now', 'localtime')
+    SET valid_until = iso_now()
     WHERE (source_id = OLD.id OR target_id = OLD.id) AND valid_until IS NULL;
 END;
 
@@ -242,7 +242,7 @@ CREATE TRIGGER trg_chunks_supersede AFTER UPDATE OF superseded_by ON chunks
 WHEN NEW.superseded_by IS NOT NULL AND OLD.superseded_by IS NULL
 BEGIN
     UPDATE relations
-    SET valid_until = datetime('now', 'localtime')
+    SET valid_until = iso_now()
     WHERE (source_id = OLD.id OR target_id = OLD.id) AND valid_until IS NULL;
 END;
 
@@ -254,12 +254,12 @@ INSERT INTO meta (key, value) VALUES
     ('schema_version', '1.1'),
     ('embedding_model', '{EMBED_MODEL}'),
     ('embedding_dim', '{EMBED_DIM}'),
-    ('created_at', datetime('now', 'localtime')),
+    ('created_at', iso_now()),
     ('created_by', 'mnelo v0.5.x'),
     -- [H-1 8/4 fix] 审计 §2: L2 启用 flag, H0 落地时 query 这个值
     -- =1 表示 audit_log 表已建 (H-1 落地); 0/missing 表示 H-1 未跑
     ('l2_audit_log_ready', '1'),
-    ('l2_h1_migrated', datetime('now', 'localtime'));
+    ('l2_h1_migrated', iso_now());
 
 -- ========================================
 -- 启用 WAL mode + busy_timeout (避免 lock 复发!)

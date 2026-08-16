@@ -71,6 +71,10 @@ def mem(tmp_path, monkeypatch):
         flags=re.IGNORECASE | re.DOTALL,
     )
     try:
+        # [bug fix D1 2026-08-16] Register iso_now() function before running schema.sql
+        from datetime import datetime, timedelta as _td
+        conn.create_function("iso_now", 0, lambda: datetime.now().isoformat(timespec="seconds"))
+        conn.create_function("iso_now_offset", 1, lambda d: (datetime.now() + _td(days=d)).isoformat(timespec="seconds"))
         conn.executescript(sql)
     except Exception as e:
         if "already exists" not in str(e):

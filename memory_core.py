@@ -158,6 +158,27 @@ class MemoryCore:
                 )
                 # 先 exec 其他 DDL (entities/chunks/relations/meta/recall_log/...
                 # task_states/state_transitions + 索引), vec0 单独 exec.
+                # [bug fix D1 2026-08-16] Register Python-side ISO 8601 helpers for
+                # SQL defaults. Pre-fix: `datetime('now', 'localtime')` returns
+                # 'YYYY-MM-DD HH:MM:SS' (space-sep) but Python `now()` returns
+                # 'YYYY-MM-DDTHH:MM:SS' (T-sep) — same instant, different format.
+                # String compare `created_at > now()` lex-says space < T → recent
+                # rows missed by L2 age queries, asof, audit_log etc.
+                # Fix: register `iso_now()` + `iso_now_offset(days)` SQL functions
+                # that return Python-equivalent ISO 8601 with T separator. schema.sql
+                # uses these for new defaults.
+                def _iso_now_local() -> str:
+                    """SQL function: return current local time as ISO 8601 T-sep."""
+                    from memory import now as _now
+                    return _now("local")
+                def _iso_now_offset(days: int) -> str:
+                    """SQL function: return now + N days as ISO 8601 T-sep."""
+                    from datetime import datetime, timedelta
+                    from memory import now as _now
+                    base = datetime.fromisoformat(_now("local"))
+                    return (base + timedelta(days=days)).isoformat(timespec="seconds")
+                self._conn.create_function("iso_now", 0, _iso_now_local)
+                self._conn.create_function("iso_now_offset", 1, _iso_now_offset)
                 try:
                     self._conn.executescript(_sql_no_vec0)
                 except Exception:
@@ -170,6 +191,22 @@ class MemoryCore:
                             logger.warning(f"[8/10] sqlite-vec 不可用 ({type(_e).__name__}: {_e}); 跳过 vec0 虚拟表创建, vector 走 usearch (search_index.py)")
                         else:
                             raise
+        # [bug fix D1 2026-08-16] Also re-register on every conn (idempotent —
+        # create_function on an already-registered name is a no-op). Needed when
+        # a test fixture pre-loads schema.sql via raw sqlite3 (so the schema-load
+        # branch above is skipped) and Memory() opens a fresh conn that has no
+        # iso_now. _migrate_schema's INSERT OR REPLACE meta (uses iso_now() default
+        # from schema.sql) would fail without this.
+        def _iso_now_local2() -> str:
+            from memory import now as _now
+            return _now("local")
+        def _iso_now_offset2(days: int) -> str:
+            from datetime import datetime, timedelta
+            from memory import now as _now
+            base = datetime.fromisoformat(_now("local"))
+            return (base + timedelta(days=days)).isoformat(timespec="seconds")
+        self._conn.create_function("iso_now", 0, _iso_now_local2)
+        self._conn.create_function("iso_now_offset", 1, _iso_now_offset2)
         self._migrate_schema()
 
         # [zvec 集成] SearchIndex 适配器 (DESIGN §3.6) — 默认 sqlite_vec,
@@ -1243,7 +1280,7 @@ class MemoryCore:
             self._conn.execute(
                 """
                 INSERT INTO purged_queue (target_id, target_kind, purged_at, done)
-                VALUES (?, ?, datetime('now', '+30 days'), 0)
+                VALUES (?, ?, iso_now_offset(30), 0)
             """,
                 (target_id, target_kind),
             )
