@@ -39,16 +39,43 @@ _MENTION_TAG_RE = _re.compile(r"#([\w\-]{1,50})", _re.UNICODE)
 
 
 def _fts_escape_query(query: str) -> str:
-    """[8/16 E-2 重启] FTS5 MATCH query 安全转义.
+    """[8/16 E-2 重启 + bug fix C1 2026-08-16] FTS5 MATCH query 安全转义.
 
-    防止 query 中引号 / 双引号触发 FTS5 syntax error
-    (上轮 P1 #66 实战报错).
+    Pre-fix: only escaped `"` → queries with `*`, `(`, `)`, `:`, `^`, `+`, `-`,
+    `NEAR/AND/OR/NOT` keywords triggered FTS5 syntax error → caller catches
+    `sqlite3.OperationalError` and silently falls back to LIKE-only (no BM25
+    ranking) → recall quality regression for any query with FTS5 special chars
+    (e.g. `Python (async)`, `file*.py`, `title:Python`).
 
-    规则: 转义 " 为 "" \u3002其他 FTS5 特欧字符 ( · 又 未 反 为 语义的都不修改.
+    Post-fix: strip ALL FTS5 syntax-significant characters, keep word tokens +
+    Chinese chars (unicode61 tokenizer handles natively).
+
+    What we strip (FTS5 syntax chars per https://www.sqlite.org/fts5.html#fts5_strings):
+      - "   double quote (phrase boundary)
+      - ( ) parens (grouping)
+      - *   asterisk (prefix match)
+      - :   colon (column filter)
+      - ^   caret (first-position boost)
+      - + - plus/minus (required/excluded terms)
+      - ,   comma (NEAR distance separator)
+    What we keep:
+      - ASCII word chars (a-z, A-Z, 0-9, _)
+      - Chinese chars (unicode > 127 — unicode61 tokenizer handles natively)
+      - whitespace (preserved as token separator)
+
+    Examples:
+      "Python (async)"   → "Python  async "
+      "file*.py"         → "file.py"
+      "title:Python"     → "title Python"
+      'hello "world"'    → "hello  world "
     """
     if not query:
         return ""
-    return query.replace(chr(34), chr(34) + chr(34))
+    # FTS5 special chars to strip. Use a translation table for O(n) replace.
+    _FTS5_SPECIAL = str.maketrans("", "", '"()* :^,+-')
+    # Collapse multi-spaces to single space; strip leading/trailing whitespace
+    cleaned = query.translate(_FTS5_SPECIAL)
+    return " ".join(cleaned.split())
 
 
 def _fts_sync_upsert(conn, chunk_rowid: int, content: str, source: str, session_id: str) -> None:
