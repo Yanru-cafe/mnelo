@@ -226,15 +226,22 @@ def _call_tool(name: str, args: Dict) -> str:
 
 from mcp_guard import (
     _MCP_AVAILABLE,
-    AnyUrl,
-    ListResourcesRequest,
-    ReadResourceRequest,
-    ReadResourceRequestParams,
     Resource,
     Server,
     TextContent,
     Tool,
-)  # guarded imports
+)
+# mcp 2.x 新 SDK types — 不在 mcp_guard re-export 里, 直接 import
+from mcp.types import (
+    CallToolRequestParams,
+    CallToolResult,
+    ListResourcesResult,
+    ListToolsResult,
+    PaginatedRequestParams,
+    ReadResourceRequestParams,
+    ReadResourceResult,
+    TextResourceContents,
+)
 
 # [refactor 2026-08-12] cross-module: handlers + definitions
 from mcp_tool_definitions import (  # noqa: F401  cross-module
@@ -255,63 +262,91 @@ DEFAULT_SSE_HOST = "127.0.0.1"  # P2-1: loopback-only fallback
 DEFAULT_SSE_PORT = 8086  # SSE é»è®¤ç«¯å£ fallback (config ä¼å)
 
 if _MCP_AVAILABLE:
-    server = Server("mnelo")
-
-    # MCP echo â visual marker (ð³) so agent + ä¸»äºº can distinguish mnelo
-    # operations from Hermes `memory` tool (ð§ ). Set MNELO_ECHO=0 to disable.
-    _ECHO = "ð³"
+    # MCP echo — visual marker (🌳) so agent + 主人 can distinguish mnelo
+    # operations from Hermes `memory` tool (🧠). Set MNELO_ECHO=0 to disable.
+    _ECHO = "🌳"
     _ECHO_LABEL = "mnelo"
-
-    @server.list_tools()
-    async def list_tools() -> List[Tool]:
-        return [Tool(**t) for t in TOOLS]
 
     _DIGEST_URI = "memory://session/digest"
 
-    @server.list_resources()
-    async def list_resources() -> List[Resource]:
-        if not config.digest_inject_on_initialize:
-            return []
-        return [
-            Resource(
-                uri=AnyUrl(_DIGEST_URI),
-                name="Session digest",
-                description="Currently cached å¸¸é©»æè¦ (memory_get_digest, ref=None).",
-                mimeType="text/plain",
-            )
-        ]
+    # ===== mcp 2.x SDK: handlers 通过 Server(name, on_*) 注册 =====
+    # handler 签名: async def(ctx, params) -> ResultType
 
-    @server.read_resource()
-    async def read_resource(uri: AnyUrl) -> str:
-        if str(uri) != _DIGEST_URI:
-            raise ValueError(f"unknown resource uri: {uri}")
+    async def _list_tools_handler(ctx, params: PaginatedRequestParams | None) -> ListToolsResult:
+        return ListToolsResult(tools=[Tool(**t) for t in TOOLS])
+
+    async def _list_resources_handler(ctx, params: PaginatedRequestParams | None) -> ListResourcesResult:
         if not config.digest_inject_on_initialize:
-            raise ValueError(f"resource disabled: {uri}")
+            return ListResourcesResult(resources=[])
+        return ListResourcesResult(resources=[
+            Resource(
+                uri=_DIGEST_URI,  # str (mcp 2.x Resource.uri 是 str, 不再 AnyUrl)
+                name="Session digest",
+                description="Currently cached 常驻摘要 (memory_get_digest, ref=None).",
+                mime_type="text/plain",
+            )
+        ])
+
+    async def _read_resource_handler(ctx, params: ReadResourceRequestParams) -> ReadResourceResult:
+        uri_str = str(params.uri)
+        if uri_str != _DIGEST_URI:
+            raise ValueError(f"unknown resource uri: {params.uri}")
+        if not config.digest_inject_on_initialize:
+            raise ValueError(f"resource disabled: {params.uri}")
         try:
             target = _get_mem()
             digest = target.get_digest()
         except Exception:
             logger.exception("digest resource read failed")
-            return ""
-        if not digest.get("enabled"):
-            return ""
-        return digest.get("content", "") or ""
+            text = ""
+        else:
+            if not digest.get("enabled"):
+                text = ""
+            else:
+                text = digest.get("content", "") or ""
+        return ReadResourceResult(contents=[
+            TextResourceContents(uri=str(params.uri), text=text, mime_type="text/plain")
+        ])
 
-    # [mcp v1.26 SDK bug] server.read_resource() decorator expects either
-    # str/bytes (deprecated) or Iterable[ReadResourceContents]. The SDK then
-    # reads `content_item.content`, which the public TextResourceContents class
-    # does not expose (its field is `text`). Returning a list of MCP types
-    # would hit this gap; we fall back to the deprecated str form, which still
-    # works and is what mcp currently tolerates. The accompanying
-    # DeprecationWarning is suppressed at test time via
-    # `tests/conftest.py::pytest_configure`.
+    async def _call_tool_handler(ctx, params: CallToolRequestParams) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
+        result_json = _call_tool(name, arguments)
+        echo = _build_echo(name, arguments, result_json)
+        blocks: List[TextContent] = []
+        if echo:
+            blocks.append(TextContent(type="text", text=echo))
+        blocks.append(TextContent(type="text", text=result_json))
+        # [v0.81.7 P1-1 review fix] MCP spec compliance: signal tool errors via is_error=True.
+        # _call_tool returns {"error": ..., "type": "validation|rate_limit|hidden_tool|internal"}
+        # on failure; without this parse, client treats error as success and parses
+        # chunk_id out of error JSON (silent failure).
+        is_error = False
+        try:
+            data = json.loads(result_json)
+            if isinstance(data, dict) and "error" in data:
+                is_error = True
+        except Exception:
+            pass
+        return CallToolResult(content=blocks, is_error=is_error)
 
-    def _list_resources():
-        return server.request_handlers[ListResourcesRequest](ListResourcesRequest())
+    server = Server(
+        "mnelo",
+        on_list_tools=_list_tools_handler,
+        on_call_tool=_call_tool_handler,
+        on_list_resources=_list_resources_handler,
+        on_read_resource=_read_resource_handler,
+    )
 
-    def _read_resource(uri):
-        req = ReadResourceRequest(params=ReadResourceRequestParams(uri=AnyUrl(uri)))
-        return server.request_handlers[ReadResourceRequest](req)
+    # ===== Test helpers (tests/test_initialize_inject.py 直接 asyncio.run 调) =====
+
+    async def _list_resources():
+        return await _list_resources_handler(None, None)
+
+    async def _read_resource(uri):
+        # mcp 2.x ReadResourceRequestParams.uri 是 str, 不再 AnyUrl
+        uri_str = str(uri) if not isinstance(uri, str) else uri
+        return await _read_resource_handler(None, ReadResourceRequestParams(uri=uri_str))
 
     # [audit fix 2.1+2.2 2026-08-16] 抽 _ECHO_BUILDERS 字典 + _g() helper
     # 原 18 if-branch (lines 307-420) 全部替为 dict dispatch, ~80 行重复消除.
@@ -597,15 +632,8 @@ if _MCP_AVAILABLE:
         # Fallback for unknown shape
         return f"{_ECHO} {_ECHO_LABEL}    {name}  (ok)"
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: Dict) -> List[TextContent]:
-        result_json = _call_tool(name, arguments)
-        echo = _build_echo(name, arguments or {}, result_json)
-        blocks: List[TextContent] = []
-        if echo:
-            blocks.append(TextContent(type="text", text=echo))
-        blocks.append(TextContent(type="text", text=result_json))
-        return blocks
+    # [v0.81.7 P1-3 review fix] Old @server.call_tool() decorator removed in 89a0ac7;
+    # replaced by on_call_tool=_call_tool_handler (mcp SDK 2.x Server constructor API).
 
 
 # === å¯å¨å¥å£ ===

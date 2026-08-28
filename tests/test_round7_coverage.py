@@ -93,9 +93,11 @@ class TestValidateIdFormatMismatch:
     """validation.py:124 — invalid chars after coercion → format error."""
 
     def test_validate_id_invalid_chars_raises(self):
-        """Special chars not in [a-zA-Z0-9_:.\\-] → rejected."""
+        """[8/16 patch] 空格 / / 现在被接受 (unicode ID 扩), 用 ';' / 反引号 等仍拒字符验证.
+        主人清理 fixture 时撞限制, 扩 _ID_RE 到 unicode + / + 空格.
+        """
         with pytest.raises(validation_mod.ValidationError, match='format mismatch'):
-            validation_mod.validate_id('id with space')
+            validation_mod.validate_id('id;with;semicolon')  # SQL injection 仍拒
 
     def test_validate_id_too_long_raises(self):
         """Length exceeds MAX_ID_LEN → rejected."""

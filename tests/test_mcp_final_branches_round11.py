@@ -127,31 +127,44 @@ class TestCallToolGenericExceptionCaught:
         assert data.get("type") in ("validation", "internal")
 
 
-class TestListToolsDecorator:
-    """mcp_server.py:420 — list_tools MCP decorator (if MCP available)."""
+class TestListToolsHandler:
+    """mcp_tool_dispatcher._list_tools_handler (v0.81.7 mcp 2.x SDK).
+
+    Old TestListToolsDecorator class tested `@server.list_tools()` decorator
+    wrapper which was removed in 89a0ac7 (mcp SDK 1.13 → 2.1.1 migration).
+    New handler signature: async def(ctx, params) -> ListToolsResult.
+    """
 
     def test_list_tools_returns_list(self):
-        """list_tools() returns Tool objects (call directly via module attr)."""
+        """_list_tools_handler returns ListToolsResult with non-empty Tool list."""
         if not _mcp_repo._MCP_AVAILABLE:
             pytest.skip("MCP not available")
-        tools = asyncio.run(_mcp_repo.list_tools())
-        assert isinstance(tools, list)
-        assert len(tools) > 0
+        result = asyncio.run(_mcp_repo._list_tools_handler(None, None))
+        assert hasattr(result, "tools"), "ListToolsResult must expose .tools"
+        assert isinstance(result.tools, list)
+        assert len(result.tools) > 0
 
 
-class TestCallToolDecorator:
-    """mcp_server.py:424-426 — call_tool MCP decorator."""
+class TestCallToolHandler:
+    """mcp_tool_dispatcher._call_tool_handler (v0.81.7 mcp 2.x SDK).
 
-    def test_call_tool_via_decorator(self, mem):
-        """call_tool() async wrapper returns List[TextContent]."""
+    Old TestCallToolDecorator class tested `@server.call_tool()` decorator
+    wrapper which was removed in 89a0ac7. New handler returns CallToolResult
+    (with content=[TextContent, ...], optional is_error=True for tool errors).
+    """
+
+    def test_call_tool_via_handler(self, mem):
+        """_call_tool_handler returns CallToolResult with non-empty content."""
         if not _mcp_repo._MCP_AVAILABLE:
             pytest.skip("MCP not available")
-        result = asyncio.run(_mcp_repo.call_tool("memory_stats", {}))
-        # Should return List[TextContent]
-        assert isinstance(result, list)
-        assert len(result) >= 1
+        from mcp.types import CallToolRequestParams
+        params = CallToolRequestParams(name="memory_stats", arguments={})
+        result = asyncio.run(_mcp_repo._call_tool_handler(None, params))
+        assert hasattr(result, "content"), "CallToolResult must expose .content"
+        assert isinstance(result.content, list)
+        assert len(result.content) >= 1
         # TextContent has 'text' attr
-        assert hasattr(result[0], "text")
+        assert hasattr(result.content[0], "text")
 
 
 class TestRunStdio:

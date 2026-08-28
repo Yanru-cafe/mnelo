@@ -95,11 +95,11 @@ class MneloClient:
             if self.transport == 'sse':
                 from mcp.client.sse import sse_client
                 return ClientSession, sse_client
-            # streamable_http_client (新名; 旧名 streamablehttp_client 已弃用)
+            # mcp 2.x: streamable_http_client (新名; 旧名 streamablehttp_client 已弃用)
             from mcp.client.streamable_http import streamable_http_client
             return ClientSession, streamable_http_client
-        except ImportError:
-            raise RuntimeError('MCP 客户端库不可用, 请先: pip install mcp[cli]')
+        except ImportError as e:
+            raise RuntimeError(f'MCP 客户端库不可用: {e}; 请先: pip install mcp[cli]')
 
     def _call(self, tool_name: str, arguments: Dict) -> Any:
         """: MCP 连接 + 调用 + 关闭, [P2+ #5 7/18] 加重试防 cold-start race."""
@@ -129,12 +129,16 @@ class MneloClient:
             import httpx
             async with httpx.AsyncClient(headers=headers,
                                          timeout=httpx.Timeout(self.timeout)) as http_client:
-                # 新 API yield (read, write, session_id_fn) 三元组.
-                async with client_factory(self.url, http_client=http_client) as (r, w, *_):
+                # [v0.81.7 P2-4 review fix] 新 streamable_http_client 严格 yield 2 元组
+                # (read_stream, write_stream); 旧版本 yield 3 含 session_id_fn.
+                # 不需要 star-unpack 防御.
+                async with client_factory(self.url, http_client=http_client) as (r, w):
                     return await self._run_session(ClientSession, r, w, tool_name, arguments)
         # legacy SSE (和旧 streamablehttp_client) — 直接收 headers/timeout.
+        # [v0.81.7 P2-4 review fix v2] sse_client 也 yield 2 元组 (read, write),
+        # 不是 3 元组. 不需要 star-unpack 防御.
         async with client_factory(self.url, headers=headers or None,
-                                  timeout=self.timeout) as (r, w, *_):
+                                  timeout=self.timeout) as (r, w):
             return await self._run_session(ClientSession, r, w, tool_name, arguments)
 
     async def _run_session(self, ClientSession, r, w, tool_name: str, arguments: Dict) -> Any:
