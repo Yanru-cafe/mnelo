@@ -308,8 +308,11 @@ class TestMCPConstants:
         for tool in expected:
             assert tool in _mcp_repo._TOOL_REGISTRY
 
-    def test_custom_handlers_has_3_entries(self):
-        assert len(_mcp_repo._CUSTOM_HANDLERS) == 3
+    def test_custom_handlers_has_1_entry(self):
+        """[§1.2 #5 P1 #92 fix] · · _CUSTOM_HANDLERS 只保留 entity_resolve (特殊 difflib)· list_entities + search_relations 走 _handle_simple.
+        原老 3 entries 已重构为 _handle_simple 路径·续保验证仅 entity_resolve 在 _CUSTOM_HANDLERS。
+        """
+        assert len(_mcp_repo._CUSTOM_HANDLERS) == 1
         assert "memory_entity_resolve" in _mcp_repo._CUSTOM_HANDLERS
-        assert "memory_list_entities" in _mcp_repo._CUSTOM_HANDLERS
-        assert "memory_search_relations" in _mcp_repo._CUSTOM_HANDLERS
+        assert "memory_list_entities" not in _mcp_repo._CUSTOM_HANDLERS
+        assert "memory_search_relations" not in _mcp_repo._CUSTOM_HANDLERS

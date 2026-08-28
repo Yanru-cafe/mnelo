@@ -33,20 +33,20 @@ def test_initialize_does_not_register_digest_resource_by_default(monkeypatch):
     monkeypatch.setattr(mcp_server.config, "digest_inject_on_initialize", False)
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_mem_instance", _mem_with_digest("identity: 2077 Ling"))
     result = asyncio.run(_list_resources())
-    assert "memory://session/digest" not in {str(r.uri) for r in result.root.resources}
+    assert "memory://session/digest" not in {str(r.uri) for r in result.resources}
 
 
 def test_initialize_registers_digest_resource_when_enabled(monkeypatch):
     monkeypatch.setattr(mcp_server.config, "digest_inject_on_initialize", True)
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_mem_instance", _mem_with_digest("identity: 2077 Ling"))
     result = asyncio.run(_list_resources())
-    assert any(str(r.uri) == "memory://session/digest" for r in result.root.resources)
+    assert any(str(r.uri) == "memory://session/digest" for r in result.resources)
 
 
 def test_digest_resource_text_returns_digest(monkeypatch):
     monkeypatch.setattr(mcp_server.config, "digest_inject_on_initialize", True)
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_mem_instance", _mem_with_digest("identity: 2077 Ling"))
-    contents = asyncio.run(_read_resource("memory://session/digest")).root.contents
+    contents = asyncio.run(_read_resource("memory://session/digest")).contents
     text = "\n".join(getattr(c, "text", "") or getattr(c, "blob", "") for c in contents)
     assert "2077 Ling" in text
 
@@ -63,7 +63,7 @@ def test_digest_resource_typed_uri_accepted(monkeypatch):
 
     monkeypatch.setattr(mcp_server.config, "digest_inject_on_initialize", True)
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_mem_instance", _mem_with_digest("identity: 2077 Ling"))
-    contents = asyncio.run(_read_resource(AnyUrl("memory://session/digest"))).root.contents
+    contents = asyncio.run(_read_resource(AnyUrl("memory://session/digest"))).contents
     text = "\n".join(getattr(c, "text", "") or getattr(c, "blob", "") for c in contents)
     assert "2077 Ling" in text
 
@@ -77,6 +77,6 @@ def test_digest_resource_swallows_init_errors(monkeypatch, caplog):
 
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_mem_instance", None)
     monkeypatch.setattr(sys.modules["mcp_tool_dispatcher"], "_get_mem", lambda: BoomMemory())
-    contents = asyncio.run(_read_resource("memory://session/digest")).root.contents
+    contents = asyncio.run(_read_resource("memory://session/digest")).contents
     text = "\n".join(getattr(c, "text", "") or getattr(c, "blob", "") for c in contents)
     assert text == ""

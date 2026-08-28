@@ -138,40 +138,35 @@ class TestMCPServerHandlers:
     """[Round 3] mcp_server sub-handler functions"""
 
     def test_handle_list_entities(self, mem, clean_prefix):
-        """mcp_server._handle_list_entities 测 (line 319-332)"""
-        from mcp_server import _handle_list_entities
-
-        # 建几个 entity
+        """P1 92 fix: route list_entities via _call_tool."""
+        from mcp_server import _mcp_repo
         for i in range(3):
             mem._conn.execute(
                 "INSERT INTO entities (id, kind, name, summary, importance, source, valid_from, valid_until) VALUES (?, 'test_kind', ?, 'summary', ?, 'test_cov', ?, NULL)",
                 (f"{clean_prefix}_{i}", f"entity_{i}", 0.5 + i * 0.1, "2026-07-19T00:00:00"),
             )
         mem._conn.commit()
-        result = _handle_list_entities(mem, {"kind": "test_kind", "limit": 10})
+        result = _mcp_repo._call_tool("memory_list_entities", {"kind": "test_kind", "limit": 10})
         data = json.loads(result)
         assert "entities" in data
         assert data["count"] >= 3
 
     def test_handle_list_entities_with_min_importance(self, mem, clean_prefix):
-        from mcp_server import _handle_list_entities
-
-        # import 0.3, 0.7
+        from mcp_server import _mcp_repo
         for imp in (0.3, 0.7):
             mem._conn.execute(
                 "INSERT INTO entities (id, kind, name, importance, source, valid_from, valid_until) VALUES (?, 'test_imp', ?, ?, 'test_cov', ?, NULL)",
                 (f"{clean_prefix}_imp_{int(imp * 10)}", f"name_{int(imp * 10)}", imp, "2026-07-19T00:00:00"),
             )
         mem._conn.commit()
-        # min_importance=0.5 应只返 0.7
-        result = _handle_list_entities(mem, {"kind": "test_imp", "min_importance": 0.5, "limit": 10})
+        result = _mcp_repo._call_tool("memory_list_entities", {"kind": "test_imp", "min_importance": 0.5, "limit": 10})
         data = json.loads(result)
         for ent in data["entities"]:
             assert ent["importance"] >= 0.5
 
     def test_handle_search_relations(self, mem, clean_prefix):
-        """mcp_server._handle_search_relations 测 (line 346-362)"""
-        from mcp_server import _handle_search_relations
+        """P1 92 fix: route via _call_tool"""
+        from mcp_server import _mcp_repo
 
         # 建一个 relation
         mem._conn.execute(
@@ -185,7 +180,7 @@ class TestMCPServerHandlers:
         mem.relate(f"{clean_prefix}_src", f"{clean_prefix}_tgt", "owns_relation", weight=0.9)
         mem._conn.commit()
 
-        result = _handle_search_relations(mem, {"relation": "owns_relation", "limit": 5})
+        result = _mcp_repo._call_tool("memory_search_relations", {"relation": "owns_relation", "limit": 5})
         data = json.loads(result)
         assert "relations" in data
         assert data["count"] >= 1
@@ -380,7 +375,7 @@ class TestRunSSEEntryPoints:
             run_sse(host="127.0.0.1", port=9999, auth_token="x")
 
     def test_run_sse_port_in_use_exits_cleanly(self, monkeypatch):
-        """_check_port_available=False → 静默 return"""
+        """_check_port_available=False means silent return"""
         # [8/14 P1 fix] PEP 562 facade setattr doesn't work on modules. mcp_transports.run_sse
         # uses `mcp_transports._check_port_available` (value-binding via `from` import) —
         # patch mcp_transports module directly so the binding ref sees the mock.
