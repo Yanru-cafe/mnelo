@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.7.1 — 2026-08-29
+
+fix: vector index drift + test fixture cleanup + zvec launchd probe doc (8/29 maintenance)
+
+Three ops scripts + plist comment update, all manual maintenance paths for production hygiene:
+
+- **`scripts/rebuild_vectors.py`** (new): backfill missing vectors into the search index. Use when
+  `memory_stats` reports `vectors << chunks.active` (e.g. after a partial test run, or after
+  deleting chunks without re-indexing). Includes `--wipe-and-rebuild` for full rebuild from scratch.
+  Uses `col.stats.doc_count` instead of `iter_all()` because zvec 0.6.0 has no enumeration API
+  (workaround for the silent-fail bug in `search_index.py:cleanup_orphans`).
+- **`scripts/cleanup_test_fixtures.py`** (new): soft-delete leftover test entities + chunks that
+  pollute production recall (e.g. `host:test_crud_*_TestMemoryCRUD_sh600089`, `loop:m5-forget-*`,
+  `chunk:e2e-*`). Idempotent + audit_log entries + 30-day `purged_queue` grace.
+- **`scripts/launchd/ai.mnelo.mcp.plist`** (comment + key update): refresh 8/6 stale comment about
+  zvec_available() (was misleading — it works on Apple Silicon M-series, sysctl AVX2 oids return
+  empty but import probe succeeds). Add explicit `MNELO_MEMORY_SEARCH_BACKEND=zvec` env var so the
+  backend is unambiguous across reinstalls.
+
 ## v1.7.0 — 2026-08-29
 
 fix: PR-D P1 follow-up (validation error message sync + CHANGELOG gap) + 5 PR chain (#14-#17)

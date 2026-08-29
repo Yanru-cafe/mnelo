@@ -44,9 +44,21 @@ mnelo MCP server — launchd plist 模板.
              Plist 不传 --port 让 argparse 走 config.server_port. -->
         <key>MNELO_MEMORY_SERVER_PORT</key>
         <string>8086</string>
-        <!-- [8/6] 切 zvec (zvec_available() debug 阶段, 失败会回落到 usearch).
-             shell 手动跑 import zvec OK, MCP launchd 子进程 zvec_available()
-             暂返 False, 主人后续 deploy 时再切 zvec 验证. -->
+        <!-- [2026-08-29 update] zvec is in production. zvec_available() works:
+             - sysctl AVX2 oids return empty on Apple Silicon M-series (no AVX2
+               oids at all — they're x86_64 oids), so _cpu_has_avx2() returns
+               None on ARM64. None falls through to import zvec probe, which
+               succeeds (zvec 0.6.0 supports ARM64 natively, AVX2 not required).
+             - Result: zvec is used; vectors count = active chunks
+               (matched 2026-08-29 after running scripts/rebuild_vectors.py with
+               --wipe-and-rebuild).
+             KNOWN ISSUE: search_index.py uses iter_all() which doesn't exist
+             on zvec 0.6.0 — cleanup_orphans() fails silently (try/except
+             returns 0). Workaround: rebuild_vectors.py uses col.stats.doc_count
+             instead. Don't switch to 'auto' — that would force fallback to
+             usearch (stale). Keep 'zvec' explicit. -->
+        <key>MNELO_MEMORY_SEARCH_BACKEND</key>
+        <string>zvec</string>
         <!-- [7/19 P1-7 fix] 去掉显式 PATH, 让 launchd 自动从 VIRTUAL_ENV prepend venv bin.
              之前的 PATH 包含 /Users/apple/hermes-agent/venv/bin (world-readable),
              任何本地 user 可以丢恶意 python3 shim → RCE on next kickstart. -->
