@@ -53,7 +53,7 @@ def test_m29_1_setup_prefix_matches_actual_ids():
         m.close()
 
     # 2. 跑 test_m5_4 的 _setup (复用其 fixture)
-    from tests.test_m5_4_e2e_purchase import _setup as e2e_setup
+    from test_m5_4_e2e_purchase import _setup as e2e_setup
 
     e2e_setup()
 
@@ -97,7 +97,7 @@ def test_m29_1b_setup_cleans_chunks_not_just_entities():
         c.close()
 
     # 跑 e2e setup
-    from tests.test_m5_4_e2e_purchase import _setup as e2e_setup
+    from test_m5_4_e2e_purchase import _setup as e2e_setup
 
     e2e_setup()
 
