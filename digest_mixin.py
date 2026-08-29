@@ -75,6 +75,32 @@ class DigestMixin:
                    VALUES (?, ?, 'digest', NULL, ?, 1.0, 'fact', ?, NULL)""",
                 (new_id, text, ts, metadata),
             )
+            # [2026-08-29 fix] digest path bypasses memory_remember, so self._index.add
+            # never gets called → digest chunks accumulate as orphan chunks with no vectors.
+            # Fix: embed + add to search index immediately after the INSERT. Same call
+            # memory_remember would make (memory_core.py:572). Keep digest in sync with
+            # the vector lane so recall actually surfaces recent digest content.
+            try:
+                from embedder import embed_bytes
+                v_bytes = embed_bytes(text)
+                self._index.add(
+                    new_id, v_bytes,
+                    conn=self._conn,
+                    content=text,
+                    memory_type="fact",
+                    source="digest",
+                )
+            except Exception as idx_exc:
+                # Don't fail digest on index error — the chunk is already in DB.
+                # Surface as warning so /tmp/yanru-reply-style triage can spot drift.
+                logger.warning(f"[rebuild_digest] vector index add failed for {new_id}: {idx_exc}")
+            if old_id:
+                # [2026-08-29 fix] Mirror the same fix for the OLD digest: mark
+                # superseded + drop its vector so chunk.active stays in sync with vectors.
+                try:
+                    self._index.remove(old_id, conn=self._conn)
+                except Exception as rm_exc:
+                    logger.warning(f"[rebuild_digest] vector index remove failed for {old_id}: {rm_exc}")
             if old_id:
                 cur_meta = self._exec_clean("SELECT metadata_json FROM chunks WHERE id = ?", (old_id,)).fetchone()
                 m: Dict[str, Any] = {}
