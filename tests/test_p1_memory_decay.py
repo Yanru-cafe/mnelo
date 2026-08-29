@@ -176,7 +176,7 @@ class TestApplyDecayToHits:
             {"chunk_id": "old", "rrf_score": 0.5},
             {"chunk_id": "recent", "rrf_score": 0.5},
         ]
-        out = _call_decay(results, conn=conn, now=now) if False else _call_decay(results, conn=conn, now_iso=now)
+        out = _call_decay(results, conn=conn, now_iso=now)
         # recent 应该排前面
         assert out[0]["chunk_id"] == "recent"
         assert out[1]["chunk_id"] == "old"

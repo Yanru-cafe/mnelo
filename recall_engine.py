@@ -1113,7 +1113,7 @@ class RecallEngine:
                 "method": r.get("method"),  # backward-compat: 第一路
                 "methods": r.get("methods", [r.get("method")] if r.get("method") else []),
                 "distance": r.get("distance"),  # 0.0-2.0 越小越相似 (vector_only)
-                "rrf_score": r.get("rrf_score"),  # RRF 融合分数 (rrf strategy)
+                "rrf_score": r.get("rrf_score"),  # RRF 融合分数 (rrf strategy), P1 decay 后是 recency-scaled
                 "importance": r.get("importance"),
             }
             for i, r in enumerate(results[:5])  # top-5
@@ -1202,9 +1202,7 @@ class RecallEngine:
         """
         if idle_hours < 0:
             idle_hours = 0.0
-        half_life = RecallEngine._MEMORY_TYPE_DECAY_HALF_LIFE_HOURS.get(
-            memory_type or "", RecallEngine._DEFAULT_DECAY_HALF_LIFE_HOURS
-        )
+        half_life = RecallEngine._MEMORY_TYPE_DECAY_HALF_LIFE_HOURS.get(memory_type or "", RecallEngine._DEFAULT_DECAY_HALF_LIFE_HOURS)
         if half_life == float("inf"):
             # procedure / 永久: 不衰减, factor 恒为 1.5
             return 1.5
